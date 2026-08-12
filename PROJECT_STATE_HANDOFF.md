@@ -1,6 +1,6 @@
 # Silent Confidant — Project State Handoff
 
-Last updated: end of Phase 3D Stage 1 (commit `2d6389a`).
+Last updated: end of Phase 3D Stage 2 (commit `ff6debd`).
 
 ## Completed State
 
@@ -17,10 +17,17 @@ Last updated: end of Phase 3D Stage 1 (commit `2d6389a`).
 - Silence detection reuses `isSilentTranscript()`, newly exported from `services/notes/noteManager.ts` (was a private regex used only for voice notes) — both the note-recording flow and the chat voice-query flow now agree on what counts as "Whisper heard nothing" instead of drifting independently.
 - Lifecycle safety: a `useFocusEffect` cleanup (via a `recorderRef` to avoid re-running on every render, since `useVoiceRecorder()` returns a new object each render) stops any in-progress recording if the user navigates away from the Chat tab mid-recording.
 
+**Phase 3D Stage 2 — Hands-Free Text-to-Speech Output**
+- `expo-speech` installed (native module — has `android`/`ios` folders, so like `op-sqlite`'s FTS5 flag earlier, it requires a native rebuild — `npx expo prebuild --clean` + rebuild, or a fresh dev-client build — before `Speech.speak()` actually works on-device; `tsc`/`expo export` only validate JS/bundling, not native linkage).
+- `services/audio/tts.ts` (new): `sanitizeTextForSpeech(text)` strips fenced/inline code, `[Note N]` citation chips, markdown headers, and bold/italic markers before narration. `speakText(text, options?)` sanitizes then always calls `stopSpeech()` first — same single-instance principle as `services/audio/player.ts`, so TTS utterances can never overlap each other. `stopSpeech()` wraps `Speech.stop()` and is safe to call when nothing is speaking.
+- **Audio focus management (single active audio source, app-wide)**: `services/audio/player.ts`'s `playUri()` now calls `stopSpeech()` before loading any note recording, so tapping play on a note interrupts TTS narration. `app/chat.tsx` calls `stopSpeech()` before starting a new voice recording and before sending any new message (text or voice) — a new question always interrupts the assistant reading a previous answer.
+- `app/chat.tsx`: `speakingMessageId: string | null` tracks which specific assistant bubble is being narrated (not a bare boolean — needed since replaying an older message while a newer one's `onDone` callback is still pending must not clobber the newer message's state). Auto-reads every completed RAG answer via `playMessageSpeech()` (shared by both auto-read and the manual toggle, so they can't drift). Each assistant bubble gets a "🔊 Listen" / "⏹ Stop" toggle button.
+- Lifecycle safety: extended the *existing* recording-cleanup `useFocusEffect` (rather than adding a second, redundant effect) to also call `stopSpeech()` on blur/unmount, so navigating away from Chat stops narration immediately — this gives Silent Confidant genuine hands-free/driving-mode capability: ask by voice, get an answer read aloud, with playback correctly yielding to notes/recording/new questions and cutting off the instant you leave the screen.
+
 ## Architecture Integrity
 
 - `npx tsc --noEmit` — clean, zero errors, verified after every increment across this whole project.
-- `npx expo export --platform android` — bundles clean (1342 modules as of this commit).
+- `npx expo export --platform android` — bundles clean (1346 modules as of this commit).
 - **Hybrid note search**: `hybridSearchNotes()` in `services/notes/noteManager.ts` fuses sqlite-vec cosine-distance ranking with FTS5 keyword ranking via reciprocal rank fusion, filtered to `status = 'embedded'` and Whisper-noise-filtered. This is the *only* search path now — the old vector-only `searchNotes()` was removed; both the Notes tab search bar and RAG chat retrieval go through the same function.
 - **Native op-sqlite/FTS5**: `db/client.ts` degrades gracefully (`isFtsAvailable()`) if the linked native build wasn't compiled with FTS5 (`op-sqlite.fts5: true` in `package.json` requires a native rebuild — `npx expo prebuild --clean` + rebuild — to take effect, not just a JS/Metro change). `note_embeddings` (sqlite-vec) has no explicit primary key and relies on `rowid`, joined against `notes.rowid`; `notes_fts` is an FTS5 external-content table kept in sync by triggers using the special `('delete', ...)` command (a plain `DELETE`/`UPDATE` trigger doesn't work correctly against external-content FTS5 tables).
 - **Known environment quirk**: this dev machine's only JDK (25, JetBrains Runtime) is too new for the current Android Gradle Plugin's native CMake step. A working JDK 17 was already auto-provisioned by Gradle at `~/.gradle/jdks/eclipse_adoptium-17-amd64-windows.2` — point `JAVA_HOME` at it for any future native (`gradlew`) build rather than the system default.
@@ -28,5 +35,5 @@ Last updated: end of Phase 3D Stage 1 (commit `2d6389a`).
 
 ## Next Objective
 
-1. **Phase 3D Stage 2 — Hands-Free Text-to-Speech Output** (executing now in this session): `expo-speech` integration, `services/audio/tts.ts` sanitizer + speak/stop wrapper, auto-read on RAG response completion, per-bubble speaker toggle, lifecycle-safe `stopSpeech()` on navigation away.
+1. **Native rebuild required before further on-device testing of TTS**: `expo-speech`'s native module isn't linked into the currently-built dev client yet (installed via `npx expo install` only, no rebuild performed this session). Run `npx expo prebuild --clean` + rebuild (mirroring the earlier FTS5 native-rebuild process) before verifying Stage 2 end-to-end on the emulator.
 2. **Phase 4 — Local On-Device Models**: not yet started or scoped.
