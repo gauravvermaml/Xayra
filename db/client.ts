@@ -117,38 +117,6 @@ async function createCoreTables(db: DB): Promise<void> {
     }
   }
 
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS entities (
-      id TEXT PRIMARY KEY NOT NULL,
-      name TEXT NOT NULL,
-      type TEXT NOT NULL,
-      note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
-      created_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-  `);
-  await db.execute(
-    "CREATE INDEX IF NOT EXISTS entities_note_id_idx ON entities(note_id);"
-  );
-
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS relationships (
-      id TEXT PRIMARY KEY NOT NULL,
-      source_entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-      target_entity_id TEXT NOT NULL REFERENCES entities(id) ON DELETE CASCADE,
-      label TEXT NOT NULL,
-      note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
-      created_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-  `);
-  await db.execute(
-    "CREATE INDEX IF NOT EXISTS relationships_source_entity_id_idx ON relationships(source_entity_id);"
-  );
-  await db.execute(
-    "CREATE INDEX IF NOT EXISTS relationships_target_entity_id_idx ON relationships(target_entity_id);"
-  );
-  await db.execute(
-    "CREATE INDEX IF NOT EXISTS relationships_note_id_idx ON relationships(note_id);"
-  );
 }
 
 /**

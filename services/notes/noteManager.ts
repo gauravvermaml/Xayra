@@ -15,10 +15,6 @@ export type Note = {
   createdAt: number;
 };
 
-export type SearchResult = Pick<Note, "id" | "content" | "createdAt"> & {
-  distance: number;
-};
-
 export class EmptyRecordingError extends Error {
   constructor() {
     super("Recording was too short or empty, please try again");
@@ -247,6 +243,31 @@ export async function listNotes(): Promise<Note[]> {
   }));
 }
 
+/** Fetches a single note by id, or `null` if it doesn't exist (e.g. deleted
+ * out from under a stale reference like a chat citation). */
+export async function getNoteById(id: string): Promise<Note | null> {
+  const db = await getRawDatabase();
+
+  const result = await db.execute(
+    "SELECT id, content, audio_uri, transcript, status, created_at FROM notes WHERE id = ?",
+    [id]
+  );
+
+  const row = result.rows[0];
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id as string,
+    content: row.content as string,
+    audioUri: (row.audio_uri as string | null) ?? null,
+    transcript: (row.transcript as string | null) ?? null,
+    status: row.status as NoteStatus,
+    createdAt: row.created_at as number,
+  };
+}
+
 /**
  * Developer utility: wipes every note, embedding, and FTS row. Used to
  * clear out stale/junk notes (e.g. silence-transcription noise recorded
@@ -275,39 +296,11 @@ export async function purgeAllNotes(): Promise<void> {
   }
 }
 
-/** Ranks stored notes by cosine distance to the query's embedding. */
-export async function searchNotes(
-  query: string,
-  limit = 10
-): Promise<SearchResult[]> {
-  const trimmed = query.trim();
-  if (!trimmed) {
-    return [];
-  }
 
-  const embedding = await generateEmbedding(trimmed);
-  const db = await getRawDatabase();
-
-  const result = await db.execute(
-    `
-      SELECT n.id, n.content, n.created_at, vec_distance_cosine(e.embedding, ?) AS distance
-      FROM note_embeddings e
-      JOIN notes n ON n.rowid = e.rowid
-      ORDER BY distance ASC
-      LIMIT ?
-    `,
-    [JSON.stringify(embedding), limit]
-  );
-
-  return result.rows.map((row) => ({
-    id: row.id as string,
-    content: row.content as string,
-    createdAt: row.created_at as number,
-    distance: row.distance as number,
-  }));
-}
-
-export type HybridSearchResult = Pick<Note, "id" | "content" | "transcript" | "createdAt"> & {
+export type HybridSearchResult = Pick<
+  Note,
+  "id" | "content" | "transcript" | "audioUri" | "createdAt"
+> & {
   score: number;
 };
 
@@ -368,7 +361,7 @@ export async function hybridSearchNotes(
   const embedding = await generateEmbedding(trimmed);
   const vectorResult = await db.execute(
     `
-      SELECT n.id, n.content, n.transcript, n.created_at
+      SELECT n.id, n.content, n.transcript, n.audio_uri, n.created_at
       FROM note_embeddings e
       JOIN notes n ON n.rowid = e.rowid
       WHERE n.status = 'embedded'
@@ -382,7 +375,7 @@ export async function hybridSearchNotes(
   if (await isFtsAvailable()) {
     const ftsResult = await db.execute(
       `
-        SELECT notes.id, notes.content, notes.transcript, notes.created_at
+        SELECT notes.id, notes.content, notes.transcript, notes.audio_uri, notes.created_at
         FROM notes_fts
         JOIN notes ON notes.rowid = notes_fts.rowid
         WHERE notes_fts MATCH ? AND notes.status = 'embedded'
@@ -396,7 +389,10 @@ export async function hybridSearchNotes(
 
   const fused = new Map<
     string,
-    { note: Pick<Note, "id" | "content" | "transcript" | "createdAt">; score: number }
+    {
+      note: Pick<Note, "id" | "content" | "transcript" | "audioUri" | "createdAt">;
+      score: number;
+    }
   >();
 
   const addRanked = (rows: typeof vectorResult.rows) => {
@@ -415,6 +411,7 @@ export async function hybridSearchNotes(
             id,
             content: row.content as string,
             transcript: (row.transcript as string | null) ?? null,
+            audioUri: (row.audio_uri as string | null) ?? null,
             createdAt: row.created_at as number,
           },
           score: contribution,

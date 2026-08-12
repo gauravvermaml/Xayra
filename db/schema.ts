@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 /** Lifecycle of a voice note as it moves through the async processing pipeline. */
 export const NOTE_STATUSES = ["pending", "transcribed", "embedded", "failed"] as const;
@@ -18,47 +18,6 @@ export const notes = sqliteTable("notes", {
     .notNull()
     .default(sql`(unixepoch())`),
 });
-
-export const entities = sqliteTable(
-  "entities",
-  {
-    id: text("id").primaryKey(),
-    name: text("name").notNull(),
-    type: text("type").notNull(),
-    noteId: text("note_id")
-      .notNull()
-      .references(() => notes.id, { onDelete: "cascade" }),
-    createdAt: integer("created_at", { mode: "timestamp" })
-      .notNull()
-      .default(sql`(unixepoch())`),
-  },
-  (table) => [index("entities_note_id_idx").on(table.noteId)]
-);
-
-export const relationships = sqliteTable(
-  "relationships",
-  {
-    id: text("id").primaryKey(),
-    sourceEntityId: text("source_entity_id")
-      .notNull()
-      .references(() => entities.id, { onDelete: "cascade" }),
-    targetEntityId: text("target_entity_id")
-      .notNull()
-      .references(() => entities.id, { onDelete: "cascade" }),
-    label: text("label").notNull(),
-    noteId: text("note_id")
-      .notNull()
-      .references(() => notes.id, { onDelete: "cascade" }),
-    createdAt: integer("created_at", { mode: "timestamp" })
-      .notNull()
-      .default(sql`(unixepoch())`),
-  },
-  (table) => [
-    index("relationships_source_entity_id_idx").on(table.sourceEntityId),
-    index("relationships_target_entity_id_idx").on(table.targetEntityId),
-    index("relationships_note_id_idx").on(table.noteId),
-  ]
-);
 
 /**
  * sqlite-vec virtual table for 1536-dim note embeddings.

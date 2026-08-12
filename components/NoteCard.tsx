@@ -1,5 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
+import { AudioPlayerControls } from "./AudioPlayerControls";
+
 const colors = {
   surface: "#1e293b",
   border: "#334155",
@@ -10,14 +12,17 @@ const colors = {
 
 export type NoteCardProps = {
   content: string;
-  /** Cosine distance from a semantic search match; omitted for the plain notes list. */
-  distance?: number;
+  audioUri?: string | null;
+  /** Reciprocal-rank-fusion score from hybrid search (higher = better); omitted for the plain notes list. */
+  score?: number;
+  /** Opens the full note detail (transcript, timestamp, audio, delete) — omit to disable tap-to-open. */
+  onPress?: () => void;
   onDelete: () => void;
 };
 
-export function NoteCard({ content, distance, onDelete }: NoteCardProps) {
+export function NoteCard({ content, audioUri, score, onPress, onDelete }: NoteCardProps) {
   return (
-    <View style={styles.card}>
+    <Pressable onPress={onPress} disabled={!onPress} style={styles.card}>
       <Pressable
         onPress={onDelete}
         hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
@@ -26,10 +31,11 @@ export function NoteCard({ content, distance, onDelete }: NoteCardProps) {
         <Text style={styles.deleteIcon}>🗑</Text>
       </Pressable>
       <Text style={styles.content}>{content}</Text>
-      {distance !== undefined && (
-        <Text style={styles.distance}>match {(1 - distance).toFixed(2)}</Text>
+      {score !== undefined && (
+        <Text style={styles.distance}>match score {score.toFixed(3)}</Text>
       )}
-    </View>
+      {!!audioUri && <AudioPlayerControls audioUri={audioUri} compact style={styles.player} />}
+    </Pressable>
   );
 }
 
@@ -52,6 +58,12 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 12,
     marginTop: 8,
+  },
+  player: {
+    marginTop: 12,
+    backgroundColor: "transparent",
+    borderWidth: 0,
+    padding: 0,
   },
   // High-contrast, deliberately larger than the rest of the card's touch
   // targets: a solid danger-red circle is easy to spot and easy to tap.

@@ -14,6 +14,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Crypto from "expo-crypto";
 
+import { NoteDetailModal } from "../components/NoteDetailModal";
 import { ViewToggle } from "../components/ViewToggle";
 import { generateRAGAnswer, type RagCitation } from "../services/ai/rag";
 
@@ -40,6 +41,7 @@ export default function ChatScreen() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const listRef = useRef<FlatList<ChatMessage>>(null);
 
   const updateMessage = useCallback((id: string, patch: Partial<ChatMessage>) => {
@@ -49,7 +51,7 @@ export default function ChatScreen() {
   }, []);
 
   const handleShowCitation = useCallback((citation: RagCitation) => {
-    Alert.alert(`Note ${citation.index}`, citation.content);
+    setSelectedNoteId(citation.noteId);
   }, []);
 
   const handleSend = useCallback(async () => {
@@ -191,6 +193,12 @@ export default function ChatScreen() {
           </View>
         </View>
       </KeyboardAvoidingView>
+
+      <NoteDetailModal
+        noteId={selectedNoteId}
+        visible={selectedNoteId !== null}
+        onClose={() => setSelectedNoteId(null)}
+      />
     </SafeAreaView>
   );
 }

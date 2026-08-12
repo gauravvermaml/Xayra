@@ -13,16 +13,17 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "expo-router";
 
 import { NoteCard } from "../components/NoteCard";
+import { NoteDetailModal } from "../components/NoteDetailModal";
 import { ViewToggle } from "../components/ViewToggle";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import {
   createVoiceNote,
   deleteNote,
+  hybridSearchNotes,
   listNotes,
   purgeAllNotes,
-  searchNotes,
+  type HybridSearchResult,
   type Note,
-  type SearchResult,
 } from "../services/notes/noteManager";
 
 const colors = {
@@ -36,14 +37,15 @@ const colors = {
 };
 
 type ProcessingState = "idle" | "processing";
-type DisplayNote = { id: string; content: string; distance?: number };
+type DisplayNote = { id: string; content: string; audioUri: string | null; score?: number };
 
 export default function HomeScreen() {
   const recorder = useVoiceRecorder();
   const [processingState, setProcessingState] = useState<ProcessingState>("idle");
   const [searchQuery, setSearchQuery] = useState("");
-  const [results, setResults] = useState<SearchResult[]>([]);
+  const [results, setResults] = useState<HybridSearchResult[]>([]);
   const [allNotes, setAllNotes] = useState<Note[]>([]);
+  const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -158,7 +160,7 @@ export default function HomeScreen() {
     }
     setIsSearching(true);
     try {
-      const matches = await searchNotes(text);
+      const matches = await hybridSearchNotes(text);
       setResults(matches);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Search failed.");
@@ -169,8 +171,13 @@ export default function HomeScreen() {
 
   const isSearchActive = searchQuery.trim().length > 0;
   const displayedNotes: DisplayNote[] = isSearchActive
-    ? results.map((note) => ({ id: note.id, content: note.content, distance: note.distance }))
-    : allNotes.map((note) => ({ id: note.id, content: note.content }));
+    ? results.map((note) => ({
+        id: note.id,
+        content: note.content,
+        audioUri: note.audioUri,
+        score: note.score,
+      }))
+    : allNotes.map((note) => ({ id: note.id, content: note.content, audioUri: note.audioUri }));
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -243,10 +250,22 @@ export default function HomeScreen() {
           renderItem={({ item }) => (
             <NoteCard
               content={item.content}
-              distance={item.distance}
+              audioUri={item.audioUri}
+              score={item.score}
+              onPress={() => setSelectedNoteId(item.id)}
               onDelete={() => handleDeleteNote(item.id)}
             />
           )}
+        />
+
+        <NoteDetailModal
+          noteId={selectedNoteId}
+          visible={selectedNoteId !== null}
+          onClose={() => setSelectedNoteId(null)}
+          onDeleted={(noteId) => {
+            setResults((prev) => prev.filter((note) => note.id !== noteId));
+            setAllNotes((prev) => prev.filter((note) => note.id !== noteId));
+          }}
         />
       </View>
     </SafeAreaView>
