@@ -27,13 +27,15 @@
   "devDependencies": {
     "@types/react": "~19.2.2",
     "drizzle-kit": "^0.31.10",
+    "patch-package": "^8.0.1",
     "typescript": "~6.0.3"
   },
   "scripts": {
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "web": "expo start --web"
+    "web": "expo start --web",
+    "postinstall": "patch-package"
   },
   "private": true,
   "op-sqlite": {

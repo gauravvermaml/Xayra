@@ -1,0 +1,13 @@
+diff --git a/node_modules/whisper.rn/android/build.gradle b/node_modules/whisper.rn/android/build.gradle
+index 4658456..98ad248 100644
+--- a/node_modules/whisper.rn/android/build.gradle
++++ b/node_modules/whisper.rn/android/build.gradle
+@@ -157,7 +157,7 @@ dependencies {
+   // For < 0.71, this will be from the local maven repo
+   // For > 0.71, this will be replaced by `com.facebook.react:react-android:$version` by react gradle plugin
+   //noinspection GradleDynamicVersion
+-  implementation "com.facebook.react:react-native:+"
++  implementation "com.facebook.react:react-android"
+ }
+ 
+ if (isNewArchitectureEnabled()) {
