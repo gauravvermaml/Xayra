@@ -42,6 +42,12 @@ const MIN_AUDIO_BYTES = 2000;
  */
 const SILENCE_TRANSCRIPT_PATTERN = /^[\s.,\-]+$/;
 
+/** Shared with app/chat.tsx's voice-query flow so both surfaces agree on
+ * what counts as "Whisper heard nothing" instead of drifting independently. */
+export function isSilentTranscript(text: string): boolean {
+  return SILENCE_TRANSCRIPT_PATTERN.test(text.trim());
+}
+
 function nowUnix(): number {
   return Math.floor(Date.now() / 1000);
 }
@@ -120,7 +126,7 @@ export async function createVoiceNote(audioUri: string): Promise<Note> {
 
   try {
     const transcript = await transcribeAudio(audioUri);
-    if (SILENCE_TRANSCRIPT_PATTERN.test(transcript)) {
+    if (isSilentTranscript(transcript)) {
       throw new SilentRecordingError();
     }
     await updateNoteStatus(id, "transcribed", { content: transcript, transcript });
