@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import * as FileSystem from "expo-file-system/legacy";
 import { createAudioPlayer, type AudioPlayer, type AudioStatus } from "expo-audio";
 
+import { stopSpeech } from "./tts";
+
 export type PlaybackState = {
   /** URI of the track the shared player is currently loaded with (or was last asked to load). */
   activeUri: string | null;
@@ -92,6 +94,9 @@ function ensurePlayer(): AudioPlayer {
  * failures are caught and surfaced via `state.error` rather than throwing.
  */
 export async function playUri(uri: string): Promise<void> {
+  // A note recording and TTS narration should never be audible at once.
+  void stopSpeech();
+
   if (typeof FileSystem.getInfoAsync === "function") {
     try {
       const info = await FileSystem.getInfoAsync(uri);

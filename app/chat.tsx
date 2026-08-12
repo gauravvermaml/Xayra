@@ -19,6 +19,7 @@ import { NoteDetailModal } from "../components/NoteDetailModal";
 import { ViewToggle } from "../components/ViewToggle";
 import { generateRAGAnswer, type RagCitation } from "../services/ai/rag";
 import { useVoiceRecorder } from "../services/audio/recorder";
+import { speakText, stopSpeech } from "../services/audio/tts";
 import { transcribeAudio } from "../services/ai/whisper";
 import { isSilentTranscript } from "../services/notes/noteManager";
 
@@ -54,6 +55,7 @@ export default function ChatScreen() {
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const recorder = useVoiceRecorder();
 
@@ -82,15 +84,17 @@ export default function ChatScreen() {
   const recorderRef = useRef(recorder);
   recorderRef.current = recorder;
 
-  // Stops any in-progress recording if the user switches to the Notes tab
-  // (or otherwise navigates away) mid-recording, instead of leaving the
-  // native recording session dangling.
+  // Stops any in-progress recording, and any in-progress TTS narration, if
+  // the user switches to the Notes tab (or otherwise navigates away) —
+  // instead of leaving the native recording session dangling or having the
+  // assistant keep talking on a screen that's no longer visible.
   useFocusEffect(
     useCallback(() => {
       return () => {
         if (recorderRef.current.isRecording) {
           void recorderRef.current.stopRecording();
         }
+        void stopSpeech();
       };
     }, [])
   );
@@ -105,11 +109,44 @@ export default function ChatScreen() {
     setSelectedNoteId(citation.noteId);
   }, []);
 
+  // Shared by auto-read-on-completion and the manual speaker-button replay,
+  // so both agree on how `speakingMessageId` gets set/cleared. Guards each
+  // callback against a stale close-over: if the user replays a different
+  // message before this one's utterance naturally finishes, `onDone`/
+  // `onStopped` firing late shouldn't clear the *new* message's speaking state.
+  const playMessageSpeech = useCallback((message: Pick<ChatMessage, "id" | "text">) => {
+    setSpeakingMessageId(message.id);
+    const clearIfCurrent = () =>
+      setSpeakingMessageId((current) => (current === message.id ? null : current));
+    void speakText(message.text, {
+      onDone: clearIfCurrent,
+      onStopped: clearIfCurrent,
+      onError: clearIfCurrent,
+    });
+  }, []);
+
+  const handleToggleSpeech = useCallback(
+    (message: ChatMessage) => {
+      if (speakingMessageId === message.id) {
+        void stopSpeech();
+        setSpeakingMessageId(null);
+      } else {
+        playMessageSpeech(message);
+      }
+    },
+    [speakingMessageId, playMessageSpeech]
+  );
+
   const handleSend = useCallback(async (overrideText?: string) => {
     const query = (overrideText ?? input).trim();
     if (!query || isSending) {
       return;
     }
+
+    // A new question always interrupts whatever the assistant was reading
+    // out loud from a previous answer.
+    void stopSpeech();
+    setSpeakingMessageId(null);
 
     // Only clear the typed draft when actually sending it — a voice query
     // (overrideText) shouldn't wipe out whatever the user had typed.
@@ -147,6 +184,7 @@ export default function ChatScreen() {
         citations: answer.citations,
         isStreaming: false,
       });
+      playMessageSpeech({ id: assistantId, text: answer.text });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to get a response.";
       updateMessage(assistantId, {
@@ -157,7 +195,7 @@ export default function ChatScreen() {
     } finally {
       setIsSending(false);
     }
-  }, [input, isSending, updateMessage]);
+  }, [input, isSending, updateMessage, playMessageSpeech]);
 
   const handleMicPress = useCallback(async () => {
     if (recorder.isTransitioning) {
@@ -188,6 +226,9 @@ export default function ChatScreen() {
         setIsTranscribingVoice(false);
       }
     } else {
+      // A voice question and TTS narration should never overlap.
+      void stopSpeech();
+      setSpeakingMessageId(null);
       // recorder.startRecording() already alerts internally on failure
       // (permissions denied, native error, etc.) — nothing extra needed here.
       await recorder.startRecording().catch(() => {});
@@ -235,6 +276,16 @@ export default function ChatScreen() {
                     color={colors.textMuted}
                     size="small"
                   />
+                )}
+                {item.role === "assistant" && !item.isStreaming && item.text.length > 0 && (
+                  <Pressable
+                    onPress={() => handleToggleSpeech(item)}
+                    style={styles.speakerButton}
+                  >
+                    <Text style={styles.speakerButtonText}>
+                      {speakingMessageId === item.id ? "⏹ Stop" : "🔊 Listen"}
+                    </Text>
+                  </Pressable>
                 )}
                 {!!item.citations?.length && (
                   <View style={styles.citationRow}>
@@ -381,6 +432,15 @@ const styles = StyleSheet.create({
   streamingIndicator: {
     marginTop: 6,
     alignSelf: "flex-start",
+  },
+  speakerButton: {
+    alignSelf: "flex-start",
+    marginTop: 10,
+  },
+  speakerButtonText: {
+    color: colors.accent,
+    fontSize: 12,
+    fontWeight: "600",
   },
   citationRow: {
     flexDirection: "row",
