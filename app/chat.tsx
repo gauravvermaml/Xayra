@@ -20,7 +20,7 @@ import { ViewToggle } from "../components/ViewToggle";
 import { generateRAGAnswer, type RagCitation } from "../services/ai/rag";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakText, stopSpeech } from "../services/audio/tts";
-import { transcribeAudio } from "../services/ai/whisper";
+import { transcribeAudioLocal } from "../services/ai/localWhisper";
 import { isSilentTranscript } from "../services/notes/noteManager";
 
 const colors = {
@@ -210,7 +210,7 @@ export default function ChatScreen() {
 
       setIsTranscribingVoice(true);
       try {
-        const transcript = await transcribeAudio(uri);
+        const transcript = await transcribeAudioLocal(uri);
         if (isSilentTranscript(transcript)) {
           Alert.alert(
             "No Speech Detected",

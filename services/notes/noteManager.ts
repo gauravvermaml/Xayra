@@ -4,7 +4,7 @@ import * as FileSystem from "expo-file-system/legacy";
 import { getRawDatabase, isFtsAvailable } from "../../db/client";
 import type { NoteStatus } from "../../db/schema";
 import { generateEmbedding } from "../ai/embeddings";
-import { transcribeAudio } from "../ai/whisper";
+import { transcribeAudioLocal } from "../ai/localWhisper";
 
 export type Note = {
   id: string;
@@ -125,7 +125,7 @@ export async function createVoiceNote(audioUri: string): Promise<Note> {
   );
 
   try {
-    const transcript = await transcribeAudio(audioUri);
+    const transcript = await transcribeAudioLocal(audioUri);
     if (isSilentTranscript(transcript)) {
       throw new SilentRecordingError();
     }

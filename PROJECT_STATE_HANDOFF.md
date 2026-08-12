@@ -1,8 +1,18 @@
 # Silent Confidant — Project State Handoff
 
-Last updated: end of Phase 3D Stage 2 (commit `ff6debd`).
+Last updated: end of Phase 4 Stage 4A.
 
 ## Completed State
+
+**Phase 4 Stage 4A — On-Device Local Whisper Transcription**
+- The task brief named `react-native-whisper` for this; checked it on npm first — it's a single-version (`0.0.1`), year-stale package from a lone maintainer, not a real whisper.cpp binding. Used **`whisper.rn`** (`0.7.2`) instead, the actively maintained RN binding for whisper.cpp.
+- `services/ai/localWhisper.ts` (new): wraps `initWhisper`/`WhisperContext.transcribe` from whisper.rn. `resolveModelPath()` looks for `ggml-base.en.bin` then `ggml-tiny.en.bin` in `FileSystem.documentDirectory` — models are **not bundled** into the app (too large); a model file has to be placed there manually or by a future download step before transcription works. The whisper context is created once (`getWhisperContext()`, memoized promise, resets on failure so a later call can retry) and reused across calls. `transcribeAudioLocal(fileUri)` returns raw transcript text; callers (unchanged) still run it through `isSilentTranscript()` themselves — pulling that import into `localWhisper.ts` directly would create a cycle (`noteManager` → `localWhisper` → `noteManager`).
+- `services/notes/noteManager.ts` and `app/chat.tsx`'s voice-query handler both now call `transcribeAudioLocal` instead of `services/ai/whisper.ts`'s OpenAI-backed `transcribeAudio` — voice transcription (notes and chat) no longer needs a network round-trip or `OPENAI_API_KEY`. The old `services/ai/whisper.ts` (OpenAI API) is left in place, unused by these two call sites, in case something else still wants server-side transcription.
+- **Packaging quirk worth knowing about**: `whisper.rn@0.7.2`'s `package.json` `exports` map has no root `"."` entry, only `"./*"` subpath patterns — `import ... from "whisper.rn"` fails under strict exports resolution (confirmed via plain `node -e "require('whisper.rn')"` → `ERR_PACKAGE_PATH_NOT_EXPORTED`; every published version back to 0.5.5 has the same gap). Worked around by importing `whisper.rn/index` instead, which matches the `"./*"` pattern. That still didn't fully fix `tsc`, because the pattern's condition order (`react-native` before `types`) means bundler-mode resolution type-checks the raw, untranspiled `src/index.ts` (which assumes RN's ambient `global` and fails standalone `tsc`) instead of the prebuilt `.d.ts`. Fixed with a `tsconfig.json` `paths` override redirecting only *type-checking* of `whisper.rn/index` to `node_modules/whisper.rn/lib/typescript/index.d.ts`; Metro still resolves the same specifier to `src/index.ts` at runtime and transpiles it normally.
+- `safe-buffer` (a whisper.rn dependency) requires Node's `buffer` module, which Metro doesn't polyfill by default — `npx expo install buffer` (RN-standard polyfill package) resolved a bundling failure (`Unable to resolve module buffer`).
+- `npx tsc --noEmit` — clean, zero errors. `npx expo export --platform android` — bundles clean (1353 modules, up from 1346).
+- **Native rebuild required before on-device testing**: `whisper.rn` ships `android`/`ios` native folders (like `op-sqlite`'s FTS5 flag and `expo-speech` before it) — `npx expo prebuild --clean` + rebuild is required before `initWhisper`/`transcribe` will actually work on-device; `tsc`/`expo export` only validate JS/bundling, not native linkage. A GGML model file (`ggml-base.en.bin` or `ggml-tiny.en.bin`) also has to be manually pushed to the app's document directory on the emulator/device before transcription can succeed — there's no in-app model download/picker yet.
+
 
 **Phase 3C — Rich Note Detail & Audio Playback Subsystem**
 - `services/audio/player.ts`: single-instance audio player singleton built on `expo-audio`'s `createAudioPlayer`. Exactly one native `AudioPlayer` exists app-wide; starting a new track always pauses/replaces whatever was previously playing. Exposes state via `useSyncExternalStore` through `useAudioPlayerControls(uri)`, reference-counts mounted consumers, and releases the native player once the last one unmounts. Missing/inaccessible files and native failures are caught and surfaced as `state.error`, never thrown.
@@ -35,5 +45,6 @@ Last updated: end of Phase 3D Stage 2 (commit `ff6debd`).
 
 ## Next Objective
 
-1. **Native rebuild required before further on-device testing of TTS**: `expo-speech`'s native module isn't linked into the currently-built dev client yet (installed via `npx expo install` only, no rebuild performed this session). Run `npx expo prebuild --clean` + rebuild (mirroring the earlier FTS5 native-rebuild process) before verifying Stage 2 end-to-end on the emulator.
-2. **Phase 4 — Local On-Device Models**: not yet started or scoped.
+1. **Native rebuild required before further on-device testing**: both `expo-speech` (Phase 3D Stage 2) and now `whisper.rn` (Phase 4 Stage 4A) have native modules that aren't linked into the currently-built dev client (installed via `npx expo install` only, no rebuild performed since). Run `npx expo prebuild --clean` + rebuild once, covering both, before verifying either end-to-end on the emulator.
+2. **Push a GGML model file before testing Stage 4A**: `services/ai/localWhisper.ts` looks for `ggml-base.en.bin` or `ggml-tiny.en.bin` in the app's document directory — neither is bundled or auto-downloaded yet. Push one manually via `adb push` (see test steps) before recording a voice note or using chat voice query.
+3. **Phase 4 Stage 4B+ — further on-device model work**: not yet scoped (e.g. in-app model download/picker instead of manual `adb push`).

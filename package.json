@@ -4,6 +4,7 @@
   "main": "expo-router/entry",
   "dependencies": {
     "@op-engineering/op-sqlite": "^17.1.5",
+    "buffer": "^6.0.3",
     "drizzle-orm": "^0.45.2",
     "expo": "~57.0.11",
     "expo-audio": "~57.0.3",
@@ -20,7 +21,8 @@
     "react": "19.2.3",
     "react-native": "0.86.2",
     "react-native-safe-area-context": "~5.7.0",
-    "react-native-screens": "~4.26.0"
+    "react-native-screens": "~4.26.0",
+    "whisper.rn": "^0.7.2"
   },
   "devDependencies": {
     "@types/react": "~19.2.2",

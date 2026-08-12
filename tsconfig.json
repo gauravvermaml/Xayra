@@ -1,6 +1,16 @@
 {
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
-    "strict": true
+    "strict": true,
+    // whisper.rn's "exports" map orders the "react-native" condition before
+    // "types", so bundler-mode resolution (with customConditions including
+    // "react-native") type-checks its raw, untranspiled src/index.ts instead
+    // of its prebuilt .d.ts — that source assumes RN's ambient globals and
+    // fails standalone tsc. Metro still resolves the same specifier to that
+    // same .ts file at runtime (and transpiles it fine); this override only
+    // redirects *type-checking* to the package's proper declaration file.
+    "paths": {
+      "whisper.rn/index": ["./node_modules/whisper.rn/lib/typescript/index.d.ts"]
+    }
   }
 }
