@@ -3,7 +3,7 @@ import * as FileSystem from "expo-file-system/legacy";
 
 import { getRawDatabase, isFtsAvailable } from "../../db/client";
 import type { NoteStatus } from "../../db/schema";
-import { generateEmbedding } from "../ai/embeddings";
+import { generateEmbeddingLocal } from "../ai/localEmbeddings";
 import { transcribeAudioLocal } from "../ai/localWhisper";
 
 export type Note = {
@@ -131,7 +131,7 @@ export async function createVoiceNote(audioUri: string): Promise<Note> {
     }
     await updateNoteStatus(id, "transcribed", { content: transcript, transcript });
 
-    const embedding = await generateEmbedding(transcript);
+    const embedding = await generateEmbeddingLocal(transcript);
     await insertEmbedding(id, embedding);
     await updateNoteStatus(id, "embedded");
 
@@ -163,7 +163,7 @@ export async function createTextNote(text: string): Promise<Note> {
   );
 
   try {
-    const embedding = await generateEmbedding(text);
+    const embedding = await generateEmbeddingLocal(text);
     await insertEmbedding(id, embedding);
     await updateNoteStatus(id, "embedded");
     console.log("[Note] text note saved", id, "status=embedded");
@@ -364,7 +364,7 @@ export async function hybridSearchNotes(
   const db = await getRawDatabase();
   const poolSize = limit * 4;
 
-  const embedding = await generateEmbedding(trimmed);
+  const embedding = await generateEmbeddingLocal(trimmed);
   const vectorResult = await db.execute(
     `
       SELECT n.id, n.content, n.transcript, n.audio_uri, n.created_at

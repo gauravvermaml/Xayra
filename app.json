@@ -38,7 +38,8 @@
         {
           "microphonePermission": "Allow Silent Confidant to access your microphone to record voice notes."
         }
-      ]
+      ],
+      "onnxruntime-react-native"
     ],
     "extra": {
       "router": {},

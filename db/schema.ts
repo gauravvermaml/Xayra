@@ -20,7 +20,10 @@ export const notes = sqliteTable("notes", {
 });
 
 /**
- * sqlite-vec virtual table for 1536-dim note embeddings.
+ * sqlite-vec virtual table for 384-dim note embeddings (local ONNX
+ * bge-small-en-v1.5, see services/ai/localEmbeddings.ts — was 1536-d OpenAI
+ * text-embedding-3-small before Phase 4 Stage 4B; db/client.ts's startup
+ * migration drops and recreates this table if it finds the old dimension).
  * drizzle-kit has no first-class support for `vec0` virtual tables, so this
  * is created directly via raw SQL in db/client.ts rather than modeled as a
  * sqliteTable. No explicit primary key column: the table relies on
@@ -30,7 +33,7 @@ export const notes = sqliteTable("notes", {
  */
 export const NOTE_EMBEDDINGS_TABLE_SQL = `
   CREATE VIRTUAL TABLE IF NOT EXISTS note_embeddings USING vec0(
-    embedding float[1536]
+    embedding float[384]
   );
 `;
 

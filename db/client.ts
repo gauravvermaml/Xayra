@@ -1,6 +1,7 @@
 import { open, type DB } from "@op-engineering/op-sqlite";
 import { drizzle, type OPSQLiteDatabase } from "drizzle-orm/op-sqlite";
 
+import { EMBEDDING_DIMENSIONS, generateEmbeddingLocal } from "../services/ai/localEmbeddings";
 import { getOrCreateDatabaseKey } from "../services/crypto/keyManager";
 import {
   NOTE_EMBEDDINGS_TABLE_SQL,
@@ -42,8 +43,16 @@ async function openDatabase(): Promise<DatabaseHandle> {
     encryptionKey,
   });
 
-  await db.execute(NOTE_EMBEDDINGS_TABLE_SQL);
   await createCoreTables(db);
+  const needsReembed = await dropStaleEmbeddingsTable(db);
+  await db.execute(NOTE_EMBEDDINGS_TABLE_SQL);
+  if (needsReembed) {
+    // Deliberately not awaited: re-embedding every note can take a while on
+    // a phone CPU, and every other `getConnection()` caller across the app
+    // is waiting on this same promise to resolve — blocking here would
+    // freeze app startup on a large note library.
+    void reembedAllNotesInBackground(db);
+  }
   const ftsAvailable = await createFtsIndex(db);
 
   return { db, drizzleDb: drizzle(db, { schema }), ftsAvailable };
@@ -117,6 +126,83 @@ async function createCoreTables(db: DB): Promise<void> {
     }
   }
 
+}
+
+/**
+ * `note_embeddings` is a `vec0` virtual table, so its declared vector
+ * dimension is baked into the `CREATE VIRTUAL TABLE` statement itself —
+ * `sqlite_master.sql` is the only place to read it back from (there's no
+ * `PRAGMA table_info`-style introspection for vec0's column). If a
+ * previous build created it at a different dimension (1536-d OpenAI
+ * embeddings, pre-Stage-4B), the table is dropped here so the caller can
+ * recreate it fresh at the current `EMBEDDING_DIMENSIONS`. Returns whether
+ * a stale table was actually found and dropped, so the caller knows
+ * whether a re-embedding pass is needed.
+ */
+async function dropStaleEmbeddingsTable(db: DB): Promise<boolean> {
+  const existing = await db.execute(
+    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'note_embeddings'"
+  );
+  const existingSql = existing.rows[0]?.sql as string | undefined;
+  if (!existingSql) {
+    return false;
+  }
+
+  const match = existingSql.match(/float\[(\d+)\]/i);
+  const existingDim = match ? Number(match[1]) : null;
+  if (existingDim === EMBEDDING_DIMENSIONS) {
+    return false;
+  }
+
+  console.warn(
+    `[db] note_embeddings is ${existingDim ?? "an unrecognized"}-d, migrating to ` +
+      `${EMBEDDING_DIMENSIONS}-d for local ONNX embeddings. Existing vectors will be ` +
+      "dropped and regenerated in the background."
+  );
+  await db.execute("DROP TABLE note_embeddings");
+  return true;
+}
+
+/**
+ * Re-embeds every note with usable text after a dimension migration, since
+ * the old vectors were just dropped wholesale rather than converted (there's
+ * no way to project a 1536-d OpenAI embedding into 384-d bge-space).
+ * Failures on individual notes are logged and skipped rather than aborting
+ * the whole pass — one bad note shouldn't leave every other note unsearchable.
+ */
+async function reembedAllNotesInBackground(db: DB): Promise<void> {
+  try {
+    const result = await db.execute(
+      "SELECT rowid, id, content, transcript FROM notes WHERE status != 'failed'"
+    );
+
+    let succeeded = 0;
+    for (const row of result.rows) {
+      const text = ((row.content as string) || (row.transcript as string) || "").trim();
+      if (!text) {
+        continue;
+      }
+
+      try {
+        const embedding = await generateEmbeddingLocal(text);
+        await db.execute("INSERT INTO note_embeddings (rowid, embedding) VALUES (?, ?)", [
+          row.rowid,
+          JSON.stringify(embedding),
+        ]);
+        await db.execute("UPDATE notes SET status = 'embedded', updated_at = ? WHERE id = ?", [
+          Math.floor(Date.now() / 1000),
+          row.id,
+        ]);
+        succeeded += 1;
+      } catch (err) {
+        console.error("[db] Failed to re-embed note during migration", row.id, err);
+      }
+    }
+
+    console.log(`[db] Background re-embedding migration complete: ${succeeded}/${result.rows.length} notes.`);
+  } catch (err) {
+    console.error("[db] Background re-embedding migration failed", err);
+  }
 }
 
 /**
