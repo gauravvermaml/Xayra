@@ -39,7 +39,8 @@
           "microphonePermission": "Allow Silent Confidant to access your microphone to record voice notes."
         }
       ],
-      "onnxruntime-react-native"
+      "onnxruntime-react-native",
+      "llama.rn"
     ],
     "extra": {
       "router": {},
