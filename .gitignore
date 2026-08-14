@@ -39,3 +39,10 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# local AI model assets — resolved at runtime from the device's document
+# directory (see CLAUDE.md), never bundled or committed; these are typically
+# dropped at the repo root during local adb-push testing
+*.bin
+*.gguf
+*.onnx

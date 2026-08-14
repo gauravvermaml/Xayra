@@ -9,6 +9,27 @@ const MODEL_FILENAME = "Llama-3.2-1B-Instruct-Q4_K_M.gguf";
 const SYSTEM_PROMPT =
   "You are Silent Confidant, a private voice note AI. Answer the user's question strictly based on the provided voice note context. If the answer is not in the notes, state that clearly.";
 
+/**
+ * Built fresh on every call, not memoized alongside SYSTEM_PROMPT — the
+ * llama context itself is long-lived (see getContext()), so baking today's
+ * date in once at first load would leave every later answer using a stale
+ * date. Without this, the model has no way to resolve relative-time
+ * questions ("last Monday", "yesterday", "this month") and hallucinates one.
+ */
+function buildSystemPromptWithDate(): string {
+  const today = new Date().toLocaleDateString("en-US", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+  return (
+    `${SYSTEM_PROMPT}\n\n` +
+    `Current Date & Time: ${today}. Use this as the baseline date whenever the ` +
+    'question refers to a relative time (e.g. "last Monday", "yesterday", "this month").'
+  );
+}
+
 /** Llama-3.2's instruct template stop marker — ends every turn. Without this
  * in `stop`, generation would run past the assistant's turn and start
  * hallucinating a fake next user turn. */
@@ -63,7 +84,7 @@ async function getContext(): Promise<LlamaContext> {
 function buildPrompt(userQuery: string, contextXml: string): string {
   return (
     "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" +
-    `${SYSTEM_PROMPT}\n\n${contextXml}${EOT_TOKEN}` +
+    `${buildSystemPromptWithDate()}\n\n${contextXml}${EOT_TOKEN}` +
     "<|start_header_id|>user<|end_header_id|>\n\n" +
     `${userQuery}${EOT_TOKEN}` +
     "<|start_header_id|>assistant<|end_header_id|>\n\n"

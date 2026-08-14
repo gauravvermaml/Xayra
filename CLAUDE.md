@@ -49,7 +49,7 @@ None of the model files are bundled into the app or downloaded automatically —
 
 | File | Used by | Powers |
 |---|---|---|
-| `ggml-base.en.bin` (or `ggml-tiny.en.bin`) | `services/ai/localWhisper.ts` | Voice note & chat-query transcription |
+| `ggml-tiny.en.bin` (or `ggml-base.en.bin`) | `services/ai/localWhisper.ts` | Voice note & chat-query transcription |
 | `bge-small-en-v1.5-quantized.onnx` | `services/ai/localEmbeddings.ts` | 384-d vector embeddings |
 | `bge-small-en-v1.5-vocab.txt` | `services/ai/tokenizer.ts` | WordPiece tokenizer vocab for the embedding model |
 | `Llama-3.2-1B-Instruct-Q4_K_M.gguf` | `services/ai/localLlama.ts` | RAG chat answer generation |

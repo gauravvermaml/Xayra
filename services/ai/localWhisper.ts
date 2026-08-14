@@ -6,8 +6,9 @@ import * as FileSystem from "expo-file-system/legacy";
 // and resolves correctly — verified against the installed package.
 import { initWhisper, type WhisperContext } from "whisper.rn/index";
 
-/** Preferred first — smaller/faster; falls back to the more accurate model if that's what's present. */
-const MODEL_FILENAMES = ["ggml-base.en.bin", "ggml-tiny.en.bin"] as const;
+/** Preferred first — tiny is smaller/faster, prioritized for lower on-device
+ * latency; falls back to the more accurate base model if that's what's present. */
+const MODEL_FILENAMES = ["ggml-tiny.en.bin", "ggml-base.en.bin"] as const;
 
 let whisperContextPromise: Promise<WhisperContext> | null = null;
 

@@ -96,8 +96,8 @@ npx expo run:android
 None of the model files ship with the app (they're tens to hundreds of MB) — download each once and push it to the app's document directory on your emulator/device:
 
 ```bash
-# 1. Whisper (speech-to-text) — pick tiny for speed or base for accuracy
-adb push ggml-base.en.bin /data/data/com.anonymous.silentconfidant/files/
+# 1. Whisper (speech-to-text) — tiny is preferred for lower latency; base is used as a fallback if present instead
+adb push ggml-tiny.en.bin /data/data/com.anonymous.silentconfidant/files/
 
 # 2. bge-small-en-v1.5 (embeddings) — quantized ONNX export + its vocab
 adb push bge-small-en-v1.5-quantized.onnx /data/data/com.anonymous.silentconfidant/files/

@@ -1,6 +1,13 @@
 # Silent Confidant — Project State Handoff
 
-Last updated: post-Phase-4 runtime bug fixes (ONNX autolinking + WAV recording) — **100% LIVE-VERIFIED on-device**.
+Last updated: local inference latency/quality pass (dynamic date context + Whisper tiny default).
+
+## Local Inference Latency & Quality Pass
+
+- **Date hallucination fix**: `services/ai/localLlama.ts`'s system prompt was static, giving the model no way to resolve relative-time questions ("last Monday", "this month") — it would hallucinate a date. `buildSystemPromptWithDate()` now appends today's date (`Intl`-formatted via `toLocaleDateString`, e.g. "Wednesday, August 14, 2026") to the system prompt, built fresh on every `generateLocalRAGAnswer()` call rather than memoized alongside the static `SYSTEM_PROMPT` constant — the `LlamaContext` itself is long-lived (see `getContext()`'s memoization), so baking the date in once at first load would leave every later answer using a stale date from whenever the app was first opened.
+- **Llama thread count**: `initLlama({ n_threads: 4, ... })` was already set from Stage 4C — no change needed, confirmed still correct.
+- **Whisper model preference swapped tiny-first**: `services/ai/localWhisper.ts`'s `MODEL_FILENAMES` now tries `ggml-tiny.en.bin` before `ggml-base.en.bin` (previously the reverse), trading some transcription accuracy for lower on-device latency. Still falls back to base if only that's present — no behavior change for anyone who's only pushed the base model. `CLAUDE.md`'s model table and `README.md`'s `adb push` instructions updated to match.
+- `npx tsc --noEmit` — clean, zero errors.
 
 ## Post-Phase-4 Runtime Fixes — found and fixed via actual on-device testing
 
