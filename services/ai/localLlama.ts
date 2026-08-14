@@ -1,13 +1,58 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { initLlama, LlamaContext } from "llama.rn";
 
+import { logDuration, nowMs } from "./perf";
+
 /** Not bundled — tens of MB — same resolution pattern as localWhisper.ts and
  * localEmbeddings.ts: expected to already be sitting in the document
  * directory before generation is attempted. */
 const MODEL_FILENAME = "Llama-3.2-1B-Instruct-Q4_K_M.gguf";
 
 const SYSTEM_PROMPT =
-  "You are Silent Confidant, a private voice note AI. Answer the user's question strictly based on the provided voice note context. If the answer is not in the notes, state that clearly.";
+  "You are Silent Confidant, a private voice note AI. Answer the user's question based on the " +
+  "provided voice note context when it's relevant. If the question is about the user's notes and " +
+  "the context doesn't contain the answer, state that clearly. If the question is a general " +
+  'temporal/calendar or conversational question (e.g. "what day was last Monday?", "what\'s today\'s ' +
+  'date?") that doesn\'t require the notes, answer it directly and confidently using the date ' +
+  "information below — never say something wasn't mentioned in the notes for a question the notes " +
+  "were never meant to answer.";
+
+const WEEKDAY_NAMES = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+] as const;
+
+/**
+ * A 1B-parameter model doing weekday arithmetic purely from a single "today
+ * is X" sentence reliably gets it wrong (miscounts days, picks the wrong
+ * week). Spelling out this week's Monday-through-today mapping explicitly
+ * turns "what date was last Monday" from arithmetic the model has to
+ * perform into a lookup, which is far more reliable at this model size.
+ */
+function buildCalendarBaseline(now: Date): string {
+  const todayIndex = now.getDay(); // 0=Sunday .. 6=Saturday
+  const daysSinceMonday = (todayIndex + 6) % 7; // 0=Monday .. 6=Sunday
+
+  const lines: string[] = [];
+  for (let offset = 0; offset <= daysSinceMonday; offset++) {
+    const d = new Date(now);
+    d.setDate(now.getDate() - (daysSinceMonday - offset));
+    const label = WEEKDAY_NAMES[d.getDay()];
+    const dateStr = d.toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    });
+    const isToday = offset === daysSinceMonday;
+    lines.push(isToday ? `- Today (${label}): ${dateStr}` : `- This ${label}: ${dateStr}`);
+  }
+  return lines.join("\n");
+}
 
 /**
  * Built fresh on every call, not memoized alongside SYSTEM_PROMPT — the
@@ -17,16 +62,21 @@ const SYSTEM_PROMPT =
  * questions ("last Monday", "yesterday", "this month") and hallucinates one.
  */
 function buildSystemPromptWithDate(): string {
-  const today = new Date().toLocaleDateString("en-US", {
+  const now = new Date();
+  const today = now.toLocaleDateString("en-US", {
     weekday: "long",
     year: "numeric",
     month: "long",
     day: "numeric",
   });
+
   return (
     `${SYSTEM_PROMPT}\n\n` +
-    `Current Date & Time: ${today}. Use this as the baseline date whenever the ` +
-    'question refers to a relative time (e.g. "last Monday", "yesterday", "this month").'
+    `Today is ${today}.\n` +
+    `Current Week Baseline:\n${buildCalendarBaseline(now)}\n\n` +
+    "Use this baseline for all relative-time questions. For dates before this week " +
+    '(e.g. "last Monday" when today is itself Monday), count backward from the baseline ' +
+    "above rather than guessing."
   );
 }
 
@@ -64,9 +114,13 @@ async function requireModelExists(): Promise<string> {
  */
 async function getContext(): Promise<LlamaContext> {
   if (!contextPromise) {
-    contextPromise = requireModelExists().then((model) =>
-      initLlama({ model, n_ctx: 4096, n_threads: 4 })
-    );
+    const coldStart = nowMs();
+    contextPromise = requireModelExists()
+      .then((model) => initLlama({ model, n_ctx: 4096, n_threads: 4 }))
+      .then((context) => {
+        logDuration("Llama cold-start (GGUF model load from disk)", coldStart);
+        return context;
+      });
     contextPromise.catch(() => {
       contextPromise = null;
     });
@@ -102,8 +156,14 @@ export async function generateLocalRAGAnswer(
   contextXml: string,
   onToken: (token: string) => void
 ): Promise<string> {
+  const contextReadyStart = nowMs();
   const context = await getContext();
+  logDuration("Llama context ready (warm reuse if already loaded)", contextReadyStart);
+
   const fullPrompt = buildPrompt(prompt, contextXml);
+
+  const generationStart = nowMs();
+  let firstTokenLogged = false;
 
   const result = await context.completion(
     {
@@ -113,11 +173,16 @@ export async function generateLocalRAGAnswer(
     },
     (data) => {
       if (data.token) {
+        if (!firstTokenLogged) {
+          firstTokenLogged = true;
+          logDuration("Llama time-to-first-token (TTFT)", generationStart);
+        }
         onToken(data.token);
       }
     }
   );
 
+  logDuration("Llama total generation time", generationStart);
   return result.text.trim();
 }
 

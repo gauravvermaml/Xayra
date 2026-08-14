@@ -1,6 +1,7 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { InferenceSession, Tensor } from "onnxruntime-react-native";
 
+import { logDuration, nowMs } from "./perf";
 import { encode, loadVocab, type Vocab } from "./tokenizer";
 
 /** bge-small-en-v1.5's hidden size — also the dimension `note_embeddings` is
@@ -49,6 +50,7 @@ async function requireAssetExists(filename: string): Promise<string> {
  */
 async function getSession(): Promise<InferenceSession> {
   if (!sessionPromise) {
+    const coldStart = nowMs();
     sessionPromise = requireAssetExists(MODEL_FILENAME)
       .then((path) => InferenceSession.create(path))
       .then((session) => {
@@ -59,6 +61,7 @@ async function getSession(): Promise<InferenceSession> {
               `(found: ${session.inputNames.join(", ")}). This ONNX export may use different input names.`
           );
         }
+        logDuration("ONNX cold-start (model load from disk)", coldStart);
         return session;
       });
     sessionPromise.catch(() => {
@@ -135,6 +138,7 @@ function pickHiddenStateOutput(
  * L2-normalizes, so cosine similarity in sqlite-vec behaves correctly.
  */
 export async function generateEmbeddingLocal(text: string): Promise<number[]> {
+  const start = nowMs();
   const [session, vocab] = await Promise.all([getSession(), getVocab()]);
   const { inputIds, attentionMask, tokenTypeIds } = encode(text, vocab, MAX_SEQUENCE_LENGTH);
 
@@ -157,5 +161,7 @@ export async function generateEmbeddingLocal(text: string): Promise<number[]> {
   const hiddenSize = (hiddenOutput.dims[hiddenOutput.dims.length - 1] as number) ?? EMBEDDING_DIMENSIONS;
 
   const pooled = meanPool(hiddenOutput.data as Float32Array, attentionMask, hiddenSize);
-  return l2Normalize(pooled);
+  const normalized = l2Normalize(pooled);
+  logDuration("ONNX embedding generation", start);
+  return normalized;
 }

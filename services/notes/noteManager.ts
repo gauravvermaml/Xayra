@@ -5,6 +5,7 @@ import { getRawDatabase, isFtsAvailable } from "../../db/client";
 import type { NoteStatus } from "../../db/schema";
 import { generateEmbeddingLocal } from "../ai/localEmbeddings";
 import { transcribeAudioLocal } from "../ai/localWhisper";
+import { logDuration, nowMs } from "../ai/perf";
 
 export type Note = {
   id: string;
@@ -365,6 +366,8 @@ export async function hybridSearchNotes(
   const poolSize = limit * 4;
 
   const embedding = await generateEmbeddingLocal(trimmed);
+
+  const searchStart = nowMs();
   const vectorResult = await db.execute(
     `
       SELECT n.id, n.content, n.transcript, n.audio_uri, n.created_at
@@ -392,6 +395,7 @@ export async function hybridSearchNotes(
     );
     ftsRows = ftsResult.rows;
   }
+  logDuration("SQLite-vec + FTS5 search retrieval", searchStart);
 
   const fused = new Map<
     string,

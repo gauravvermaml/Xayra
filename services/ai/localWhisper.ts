@@ -6,6 +6,8 @@ import * as FileSystem from "expo-file-system/legacy";
 // and resolves correctly — verified against the installed package.
 import { initWhisper, type WhisperContext } from "whisper.rn/index";
 
+import { logDuration, nowMs } from "./perf";
+
 /** Preferred first — tiny is smaller/faster, prioritized for lower on-device
  * latency; falls back to the more accurate base model if that's what's present. */
 const MODEL_FILENAMES = ["ggml-tiny.en.bin", "ggml-base.en.bin"] as const;
@@ -43,7 +45,13 @@ async function resolveModelPath(): Promise<string> {
  */
 async function getWhisperContext(): Promise<WhisperContext> {
   if (!whisperContextPromise) {
-    whisperContextPromise = resolveModelPath().then((filePath) => initWhisper({ filePath }));
+    const coldStart = nowMs();
+    whisperContextPromise = resolveModelPath()
+      .then((filePath) => initWhisper({ filePath }))
+      .then((context) => {
+        logDuration("Whisper cold-start (model load from disk)", coldStart);
+        return context;
+      });
     whisperContextPromise.catch(() => {
       whisperContextPromise = null;
     });
@@ -60,8 +68,10 @@ async function getWhisperContext(): Promise<WhisperContext> {
  * noteManager).
  */
 export async function transcribeAudioLocal(fileUri: string): Promise<string> {
+  const start = nowMs();
   const context = await getWhisperContext();
   const { promise } = context.transcribe(fileUri, { language: "en" });
   const { result } = await promise;
+  logDuration("Whisper STT transcription", start);
   return result.trim();
 }

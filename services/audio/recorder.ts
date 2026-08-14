@@ -6,6 +6,8 @@ import * as FileSystem from "expo-file-system/legacy";
 import { requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
 import AudioRecord from "@fugood/react-native-audio-pcm-stream";
 
+import { logDuration, nowMs } from "../ai/perf";
+
 export type VoiceRecorder = {
   isRecording: boolean;
   /** True while a start/stop transition is in flight; guards double-taps. */
@@ -147,6 +149,7 @@ export function useVoiceRecorder(): VoiceRecorder {
       subscriptionRef.current = null;
       setIsRecording(false);
 
+      const finalizeStart = nowMs();
       const pcmData = Buffer.concat(chunksRef.current);
       chunksRef.current = [];
 
@@ -157,6 +160,7 @@ export function useVoiceRecorder(): VoiceRecorder {
       await FileSystem.writeAsStringAsync(uri, wavBytes.toString("base64"), {
         encoding: FileSystem.EncodingType.Base64,
       });
+      logDuration("Audio I/O — WAV finalize (concat + base64 write)", finalizeStart);
 
       console.log("[AudioRecorder] File size:", wavBytes.length);
       return uri;
