@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "expo-router/entry",
   "dependencies": {
+    "@fugood/react-native-audio-pcm-stream": "1.1.4",
     "@op-engineering/op-sqlite": "^17.1.5",
     "buffer": "^6.0.3",
     "drizzle-orm": "^0.45.2",
