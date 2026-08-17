@@ -1,6 +1,25 @@
 # Silent Confidant — Project State Handoff
 
-Last updated: latency profiling + calendar-baseline date reasoning pass.
+Last updated: Category A UX, Layout & RAG refinement pass (rename to "Remi", central mic button, smart TTS modality, strict RAG grounding).
+
+## Category A UX, Layout & RAG Refinement Pass
+
+- **Display rename**: `app.json`'s `expo.name` changed to `"Remi"` (OS-level app label). Native bundle IDs (`android.package`, `scheme`) deliberately left as `silentconfidant`/`com.anonymous.silentconfidant` — only the display name and in-app header text (`app/index.tsx`, `app/chat.tsx`) changed, not any identifier that flows into native build config.
+- **Anchored central mic button**: new `components/CentralMicButton.tsx`, inserted immediately after `<ViewToggle>` on both `app/index.tsx` and `app/chat.tsx`. Lands at identical x/y on both screens because everything above it (title, subtitle, ViewToggle) is structurally identical single-line content on both screens — no manual coordinate pinning needed. On Notes it drives the existing `handleRecordPress` (voice note capture); on Chat it drives `handleMicPress` (voice query + RAG). The old small inline record button on Notes and the old small inline mic icon in Chat's input bar were both removed as redundant now that the central button is the single mic entry point.
+- **Smart modality response** (`app/chat.tsx`): `handleSend` now takes a `source: "text" | "voice"` param. Text-box/Send-button sends default to `"text"` (silent — no TTS). `handleMicPress` passes `"voice"` after transcription, which is the only path that triggers `playMessageSpeech` (auto-read via `expo-speech`).
+- **Android keyboard push-up fix** (`app/chat.tsx`): `KeyboardAvoidingView`'s `behavior` changed from `Platform.OS === "ios" ? "padding" : undefined` (no-op on Android) to `Platform.OS === "android" ? "height" : "padding"`, so the input bar now gets pushed up above the soft keyboard on Android instead of being covered by it.
+- **Instant trash & re-record** (`services/audio/recorder.ts`): new `cancelAndRestart()` on `useVoiceRecorder()` — stops the native capture, discards the buffered PCM chunks without ever writing a WAV file, then immediately re-inits and restarts capture. Wired to a "Reset" pill shown next to the recording-status text on both Notes and Chat while actively recording.
+- **Strict private-memory-only RAG prompt** (`services/ai/localLlama.ts`): `SYSTEM_PROMPT` rewritten to the requested strict-grounding directive ("private memory recall assistant... EXCLUSIVELY using the provided notes context... reply EXACTLY: 'I couldn't find any mention of that in your saved notes.'"). Kept two narrow, deliberate carve-outs rather than a literal word-for-word replacement: (1) the injected current-date/calendar-baseline block, since without it the model can't answer "what day was last Monday" at all — that's runtime context, not pre-trained knowledge; (2) the speech-to-text typo-tolerance clause from the previous pass, since it governs how to interpret notes content, not a license to pull in outside facts. Flagged to the user as a judgment call in case they want the exclusivity to be absolute.
+- `npx tsc --noEmit` — clean, zero errors.
+
+## Physical-Device Bug Fixes — found via real on-device testing (Pixel 9)
+
+Found by actually using the app on a physical device: recorded a real note mentioning AirPods, then asked chat about it three different ways and got three contradictory answers ("not mentioned" / "yes mentioned" / correctly identifying a transcription error). Root-caused to two independent, stacked issues:
+
+- **Whisper accuracy**: `services/ai/localWhisper.ts`'s `MODEL_FILENAMES` reverted to `ggml-base.en.bin` preferred over `ggml-tiny.en.bin` (was flipped tiny-first in the previous latency pass). Confirmed on-device that tiny mis-transcribed "AirPods" as "airports" repeatedly within the same note, which is what made every downstream chat answer look broken — the model was accurately describing what the note *said*, the note just said the wrong word. Pixel-class hardware has enough headroom that base's extra latency isn't a real tradeoff. Tiny is still the fallback if that's the only model pushed.
+- **Llama answer consistency**: `services/ai/localLlama.ts`'s `context.completion()` had no explicit `temperature`, so it ran at whatever llama.rn's own default is — high enough that near-identical rephrasings of the same question against the same note produced contradictory answers. Added `GENERATION_TEMPERATURE = 0.1` (not `0` — some sampling still lets it recover from a bad first token rather than deterministically repeating a mistake).
+- **Speech-to-text typo tolerance**: `SYSTEM_PROMPT` now explicitly tells the model that notes are on-device-transcribed and may contain phonetically-similar mishearings (using the actual observed "AirPods"→"airports" case as the example), and to treat those as the same thing the user's asking about rather than denying the note mentions it. This is a real mitigation, not a full fix — it can't undo a transcription error, but it stops the model from being confidently wrong about content that *is* present, just misspelled.
+- `npx tsc --noEmit` — clean, zero errors.
 
 ## Latency Profiling & Calendar-Baseline Reasoning Pass
 

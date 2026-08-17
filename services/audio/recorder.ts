@@ -15,6 +15,9 @@ export type VoiceRecorder = {
   requestPermissions: () => Promise<boolean>;
   startRecording: () => Promise<void>;
   stopRecording: () => Promise<string | null>;
+  /** Discards everything captured so far and immediately starts a fresh
+   * take, without ever finalizing a WAV file for the discarded audio. */
+  cancelAndRestart: () => Promise<void>;
 };
 
 /**
@@ -173,11 +176,42 @@ export function useVoiceRecorder(): VoiceRecorder {
     }
   }, [isRecording]);
 
+  const cancelAndRestart = useCallback(async () => {
+    if (isBusyRef.current || !isRecording) {
+      return;
+    }
+    isBusyRef.current = true;
+    setIsTransitioning(true);
+    try {
+      AudioRecord.stop();
+      await new Promise((resolve) => setTimeout(resolve, STOP_DRAIN_MS));
+      subscriptionRef.current?.remove();
+      chunksRef.current = [];
+
+      AudioRecord.init({
+        sampleRate: SAMPLE_RATE,
+        channels: CHANNELS,
+        bitsPerSample: BITS_PER_SAMPLE,
+      });
+      subscriptionRef.current = AudioRecord.on("data", (base64Chunk) => {
+        chunksRef.current.push(Buffer.from(base64Chunk, "base64"));
+      });
+      AudioRecord.start();
+    } catch (err) {
+      Alert.alert("Recording Error", err instanceof Error ? err.message : String(err));
+      throw err;
+    } finally {
+      isBusyRef.current = false;
+      setIsTransitioning(false);
+    }
+  }, [isRecording]);
+
   return {
     isRecording,
     isTransitioning,
     requestPermissions,
     startRecording,
     stopRecording,
+    cancelAndRestart,
   };
 }

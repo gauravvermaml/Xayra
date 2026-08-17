@@ -12,6 +12,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "expo-router";
 
+import { CentralMicButton } from "../components/CentralMicButton";
 import { NoteCard } from "../components/NoteCard";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { ViewToggle } from "../components/ViewToggle";
@@ -182,12 +183,37 @@ export default function HomeScreen() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
-        <Text style={styles.title}>Silent Confidant</Text>
+        <Text style={styles.title}>Remi</Text>
         <Text style={styles.subtitle}>
           Your notes, kept between you and your device.
         </Text>
 
         <ViewToggle active="notes" />
+
+        <CentralMicButton
+          state={
+            recorder.isRecording ? "recording" : processingState === "processing" ? "busy" : "idle"
+          }
+          onPress={handleRecordPress}
+          disabled={processingState === "processing" || recorder.isTransitioning}
+        />
+
+        {(recorder.isRecording || processingState === "processing") && (
+          <View style={styles.recordingStatusRow}>
+            <Text style={styles.recordingStatusText}>
+              {recorder.isRecording ? "Recording… tap mic to stop" : "Saving voice note…"}
+            </Text>
+            {recorder.isRecording && (
+              <Pressable
+                onPress={() => void recorder.cancelAndRestart()}
+                disabled={recorder.isTransitioning}
+                style={styles.resetButton}
+              >
+                <Text style={styles.resetButtonText}>Reset</Text>
+              </Pressable>
+            )}
+          </View>
+        )}
 
         <View style={styles.searchBar}>
           <Text style={styles.searchIcon}>⌕</Text>
@@ -200,34 +226,6 @@ export default function HomeScreen() {
             returnKeyType="search"
           />
           {isSearching && <ActivityIndicator color={colors.textMuted} size="small" />}
-        </View>
-
-        <View style={styles.recordRow}>
-          <Pressable
-            onPress={handleRecordPress}
-            disabled={processingState === "processing" || recorder.isTransitioning}
-            hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
-            style={({ pressed }) => [
-              styles.recordButton,
-              recorder.isRecording && styles.recordButtonActive,
-              pressed && styles.recordButtonPressed,
-            ]}
-          >
-            {processingState === "processing" || recorder.isTransitioning ? (
-              <ActivityIndicator color={colors.textPrimary} size="small" />
-            ) : (
-              <View style={recorder.isRecording ? styles.stopIcon : styles.micDot} />
-            )}
-          </Pressable>
-          <Text
-            style={[styles.recordRowLabel, recorder.isRecording && styles.recordRowLabelActive]}
-          >
-            {recorder.isRecording
-              ? "Recording… tap to stop"
-              : processingState === "processing"
-                ? "Saving voice note…"
-                : "Tap to record a voice note"}
-          </Text>
         </View>
 
         {error && <Text style={styles.errorText}>{error}</Text>}
@@ -328,52 +326,30 @@ const styles = StyleSheet.create({
     marginTop: 24,
     textAlign: "center",
   },
-  recordRow: {
+  recordingStatusRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    marginTop: 16,
-  },
-  recordButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: colors.accent,
-    alignItems: "center",
     justifyContent: "center",
-    shadowColor: colors.accent,
-    shadowOpacity: 0.4,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 6,
+    gap: 12,
+    marginTop: -8,
+    marginBottom: 12,
   },
-  recordButtonActive: {
-    backgroundColor: colors.danger,
-    shadowColor: colors.danger,
-  },
-  recordButtonPressed: {
-    opacity: 0.85,
-  },
-  micDot: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: colors.textPrimary,
-  },
-  stopIcon: {
-    width: 16,
-    height: 16,
-    borderRadius: 3,
-    backgroundColor: colors.textPrimary,
-  },
-  recordRowLabel: {
-    color: colors.textMuted,
-    fontSize: 14,
-    fontWeight: "600",
-    flexShrink: 1,
-  },
-  recordRowLabelActive: {
+  recordingStatusText: {
     color: colors.danger,
+    fontSize: 13,
+    fontWeight: "600",
+  },
+  resetButton: {
+    borderColor: colors.danger,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+  },
+  resetButtonText: {
+    color: colors.danger,
+    fontSize: 12,
+    fontWeight: "700",
   },
   purgeButton: {
     alignSelf: "flex-end",

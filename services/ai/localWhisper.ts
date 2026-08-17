@@ -8,9 +8,11 @@ import { initWhisper, type WhisperContext } from "whisper.rn/index";
 
 import { logDuration, nowMs } from "./perf";
 
-/** Preferred first — tiny is smaller/faster, prioritized for lower on-device
- * latency; falls back to the more accurate base model if that's what's present. */
-const MODEL_FILENAMES = ["ggml-tiny.en.bin", "ggml-base.en.bin"] as const;
+/** Preferred first — base is materially more accurate than tiny (tiny was
+ * observed mis-hearing "AirPods" as "airports" on-device) and Pixel-class
+ * hardware has enough headroom that base's extra latency isn't a real
+ * tradeoff; falls back to tiny if that's the only model present. */
+const MODEL_FILENAMES = ["ggml-base.en.bin", "ggml-tiny.en.bin"] as const;
 
 let whisperContextPromise: Promise<WhisperContext> | null = null;
 

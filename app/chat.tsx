@@ -15,6 +15,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "expo-router";
 import * as Crypto from "expo-crypto";
 
+import { CentralMicButton } from "../components/CentralMicButton";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { ViewToggle } from "../components/ViewToggle";
 import { generateRAGAnswer, type RagCitation } from "../services/ai/rag";
@@ -137,7 +138,7 @@ export default function ChatScreen() {
     [speakingMessageId, playMessageSpeech]
   );
 
-  const handleSend = useCallback(async (overrideText?: string) => {
+  const handleSend = useCallback(async (overrideText?: string, source: "text" | "voice" = "text") => {
     const query = (overrideText ?? input).trim();
     if (!query || isSending) {
       return;
@@ -184,7 +185,11 @@ export default function ChatScreen() {
         citations: answer.citations,
         isStreaming: false,
       });
-      playMessageSpeech({ id: assistantId, text: answer.text });
+      // Smart modality: a typed question gets a silent text answer; a
+      // spoken question gets the answer read back aloud too.
+      if (source === "voice") {
+        playMessageSpeech({ id: assistantId, text: answer.text });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to get a response.";
       updateMessage(assistantId, {
@@ -218,7 +223,7 @@ export default function ChatScreen() {
           );
           return;
         }
-        await handleSend(transcript.trim());
+        await handleSend(transcript.trim(), "voice");
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to transcribe your question.";
         Alert.alert("Transcription Error", message);
@@ -239,14 +244,20 @@ export default function ChatScreen() {
     <SafeAreaView style={styles.safeArea}>
       <KeyboardAvoidingView
         style={styles.flex}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
+        behavior={Platform.OS === "android" ? "height" : "padding"}
         keyboardVerticalOffset={12}
       >
         <View style={styles.container}>
-          <Text style={styles.title}>Silent Confidant</Text>
+          <Text style={styles.title}>Remi</Text>
           <Text style={styles.subtitle}>Ask questions about your voice notes.</Text>
 
           <ViewToggle active="chat" />
+
+          <CentralMicButton
+            state={isRecordingVoice ? "recording" : isTranscribingVoice ? "busy" : "idle"}
+            onPress={handleMicPress}
+            disabled={isSending || isTranscribingVoice || recorder.isTransitioning}
+          />
 
           <FlatList
             ref={listRef}
@@ -312,6 +323,18 @@ export default function ChatScreen() {
                   ? `Listening… ${formatDuration(recordingDuration)}`
                   : "Transcribing your question…"}
               </Text>
+              {isRecordingVoice && (
+                <Pressable
+                  onPress={() => {
+                    void recorder.cancelAndRestart();
+                    setRecordingDuration(0);
+                  }}
+                  disabled={recorder.isTransitioning}
+                  style={styles.resetButton}
+                >
+                  <Text style={styles.resetButtonText}>Reset</Text>
+                </Pressable>
+              )}
             </View>
           )}
 
@@ -327,23 +350,6 @@ export default function ChatScreen() {
               returnKeyType="send"
               onSubmitEditing={() => handleSend()}
             />
-            <Pressable
-              onPress={handleMicPress}
-              disabled={isSending || isTranscribingVoice || recorder.isTransitioning}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              style={({ pressed }) => [
-                styles.micButton,
-                isRecordingVoice && styles.micButtonActive,
-                (isSending || isTranscribingVoice) && styles.micButtonDisabled,
-                pressed && styles.micButtonPressed,
-              ]}
-            >
-              {isTranscribingVoice ? (
-                <ActivityIndicator color={colors.textPrimary} size="small" />
-              ) : (
-                <Text style={styles.micButtonIcon}>{isRecordingVoice ? "■" : "🎤"}</Text>
-              )}
-            </Pressable>
             <Pressable
               onPress={() => handleSend()}
               disabled={isSending || !input.trim()}
@@ -477,6 +483,20 @@ const styles = StyleSheet.create({
     color: colors.danger,
     fontSize: 13,
     fontWeight: "600",
+    flexShrink: 1,
+  },
+  resetButton: {
+    borderColor: colors.danger,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 3,
+    marginLeft: "auto",
+  },
+  resetButtonText: {
+    color: colors.danger,
+    fontSize: 12,
+    fontWeight: "700",
   },
   inputBar: {
     flexDirection: "row",
@@ -495,30 +515,6 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     fontSize: 15,
     maxHeight: 120,
-  },
-  micButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: colors.surface,
-    borderColor: colors.border,
-    borderWidth: StyleSheet.hairlineWidth,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  micButtonActive: {
-    backgroundColor: colors.danger,
-    borderColor: colors.danger,
-  },
-  micButtonDisabled: {
-    opacity: 0.5,
-  },
-  micButtonPressed: {
-    opacity: 0.85,
-  },
-  micButtonIcon: {
-    fontSize: 18,
-    color: colors.textPrimary,
   },
   sendButton: {
     backgroundColor: colors.accent,

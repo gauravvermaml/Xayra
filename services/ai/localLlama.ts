@@ -8,14 +8,26 @@ import { logDuration, nowMs } from "./perf";
  * directory before generation is attempted. */
 const MODEL_FILENAME = "Llama-3.2-1B-Instruct-Q4_K_M.gguf";
 
+/**
+ * Strict-grounding directive per the Category A refinement pass: the model
+ * must never answer from its own pre-trained knowledge, only from the
+ * injected notes context. The one deliberate carve-out is the date/calendar
+ * baseline appended below (buildSystemPromptWithDate) — that's injected
+ * runtime context, not pre-trained knowledge, and without it the model has
+ * no way to answer "what day was last Monday" at all. The typo-tolerance
+ * clause stays for the same reason it was added originally: it governs how
+ * to *read* the notes context, not a license to use outside facts.
+ */
 const SYSTEM_PROMPT =
-  "You are Silent Confidant, a private voice note AI. Answer the user's question based on the " +
-  "provided voice note context when it's relevant. If the question is about the user's notes and " +
-  "the context doesn't contain the answer, state that clearly. If the question is a general " +
-  'temporal/calendar or conversational question (e.g. "what day was last Monday?", "what\'s today\'s ' +
-  'date?") that doesn\'t require the notes, answer it directly and confidently using the date ' +
-  "information below — never say something wasn't mentioned in the notes for a question the notes " +
-  "were never meant to answer.";
+  "You are Remi, a private memory recall assistant. Answer queries EXCLUSIVELY using the provided " +
+  "notes context. If the notes do not contain the answer, reply EXACTLY: \"I couldn't find any " +
+  "mention of that in your saved notes.\" Never use general pre-trained knowledge or external facts, " +
+  "except for the current-date information explicitly provided below, which you may use to answer " +
+  "temporal/calendar questions (e.g. \"what day was last Monday?\"). The notes were transcribed by " +
+  "an on-device speech-to-text model and may contain mishearings of similar-sounding words (e.g. " +
+  "\"AirPods\" transcribed as \"airports\"). If a user asks about a term and the retrieved note " +
+  "contains a phonetically similar word or an obvious speech-to-text typo, treat that as the same " +
+  "thing the user is asking about and answer using that note's content.";
 
 const WEEKDAY_NAMES = [
   "Sunday",
@@ -84,6 +96,15 @@ function buildSystemPromptWithDate(): string {
  * in `stop`, generation would run past the assistant's turn and start
  * hallucinating a fake next user turn. */
 const EOT_TOKEN = "<|eot_id|>";
+
+/** Low, near-deterministic temperature — RAG answers should be a consistent
+ * read of the retrieved notes, not creative writing. At the default
+ * temperature this 1B model gave contradictory answers to near-identical
+ * rephrasings of the same question against the same note (observed
+ * on-device: "you didn't mention AirPods" vs "yes, you mentioned AirPods"
+ * back to back). Not 0 exactly, since some sampling still helps it recover
+ * from a bad first token rather than deterministically repeating a mistake. */
+const GENERATION_TEMPERATURE = 0.1;
 
 let contextPromise: Promise<LlamaContext> | null = null;
 
@@ -169,6 +190,7 @@ export async function generateLocalRAGAnswer(
     {
       prompt: fullPrompt,
       n_predict: 512,
+      temperature: GENERATION_TEMPERATURE,
       stop: [EOT_TOKEN, "<|end_of_text|>"],
     },
     (data) => {
