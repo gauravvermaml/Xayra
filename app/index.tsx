@@ -16,6 +16,7 @@ import { CentralMicButton } from "../components/CentralMicButton";
 import { NoteCard } from "../components/NoteCard";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { ViewToggle } from "../components/ViewToggle";
+import { asrRouter } from "../services/ai/asrRouter";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import {
   createVoiceNote,
@@ -81,7 +82,9 @@ export default function HomeScreen() {
           return;
         }
         setProcessingState("processing");
-        void createVoiceNote(audioUri)
+        void asrRouter
+          .transcribe(audioUri)
+          .then(({ transcript }) => createVoiceNote(audioUri, transcript))
           .then(() => refreshNotes())
           .catch((err) => {
             console.error("[RecordError]", err, err?.stack);
@@ -91,6 +94,7 @@ export default function HomeScreen() {
           })
           .finally(() => setProcessingState("idle"));
       } else {
+        asrRouter.startListening();
         await recorder.startRecording();
       }
     } catch (err) {
@@ -205,7 +209,10 @@ export default function HomeScreen() {
             </Text>
             {recorder.isRecording && (
               <Pressable
-                onPress={() => void recorder.cancelAndRestart()}
+                onPress={() => {
+                  asrRouter.restartListening();
+                  void recorder.cancelAndRestart();
+                }}
                 disabled={recorder.isTransitioning}
                 style={styles.resetButton}
               >

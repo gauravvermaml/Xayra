@@ -46,3 +46,7 @@ yarn-error.*
 *.bin
 *.gguf
 *.onnx
+
+# local build/prebuild logs and UI-dump artifacts from manual dev-loop testing
+*.log
+ui_dump.xml

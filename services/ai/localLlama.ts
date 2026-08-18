@@ -3,10 +3,18 @@ import { initLlama, LlamaContext } from "llama.rn";
 
 import { logDuration, nowMs } from "./perf";
 
-/** Not bundled — tens of MB — same resolution pattern as localWhisper.ts and
- * localEmbeddings.ts: expected to already be sitting in the document
- * directory before generation is attempted. */
-const MODEL_FILENAME = "Llama-3.2-1B-Instruct-Q4_K_M.gguf";
+/** Not bundled — hundreds of MB to ~2GB — same resolution pattern as
+ * localWhisper.ts and localEmbeddings.ts: expected to already be sitting in
+ * the document directory before generation is attempted. Priority order
+ * mirrors localWhisper.ts's MODEL_FILENAMES pattern: the 3B model is
+ * materially more capable (see the AirPods answer-consistency issue this
+ * project hit at 1B) and is preferred whenever a device has it pushed;
+ * falls back to the 1B model, which is smaller and still ships as the
+ * baseline every device is expected to have. */
+const MODEL_FILENAMES = [
+  { filename: "llama-3.2-3b-instruct-q4_k_m.gguf", label: "3B" },
+  { filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf", label: "1B" },
+] as const;
 
 /**
  * Strict-grounding directive per the Category A refinement pass: the model
@@ -108,24 +116,26 @@ const GENERATION_TEMPERATURE = 0.1;
 
 let contextPromise: Promise<LlamaContext> | null = null;
 
-function resolveModelPath(): string {
+type ResolvedModel = { path: string; label: (typeof MODEL_FILENAMES)[number]["label"] };
+
+async function resolveModelPath(): Promise<ResolvedModel> {
   const dir = FileSystem.documentDirectory;
   if (!dir) {
     throw new Error("No writable document directory available on this platform.");
   }
-  return `${dir}${MODEL_FILENAME}`;
-}
 
-async function requireModelExists(): Promise<string> {
-  const path = resolveModelPath();
-  const info = await FileSystem.getInfoAsync(path);
-  if (!info.exists) {
-    throw new Error(
-      `${MODEL_FILENAME} not found. Place it in the app's document directory ` +
-        `(${FileSystem.documentDirectory}) before generating an answer.`
-    );
+  for (const { filename, label } of MODEL_FILENAMES) {
+    const path = `${dir}${filename}`;
+    const info = await FileSystem.getInfoAsync(path);
+    if (info.exists) {
+      return { path, label };
+    }
   }
-  return path;
+
+  throw new Error(
+    `No local Llama model found. Place ${MODEL_FILENAMES.map((m) => m.filename).join(" or ")} ` +
+      `in ${dir} before generating an answer.`
+  );
 }
 
 /**
@@ -136,8 +146,11 @@ async function requireModelExists(): Promise<string> {
 async function getContext(): Promise<LlamaContext> {
   if (!contextPromise) {
     const coldStart = nowMs();
-    contextPromise = requireModelExists()
-      .then((model) => initLlama({ model, n_ctx: 4096, n_threads: 4 }))
+    contextPromise = resolveModelPath()
+      .then(({ path, label }) => {
+        console.log(`[Llama] Initialized Model: ${label} (q4_k_m)`);
+        return initLlama({ model: path, n_ctx: 4096, n_threads: 4 });
+      })
       .then((context) => {
         logDuration("Llama cold-start (GGUF model load from disk)", coldStart);
         return context;

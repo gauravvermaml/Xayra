@@ -18,10 +18,10 @@ import * as Crypto from "expo-crypto";
 import { CentralMicButton } from "../components/CentralMicButton";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { ViewToggle } from "../components/ViewToggle";
+import { asrRouter } from "../services/ai/asrRouter";
 import { generateRAGAnswer, type RagCitation } from "../services/ai/rag";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakText, stopSpeech } from "../services/audio/tts";
-import { transcribeAudioLocal } from "../services/ai/localWhisper";
 import { isSilentTranscript } from "../services/notes/noteManager";
 
 const colors = {
@@ -93,6 +93,7 @@ export default function ChatScreen() {
     useCallback(() => {
       return () => {
         if (recorderRef.current.isRecording) {
+          asrRouter.cancelListening();
           void recorderRef.current.stopRecording();
         }
         void stopSpeech();
@@ -215,7 +216,7 @@ export default function ChatScreen() {
 
       setIsTranscribingVoice(true);
       try {
-        const transcript = await transcribeAudioLocal(uri);
+        const { transcript } = await asrRouter.transcribe(uri);
         if (isSilentTranscript(transcript)) {
           Alert.alert(
             "No Speech Detected",
@@ -234,6 +235,7 @@ export default function ChatScreen() {
       // A voice question and TTS narration should never overlap.
       void stopSpeech();
       setSpeakingMessageId(null);
+      asrRouter.startListening();
       // recorder.startRecording() already alerts internally on failure
       // (permissions denied, native error, etc.) — nothing extra needed here.
       await recorder.startRecording().catch(() => {});
@@ -326,6 +328,7 @@ export default function ChatScreen() {
               {isRecordingVoice && (
                 <Pressable
                   onPress={() => {
+                    asrRouter.restartListening();
                     void recorder.cancelAndRestart();
                     setRecordingDuration(0);
                   }}

@@ -40,7 +40,15 @@
         }
       ],
       "onnxruntime-react-native",
-      "llama.rn"
+      "llama.rn",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow Remi to access your microphone.",
+          "speechRecognitionPermission": "Allow Remi to use on-device speech recognition for faster note transcription.",
+          "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox"]
+        }
+      ]
     ],
     "extra": {
       "router": {},

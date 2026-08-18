@@ -4,7 +4,6 @@ import * as FileSystem from "expo-file-system/legacy";
 import { getRawDatabase, isFtsAvailable } from "../../db/client";
 import type { NoteStatus } from "../../db/schema";
 import { generateEmbeddingLocal } from "../ai/localEmbeddings";
-import { transcribeAudioLocal } from "../ai/localWhisper";
 import { logDuration, nowMs } from "../ai/perf";
 
 export type Note = {
@@ -97,9 +96,13 @@ async function insertEmbedding(noteId: string, embedding: number[]): Promise<voi
   );
 }
 
-/** Transcribes a recorded voice note, embeds it, and persists both — updating
- * `status` at each step of the pipeline so stalled/failed notes are visible. */
-export async function createVoiceNote(audioUri: string): Promise<Note> {
+/** Embeds and persists a recorded voice note — updating `status` at each
+ * step of the pipeline so stalled/failed notes are visible. Transcription
+ * itself happens upstream via `services/ai/asrRouter.ts` (Tier 1 native /
+ * Tier 2 Whisper) — the caller passes the resolved transcript in rather than
+ * this function calling Whisper directly, since the router may have already
+ * produced it live during recording via the native tier. */
+export async function createVoiceNote(audioUri: string, transcript: string): Promise<Note> {
   if (typeof FileSystem.getInfoAsync !== "function") {
     throw new Error(
       "expo-file-system/legacy: getInfoAsync is not available on this build."
@@ -108,8 +111,7 @@ export async function createVoiceNote(audioUri: string): Promise<Note> {
 
   const info = await FileSystem.getInfoAsync(audioUri);
   if (!info.exists || info.size <= MIN_AUDIO_BYTES) {
-    // Guards against uploading a ~0-second recording to Whisper, which
-    // rejects it with a 400 anyway.
+    // Guards against persisting a ~0-second recording.
     throw new EmptyRecordingError();
   }
 
@@ -126,7 +128,6 @@ export async function createVoiceNote(audioUri: string): Promise<Note> {
   );
 
   try {
-    const transcript = await transcribeAudioLocal(audioUri);
     if (isSilentTranscript(transcript)) {
       throw new SilentRecordingError();
     }
