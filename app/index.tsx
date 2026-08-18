@@ -10,11 +10,12 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 
 import { CentralMicButton } from "../components/CentralMicButton";
 import { NoteCard } from "../components/NoteCard";
 import { NoteDetailModal } from "../components/NoteDetailModal";
+import { SmartNudgeBanner } from "../components/SmartNudgeBanner";
 import { ViewToggle } from "../components/ViewToggle";
 import { asrRouter } from "../services/ai/asrRouter";
 import { useVoiceRecorder } from "../services/audio/recorder";
@@ -27,6 +28,14 @@ import {
   type HybridSearchResult,
   type Note,
 } from "../services/notes/noteManager";
+import {
+  getSyncStatus,
+  restoreFromDrive,
+  signInWithGoogle,
+  type SyncStatus,
+} from "../services/sync/driveSync";
+
+const NUDGE_BANNER_MIN_NOTES = 5;
 
 const colors = {
   background: "#0f172a",
@@ -42,6 +51,7 @@ type ProcessingState = "idle" | "processing";
 type DisplayNote = { id: string; content: string; audioUri: string | null; score?: number };
 
 export default function HomeScreen() {
+  const router = useRouter();
   const recorder = useVoiceRecorder();
   const [processingState, setProcessingState] = useState<ProcessingState>("idle");
   const [searchQuery, setSearchQuery] = useState("");
@@ -50,6 +60,9 @@ export default function HomeScreen() {
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>({ isConnected: false });
+  const [isNudgeDismissed, setIsNudgeDismissed] = useState(false);
+  const [isRestoring, setIsRestoring] = useState(false);
 
   const refreshNotes = useCallback(async () => {
     try {
@@ -60,14 +73,43 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const refreshSyncStatus = useCallback(async () => {
+    try {
+      setSyncStatus(await getSyncStatus());
+    } catch (err) {
+      console.error("[Sync] Failed to load status", err);
+    }
+  }, []);
+
   // Re-query on every focus (e.g. switching back from the Chat tab), not
   // just on mount — op-sqlite state can change from actions taken while
   // this screen wasn't visible.
   useFocusEffect(
     useCallback(() => {
       void refreshNotes();
-    }, [refreshNotes])
+      void refreshSyncStatus();
+    }, [refreshNotes, refreshSyncStatus])
   );
+
+  const handleRestoreFromDrive = useCallback(async () => {
+    setIsRestoring(true);
+    setError(null);
+    try {
+      if (!syncStatus.isConnected) {
+        await signInWithGoogle();
+      }
+      await restoreFromDrive();
+      await refreshNotes();
+      await refreshSyncStatus();
+      Alert.alert("Vault Restored", "Your notes have been restored from Google Drive.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to restore from Google Drive.";
+      setError(message);
+      Alert.alert("Restore Failed", message);
+    } finally {
+      setIsRestoring(false);
+    }
+  }, [syncStatus.isConnected, refreshNotes, refreshSyncStatus]);
 
   const handleRecordPress = useCallback(async () => {
     console.log("[RecordButton] Tapped");
@@ -187,12 +229,33 @@ export default function HomeScreen() {
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
-        <Text style={styles.title}>Remi</Text>
-        <Text style={styles.subtitle}>
-          Your notes, kept between you and your device.
-        </Text>
+        <View style={styles.headerRow}>
+          <View style={styles.headerTextGroup}>
+            <Text style={styles.title}>Remi</Text>
+            <Text style={styles.subtitle}>
+              Your notes, kept between you and your device.
+            </Text>
+          </View>
+          <Pressable
+            onPress={() => router.push("/settings")}
+            hitSlop={12}
+            style={styles.settingsButton}
+          >
+            <Text style={styles.settingsButtonIcon}>⚙</Text>
+          </Pressable>
+        </View>
 
         <ViewToggle active="notes" />
+
+        {allNotes.length >= NUDGE_BANNER_MIN_NOTES && !syncStatus.isConnected && !isNudgeDismissed && (
+          <SmartNudgeBanner
+            onConnect={() => {
+              setIsNudgeDismissed(true);
+              router.push("/settings");
+            }}
+            onDismiss={() => setIsNudgeDismissed(true)}
+          />
+        )}
 
         <CentralMicButton
           state={
@@ -247,9 +310,26 @@ export default function HomeScreen() {
           keyExtractor={(item) => item.id}
           ListEmptyComponent={
             !isSearching ? (
-              <Text style={styles.emptyText}>
-                {isSearchActive ? "No matching notes yet." : "No notes recorded yet."}
-              </Text>
+              <View>
+                <Text style={styles.emptyText}>
+                  {isSearchActive ? "No matching notes yet." : "No notes recorded yet."}
+                </Text>
+                {!isSearchActive && (
+                  <Pressable
+                    onPress={handleRestoreFromDrive}
+                    disabled={isRestoring}
+                    style={styles.restoreLinkRow}
+                  >
+                    {isRestoring ? (
+                      <ActivityIndicator color={colors.accent} size="small" />
+                    ) : (
+                      <Text style={styles.restoreLinkText}>
+                        Already have a backup? Restore vault from Google Drive
+                      </Text>
+                    )}
+                  </Pressable>
+                )}
+              </View>
             ) : null
           }
           renderItem={({ item }) => (
@@ -287,6 +367,29 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingTop: 32,
   },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+  },
+  headerTextGroup: {
+    flex: 1,
+  },
+  settingsButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: "center",
+    justifyContent: "center",
+    marginLeft: 12,
+  },
+  settingsButtonIcon: {
+    color: colors.textMuted,
+    fontSize: 17,
+  },
   title: {
     color: colors.textPrimary,
     fontSize: 28,
@@ -297,6 +400,16 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginTop: 4,
     marginBottom: 20,
+  },
+  restoreLinkRow: {
+    marginTop: 16,
+    alignItems: "center",
+  },
+  restoreLinkText: {
+    color: colors.accent,
+    fontSize: 13,
+    fontWeight: "600",
+    textAlign: "center",
   },
   searchBar: {
     flexDirection: "row",

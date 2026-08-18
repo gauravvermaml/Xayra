@@ -12,7 +12,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useFocusEffect } from "expo-router";
+import { useFocusEffect, useRouter } from "expo-router";
 import * as Crypto from "expo-crypto";
 
 import { CentralMicButton } from "../components/CentralMicButton";
@@ -50,6 +50,7 @@ function formatDuration(totalSeconds: number): string {
 }
 
 export default function ChatScreen() {
+  const router = useRouter();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -250,8 +251,19 @@ export default function ChatScreen() {
         keyboardVerticalOffset={12}
       >
         <View style={styles.container}>
-          <Text style={styles.title}>Remi</Text>
-          <Text style={styles.subtitle}>Ask questions about your voice notes.</Text>
+          <View style={styles.headerRow}>
+            <View style={styles.headerTextGroup}>
+              <Text style={styles.title}>Remi</Text>
+              <Text style={styles.subtitle}>Ask questions about your voice notes.</Text>
+            </View>
+            <Pressable
+              onPress={() => router.push("/settings")}
+              hitSlop={12}
+              style={styles.settingsButton}
+            >
+              <Text style={styles.settingsButtonIcon}>⚙</Text>
+            </Pressable>
+          </View>
 
           <ViewToggle active="chat" />
 
@@ -393,6 +405,29 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 24,
     paddingTop: 32,
+  },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+  },
+  headerTextGroup: {
+    flex: 1,
+  },
+  settingsButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: StyleSheet.hairlineWidth,
+    alignItems: "center",
+    justifyContent: "center",
+    marginLeft: 12,
+  },
+  settingsButtonIcon: {
+    color: colors.textMuted,
+    fontSize: 17,
   },
   title: {
     color: colors.textPrimary,

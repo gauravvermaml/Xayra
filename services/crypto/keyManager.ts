@@ -126,3 +126,26 @@ export async function destroyDatabaseKey(): Promise<void> {
   await SecureStore.deleteItemAsync(DB_ENCRYPTION_KEY_ID);
   cachedEphemeralKey = null;
 }
+
+/**
+ * Overwrites the stored database encryption key — used by
+ * services/sync/driveSync.ts when restoring a backup, since the restored
+ * `.db` file was encrypted with whatever key was current on the device that
+ * created the backup, not this device's own (normally randomly-generated,
+ * never-leaves-the-device) key. Without this, a restored backup would be
+ * undecryptable: SQLCipher has no way to open a file with the wrong key.
+ */
+export async function setDatabaseKey(key: string): Promise<void> {
+  const biometricAvailable = await isBiometricAuthAvailable();
+  const secureStoreOptions: SecureStore.SecureStoreOptions = biometricAvailable
+    ? {
+        requireAuthentication: true,
+        authenticationPrompt: "Unlock Silent Confidant",
+        keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+      }
+    : {
+        keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+      };
+  await SecureStore.setItemAsync(DB_ENCRYPTION_KEY_ID, key, secureStoreOptions);
+  cachedEphemeralKey = null;
+}

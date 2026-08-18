@@ -48,6 +48,12 @@
           "speechRecognitionPermission": "Allow Remi to use on-device speech recognition for faster note transcription.",
           "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox"]
         }
+      ],
+      [
+        "@react-native-google-signin/google-signin",
+        {
+          "iosUrlScheme": "com.googleusercontent.apps.REPLACE_WITH_IOS_OAUTH_CLIENT_ID"
+        }
       ]
     ],
     "extra": {

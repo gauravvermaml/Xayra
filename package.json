@@ -5,6 +5,8 @@
   "dependencies": {
     "@fugood/react-native-audio-pcm-stream": "1.1.4",
     "@op-engineering/op-sqlite": "^17.1.5",
+    "@react-native-async-storage/async-storage": "^3.1.1",
+    "@react-native-google-signin/google-signin": "^16.1.4",
     "buffer": "^6.0.3",
     "drizzle-orm": "^0.45.2",
     "expo": "~57.0.11",
