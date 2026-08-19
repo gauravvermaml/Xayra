@@ -12,17 +12,21 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 
+import { ActiveModePill } from "../components/ActiveModePill";
 import { CentralMicButton } from "../components/CentralMicButton";
 import { NoteCard } from "../components/NoteCard";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { SmartNudgeBanner } from "../components/SmartNudgeBanner";
 import { ViewToggle } from "../components/ViewToggle";
 import { asrRouter } from "../services/ai/asrRouter";
+import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
 import { useVoiceRecorder } from "../services/audio/recorder";
+import { speakTextAndWait } from "../services/audio/tts";
 import {
   createVoiceNote,
   deleteNote,
   hybridSearchNotes,
+  isSilentTranscript,
   listNotes,
   purgeAllNotes,
   type HybridSearchResult,
@@ -110,6 +114,36 @@ export default function HomeScreen() {
       setIsRestoring(false);
     }
   }, [syncStatus.isConnected, refreshNotes, refreshSyncStatus]);
+
+  // Active/"Shower" Mode's per-utterance handler: transcribe, save, speak a
+  // short confirmation. Errors are swallowed rather than surfaced via Alert
+  // — a hands-free loop shouldn't interrupt itself with a dialog the user
+  // may not be in a position to dismiss (wet hands, phone across the room).
+  // ActiveModeManager re-arms the mic regardless of whether this throws.
+  const handleActiveModeUtterance: ActiveModeUtteranceHandler = useCallback(
+    async (audioUri, reportState) => {
+      try {
+        const { transcript } = await asrRouter.transcribe(audioUri);
+        if (isSilentTranscript(transcript)) {
+          return;
+        }
+        await createVoiceNote(audioUri, transcript);
+        await refreshNotes();
+        reportState("speaking");
+        await speakTextAndWait("Saved.");
+      } catch (err) {
+        console.error("[ActiveMode] Failed to save note", err);
+      }
+    },
+    [refreshNotes]
+  );
+  const activeMode = useActiveMode(handleActiveModeUtterance);
+
+  const handleToggleActiveMode = useCallback(() => {
+    void activeMode.toggle().catch((err) => {
+      Alert.alert("Active Mode Error", err instanceof Error ? err.message : String(err));
+    });
+  }, [activeMode]);
 
   const handleRecordPress = useCallback(async () => {
     console.log("[RecordButton] Tapped");
@@ -247,6 +281,13 @@ export default function HomeScreen() {
 
         <ViewToggle active="notes" />
 
+        <ActiveModePill
+          isActive={activeMode.isActive}
+          state={activeMode.state}
+          onPress={handleToggleActiveMode}
+          disabled={recorder.isRecording || recorder.isTransitioning}
+        />
+
         {allNotes.length >= NUDGE_BANNER_MIN_NOTES && !syncStatus.isConnected && !isNudgeDismissed && (
           <SmartNudgeBanner
             onConnect={() => {
@@ -262,7 +303,7 @@ export default function HomeScreen() {
             recorder.isRecording ? "recording" : processingState === "processing" ? "busy" : "idle"
           }
           onPress={handleRecordPress}
-          disabled={processingState === "processing" || recorder.isTransitioning}
+          disabled={processingState === "processing" || recorder.isTransitioning || activeMode.isActive}
         />
 
         {(recorder.isRecording || processingState === "processing") && (

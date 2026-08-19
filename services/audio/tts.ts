@@ -41,6 +41,31 @@ export async function speakText(text: string, options?: Speech.SpeechOptions): P
 }
 
 /**
+ * Like `speakText`, but resolves only once the utterance has actually
+ * finished playing (or errored/was stopped) — `speakText` itself resolves
+ * as soon as `Speech.speak()` is *called*, which is right for the manual
+ * chat UI (nothing needs to wait on it) but wrong for Active Mode, which
+ * must not re-arm the mic until the assistant has actually stopped talking
+ * (there's no echo cancellation, so listening while still speaking would
+ * mean transcribing the app's own voice as the next "utterance").
+ */
+export async function speakTextAndWait(text: string): Promise<void> {
+  // speakText() itself resolves without ever invoking onDone/onStopped/
+  // onError when the sanitized text is empty — checking here first avoids
+  // waiting on a promise that would otherwise never settle.
+  if (!sanitizeTextForSpeech(text)) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    void speakText(text, {
+      onDone: () => resolve(),
+      onStopped: () => resolve(),
+      onError: () => resolve(),
+    });
+  });
+}
+
+/**
  * Stops any in-progress speech. Safe to call even when nothing is
  * speaking. Callers elsewhere in the app (recorder, audio player) call
  * this before starting a new recording or note playback so TTS never

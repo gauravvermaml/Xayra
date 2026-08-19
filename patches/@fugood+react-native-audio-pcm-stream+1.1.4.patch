@@ -1,0 +1,54 @@
+diff --git a/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java b/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java
+index 6d7d17d..9717e37 100644
+--- a/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java
++++ b/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java
+@@ -93,6 +93,19 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+ 
+         Thread recordingThread = new Thread(new Runnable() {
+             public void run() {
++                // Captured once, up front, into a local: `recorder` is a
++                // shared mutable instance field, and this thread otherwise
++                // re-reads it fresh on every loop iteration. If a concurrent
++                // stop()+init() (e.g. a second recording session starting
++                // before this thread has fully exited) reassigns or nulls
++                // that field mid-loop, `recorder.read(...)` below would
++                // NPE — observed in practice as a hard crash. Operating on
++                // a stable local reference for this thread's whole lifetime
++                // fixes that regardless of what the shared field does later.
++                final AudioRecord activeRecorder = recorder;
++                if (activeRecorder == null) {
++                    return;
++                }
+                 try {
+                     int bytesRead;
+                     int count = 0;
+@@ -100,7 +113,7 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+                     byte[] buffer = new byte[bufferSize];
+ 
+                     while (isRecording) {
+-                        bytesRead = recorder.read(buffer, 0, buffer.length);
++                        bytesRead = activeRecorder.read(buffer, 0, buffer.length);
+ 
+                         // skip first 2 buffers to eliminate "click sound"
+                         if (bytesRead > 0 && ++count > 2) {
+@@ -108,12 +121,17 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+                             eventEmitter.emit("data", base64Data);
+                         }
+                     }
+-                    recorder.stop();
++                    activeRecorder.stop();
+                 } catch (Exception e) {
+                     e.printStackTrace();
+                 } finally {
+-                    recorder.release();
+-                    recorder = null;
++                    activeRecorder.release();
++                    // Only clear the shared field if it's still pointing at
++                    // *this* thread's recorder — a newer session may have
++                    // already replaced it.
++                    if (recorder == activeRecorder) {
++                        recorder = null;
++                    }
+                 }
+             }
+         });

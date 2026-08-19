@@ -15,13 +15,15 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import * as Crypto from "expo-crypto";
 
+import { ActiveModePill } from "../components/ActiveModePill";
 import { CentralMicButton } from "../components/CentralMicButton";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { ViewToggle } from "../components/ViewToggle";
 import { asrRouter } from "../services/ai/asrRouter";
 import { generateRAGAnswer, type RagCitation } from "../services/ai/rag";
+import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
 import { useVoiceRecorder } from "../services/audio/recorder";
-import { speakText, stopSpeech } from "../services/audio/tts";
+import { speakText, speakTextAndWait, stopSpeech } from "../services/audio/tts";
 import { isSilentTranscript } from "../services/notes/noteManager";
 
 const colors = {
@@ -140,6 +142,55 @@ export default function ChatScreen() {
     [speakingMessageId, playMessageSpeech]
   );
 
+  // Shared by the manual send flow and Active Mode: adds the user/assistant
+  // message pair, streams the RAG answer in, and updates the assistant
+  // message with either the final answer or an error string. Throws after
+  // recording the error message, so callers can each decide how to surface
+  // the failure (Alert for the manual flow, silent log for Active Mode).
+  const runRagExchange = useCallback(
+    async (query: string): Promise<{ assistantId: string; text: string }> => {
+      const userMessage: ChatMessage = {
+        id: Crypto.randomUUID(),
+        role: "user",
+        text: query,
+      };
+      const assistantId = Crypto.randomUUID();
+      const assistantMessage: ChatMessage = {
+        id: assistantId,
+        role: "assistant",
+        text: "",
+        isStreaming: true,
+      };
+      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+
+      try {
+        const answer = await generateRAGAnswer(query, (chunk) => {
+          setMessages((prev) =>
+            prev.map((message) =>
+              message.id === assistantId
+                ? { ...message, text: message.text + chunk }
+                : message
+            )
+          );
+        });
+        updateMessage(assistantId, {
+          text: answer.text,
+          citations: answer.citations,
+          isStreaming: false,
+        });
+        return { assistantId, text: answer.text };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to get a response.";
+        updateMessage(assistantId, {
+          text: `Sorry, something went wrong: ${message}`,
+          isStreaming: false,
+        });
+        throw err;
+      }
+    },
+    [updateMessage]
+  );
+
   const handleSend = useCallback(async (overrideText?: string, source: "text" | "voice" = "text") => {
     const query = (overrideText ?? input).trim();
     if (!query || isSending) {
@@ -158,51 +209,65 @@ export default function ChatScreen() {
     }
     setIsSending(true);
 
-    const userMessage: ChatMessage = {
-      id: Crypto.randomUUID(),
-      role: "user",
-      text: query,
-    };
-    const assistantId = Crypto.randomUUID();
-    const assistantMessage: ChatMessage = {
-      id: assistantId,
-      role: "assistant",
-      text: "",
-      isStreaming: true,
-    };
-    setMessages((prev) => [...prev, userMessage, assistantMessage]);
-
     try {
-      const answer = await generateRAGAnswer(query, (chunk) => {
-        setMessages((prev) =>
-          prev.map((message) =>
-            message.id === assistantId
-              ? { ...message, text: message.text + chunk }
-              : message
-          )
-        );
-      });
-      updateMessage(assistantId, {
-        text: answer.text,
-        citations: answer.citations,
-        isStreaming: false,
-      });
+      const { assistantId, text } = await runRagExchange(query);
       // Smart modality: a typed question gets a silent text answer; a
       // spoken question gets the answer read back aloud too.
       if (source === "voice") {
-        playMessageSpeech({ id: assistantId, text: answer.text });
+        playMessageSpeech({ id: assistantId, text });
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : "Failed to get a response.";
-      updateMessage(assistantId, {
-        text: `Sorry, something went wrong: ${message}`,
-        isStreaming: false,
-      });
-      Alert.alert("Chat Error", message);
+      Alert.alert("Chat Error", err instanceof Error ? err.message : "Failed to get a response.");
     } finally {
       setIsSending(false);
     }
-  }, [input, isSending, updateMessage, playMessageSpeech]);
+  }, [input, isSending, runRagExchange, playMessageSpeech]);
+
+  // Active/"Shower" Mode's per-utterance handler: transcribe, run the RAG
+  // exchange (which already appends it to the visible chat transcript),
+  // then speak the answer and — critically — actually wait for the speech
+  // to finish before returning, so ActiveModeManager doesn't re-arm the mic
+  // while the assistant is still talking (no echo cancellation exists here,
+  // so the mic would otherwise transcribe the app's own voice as the next
+  // "question"). Errors are logged, not Alert'd, for the same
+  // don't-interrupt-a-hands-free-loop reason as the Notes tab.
+  const handleActiveModeUtterance: ActiveModeUtteranceHandler = useCallback(
+    async (audioUri, reportState) => {
+      try {
+        const { transcript } = await asrRouter.transcribe(audioUri);
+        if (isSilentTranscript(transcript)) {
+          return;
+        }
+        const { text } = await runRagExchange(transcript.trim());
+        reportState("speaking");
+        await speakTextAndWait(text);
+      } catch (err) {
+        console.error("[ActiveMode] Failed to answer", err);
+      }
+    },
+    [runRagExchange]
+  );
+  const activeMode = useActiveMode(handleActiveModeUtterance);
+
+  const handleToggleActiveMode = useCallback(() => {
+    void activeMode.toggle().catch((err) => {
+      Alert.alert("Active Mode Error", err instanceof Error ? err.message : String(err));
+    });
+  }, [activeMode]);
+
+  // useActiveMode's own unmount cleanup already stops the manager, but this
+  // mirrors the recorder/TTS focus-loss cleanup above for the same reason:
+  // don't leave a hands-free mic session dangling if focus is lost without
+  // an immediate unmount.
+  const activeModeStopRef = useRef(activeMode.stop);
+  activeModeStopRef.current = activeMode.stop;
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        void activeModeStopRef.current();
+      };
+    }, [])
+  );
 
   const handleMicPress = useCallback(async () => {
     if (recorder.isTransitioning) {
@@ -267,10 +332,17 @@ export default function ChatScreen() {
 
           <ViewToggle active="chat" />
 
+          <ActiveModePill
+            isActive={activeMode.isActive}
+            state={activeMode.state}
+            onPress={handleToggleActiveMode}
+            disabled={isRecordingVoice || recorder.isTransitioning}
+          />
+
           <CentralMicButton
             state={isRecordingVoice ? "recording" : isTranscribingVoice ? "busy" : "idle"}
             onPress={handleMicPress}
-            disabled={isSending || isTranscribingVoice || recorder.isTransitioning}
+            disabled={isSending || isTranscribingVoice || recorder.isTransitioning || activeMode.isActive}
           />
 
           <FlatList
@@ -360,17 +432,17 @@ export default function ChatScreen() {
               placeholder="Ask about your notes…"
               placeholderTextColor={colors.textMuted}
               style={styles.input}
-              editable={!isSending && !isRecordingVoice && !isTranscribingVoice}
+              editable={!isSending && !isRecordingVoice && !isTranscribingVoice && !activeMode.isActive}
               multiline
               returnKeyType="send"
               onSubmitEditing={() => handleSend()}
             />
             <Pressable
               onPress={() => handleSend()}
-              disabled={isSending || !input.trim()}
+              disabled={isSending || !input.trim() || activeMode.isActive}
               style={({ pressed }) => [
                 styles.sendButton,
-                (isSending || !input.trim()) && styles.sendButtonDisabled,
+                (isSending || !input.trim() || activeMode.isActive) && styles.sendButtonDisabled,
                 pressed && styles.sendButtonPressed,
               ]}
             >
