@@ -38,7 +38,17 @@ yarn-error.*
 
 # generated native folders
 /ios
-/android
+/android/*
+# ...except the debug signing keystore: Google OAuth client IDs are tied to
+# this SHA-1 fingerprint (see services/sync/driveSync.ts), so regenerating it
+# via a clean `prebuild` would break Drive sign-in until re-registered in
+# Google Cloud Console. Keeping it in the repo makes the debug SHA-1 stable
+# across machines and clean rebuilds. (Git can't re-include a file whose
+# parent directory is excluded outright, hence excluding /android/* — not
+# /android — plus one more level down for /android/app/*.)
+!/android/app/
+/android/app/*
+!/android/app/debug.keystore
 
 # local AI model assets — resolved at runtime from the device's document
 # directory (see CLAUDE.md), never bundled or committed; these are typically
