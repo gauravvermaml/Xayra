@@ -11,6 +11,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 
+import { colors, radius, spacing, typography } from "../constants/theme";
 import {
   backupToDrive,
   getAutoSyncOnWifi,
@@ -20,18 +21,6 @@ import {
   signOutFromGoogle,
   type SyncStatus,
 } from "../services/sync/driveSync";
-
-const colors = {
-  background: "#0f172a",
-  surface: "#1e293b",
-  surfaceAlt: "#27324a",
-  border: "#334155",
-  textPrimary: "#f8fafc",
-  textMuted: "#94a3b8",
-  accent: "#6366f1",
-  danger: "#f87171",
-  success: "#34d399",
-};
 
 type BusyAction = "connect" | "backup" | "disconnect" | null;
 
@@ -127,29 +116,69 @@ export default function SettingsScreen() {
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
         <View style={styles.header}>
-          <Pressable onPress={() => router.back()} hitSlop={12} style={styles.backButton}>
+          <Pressable
+            onPress={() => router.back()}
+            hitSlop={12}
+            style={({ pressed }) => [styles.backButton, pressed && styles.backButtonPressed]}
+          >
             <Text style={styles.backButtonText}>‹ Back</Text>
           </Pressable>
           <Text style={styles.title}>Settings</Text>
         </View>
 
+        <Text style={styles.groupLabel}>Cloud Backup</Text>
         <View style={styles.card}>
-          <Text style={styles.cardTitle}>Cloud Backup & Restore</Text>
+          <View style={styles.cardHeaderRow}>
+            <View style={styles.statusDotWrap}>
+              <View
+                style={[
+                  styles.statusDot,
+                  status.isConnected ? styles.statusDotConnected : styles.statusDotDisconnected,
+                ]}
+              />
+            </View>
+            <View style={styles.cardHeaderTextGroup}>
+              <Text style={styles.cardTitle}>Google Drive</Text>
+              <Text style={styles.cardSubtitle}>
+                {isLoadingStatus
+                  ? "Checking connection…"
+                  : status.isConnected
+                    ? status.email
+                    : "Not connected"}
+              </Text>
+            </View>
+          </View>
 
           {isLoadingStatus ? (
             <ActivityIndicator color={colors.textMuted} style={styles.cardLoading} />
           ) : status.isConnected ? (
             <>
-              <View style={styles.statusRow}>
-                <View style={[styles.statusDot, styles.statusDotConnected]} />
-                <Text style={styles.statusTextConnected}>Connected — {status.email}</Text>
+              <View style={styles.divider} />
+
+              <View style={styles.metricRow}>
+                <Text style={styles.metricLabel}>Last backup</Text>
+                <Text style={styles.metricValue}>
+                  {status.lastBackupTime ? formatTimestamp(status.lastBackupTime) : "Never"}
+                </Text>
               </View>
-              <Text style={styles.metaText}>
-                {status.lastBackupTime
-                  ? `Last backup: ${formatTimestamp(status.lastBackupTime)}` +
-                    (status.backupSizeBytes != null ? ` · ${formatBytes(status.backupSizeBytes)}` : "")
-                  : "No backup yet on this device."}
-              </Text>
+              {status.backupSizeBytes != null && (
+                <View style={styles.metricRow}>
+                  <Text style={styles.metricLabel}>Backup size</Text>
+                  <Text style={styles.metricValue}>{formatBytes(status.backupSizeBytes)}</Text>
+                </View>
+              )}
+
+              <View style={styles.divider} />
+
+              <View style={styles.toggleRow}>
+                <Text style={styles.toggleLabel}>Auto-sync on Wi-Fi</Text>
+                <Switch
+                  value={autoSyncOnWifi}
+                  onValueChange={handleToggleAutoSync}
+                  trackColor={{ false: colors.border, true: colors.accent }}
+                  thumbColor={colors.textPrimary}
+                />
+              </View>
 
               <Pressable
                 onPress={handleBackupNow}
@@ -167,19 +196,14 @@ export default function SettingsScreen() {
                 )}
               </Pressable>
 
-              <View style={styles.toggleRow}>
-                <Text style={styles.toggleLabel}>Auto-Sync on Wi-Fi</Text>
-                <Switch
-                  value={autoSyncOnWifi}
-                  onValueChange={handleToggleAutoSync}
-                  trackColor={{ false: colors.border, true: colors.accent }}
-                />
-              </View>
-
               <Pressable
                 onPress={handleDisconnect}
                 disabled={busyAction !== null}
-                style={({ pressed }) => [styles.dangerButton, pressed && styles.buttonPressed]}
+                style={({ pressed }) => [
+                  styles.dangerButton,
+                  pressed && styles.buttonPressed,
+                  busyAction !== null && styles.buttonDisabled,
+                ]}
               >
                 {busyAction === "disconnect" ? (
                   <ActivityIndicator color={colors.danger} size="small" />
@@ -190,10 +214,6 @@ export default function SettingsScreen() {
             </>
           ) : (
             <>
-              <View style={styles.statusRow}>
-                <View style={styles.statusDot} />
-                <Text style={styles.statusText}>Status: Local Only (Unprotected)</Text>
-              </View>
               <Text style={styles.metaText}>
                 Your notes never leave this device unless you connect a backup destination.
               </Text>
@@ -227,15 +247,19 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
-    paddingHorizontal: 24,
-    paddingTop: 32,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xxl,
   },
   header: {
-    marginBottom: 24,
+    marginBottom: spacing.lg,
   },
   backButton: {
     alignSelf: "flex-start",
-    marginBottom: 12,
+    marginBottom: spacing.md,
+    paddingVertical: spacing.xs,
+  },
+  backButtonPressed: {
+    opacity: 0.6,
   },
   backButtonText: {
     color: colors.accent,
@@ -244,65 +268,104 @@ const styles = StyleSheet.create({
   },
   title: {
     color: colors.textPrimary,
-    fontSize: 28,
-    fontWeight: "700",
+    ...typography.title,
+  },
+  groupLabel: {
+    color: colors.textMuted,
+    ...typography.caption,
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+    marginBottom: spacing.sm,
+    marginLeft: spacing.xs,
   },
   card: {
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 16,
-    padding: 18,
+    borderRadius: radius.xl,
+    padding: spacing.lg,
   },
-  cardTitle: {
-    color: colors.textPrimary,
-    fontSize: 17,
-    fontWeight: "700",
-    marginBottom: 14,
-  },
-  cardLoading: {
-    marginVertical: 12,
-  },
-  statusRow: {
+  cardHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    marginBottom: 8,
+  },
+  statusDotWrap: {
+    width: 12,
+    marginRight: spacing.md,
+    alignItems: "center",
   },
   statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: colors.textMuted,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
   },
   statusDotConnected: {
     backgroundColor: colors.success,
   },
-  statusText: {
-    color: colors.textMuted,
-    fontSize: 14,
-    fontWeight: "600",
+  statusDotDisconnected: {
+    backgroundColor: colors.warning,
   },
-  statusTextConnected: {
-    color: colors.success,
-    fontSize: 14,
+  cardHeaderTextGroup: {
+    flex: 1,
+  },
+  cardTitle: {
+    color: colors.textPrimary,
+    ...typography.heading,
+  },
+  cardSubtitle: {
+    color: colors.textMuted,
+    fontSize: 13,
+    marginTop: 2,
+  },
+  cardLoading: {
+    marginTop: spacing.lg,
+  },
+  divider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: colors.border,
+    marginVertical: spacing.base,
+  },
+  metricRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: spacing.sm,
+  },
+  metricLabel: {
+    color: colors.textMuted,
+    fontSize: 13,
+  },
+  metricValue: {
+    color: colors.textSecondary,
+    fontSize: 13,
     fontWeight: "600",
-    flexShrink: 1,
   },
   metaText: {
     color: colors.textMuted,
     fontSize: 13,
-    marginBottom: 16,
+    marginTop: spacing.md,
+    marginBottom: spacing.lg,
+  },
+  toggleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: spacing.lg,
+  },
+  toggleLabel: {
+    color: colors.textPrimary,
+    fontSize: 14,
+    fontWeight: "600",
   },
   primaryButton: {
     backgroundColor: colors.accent,
-    borderRadius: 12,
+    borderRadius: radius.md,
     paddingVertical: 13,
     alignItems: "center",
     justifyContent: "center",
   },
   primaryButtonText: {
-    color: colors.background,
+    color: colors.onAccent,
     fontSize: 15,
     fontWeight: "700",
   },
@@ -312,25 +375,15 @@ const styles = StyleSheet.create({
   buttonDisabled: {
     opacity: 0.6,
   },
-  toggleRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 18,
-    marginBottom: 18,
-  },
-  toggleLabel: {
-    color: colors.textPrimary,
-    fontSize: 14,
-    fontWeight: "600",
-  },
   dangerButton: {
     borderColor: colors.danger,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 12,
+    backgroundColor: colors.dangerMuted,
+    borderRadius: radius.md,
     paddingVertical: 13,
     alignItems: "center",
     justifyContent: "center",
+    marginTop: spacing.sm,
   },
   dangerButtonText: {
     color: colors.danger,

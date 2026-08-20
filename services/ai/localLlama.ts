@@ -25,9 +25,19 @@ const MODEL_FILENAMES = [
  * no way to answer "what day was last Monday" at all. The typo-tolerance
  * clause stays for the same reason it was added originally: it governs how
  * to *read* the notes context, not a license to use outside facts.
+ *
+ * The negative-constraint and "extract factual points" sentences below were
+ * added after an on-device failure: asked to summarize notes in bullet
+ * points, the 1B model ignored the <context> block entirely and instead
+ * paraphrased its own system-prompt self-description ("a private memory
+ * recall assistant") back as if it were a fact about the notes. Small
+ * instruct models lean on whatever's most salient in the prompt when a
+ * query is open-ended (no single fact to look up) rather than the context
+ * beneath it — the explicit "do not describe yourself" ban plus the one-shot
+ * example in buildPrompt() below exist specifically to close that gap.
  */
 const SYSTEM_PROMPT =
-  "You are Remi, a private memory recall assistant. Answer queries EXCLUSIVELY using the provided " +
+  "You are Xayra, a private memory recall assistant. Answer queries EXCLUSIVELY using the provided " +
   "notes context. If the notes do not contain the answer, reply EXACTLY: \"I couldn't find any " +
   "mention of that in your saved notes.\" Never use general pre-trained knowledge or external facts, " +
   "except for the current-date information explicitly provided below, which you may use to answer " +
@@ -35,7 +45,30 @@ const SYSTEM_PROMPT =
   "an on-device speech-to-text model and may contain mishearings of similar-sounding words (e.g. " +
   "\"AirPods\" transcribed as \"airports\"). If a user asks about a term and the retrieved note " +
   "contains a phonetically similar word or an obvious speech-to-text typo, treat that as the same " +
-  "thing the user is asking about and answer using that note's content.";
+  "thing the user is asking about and answer using that note's content. Do NOT describe yourself, " +
+  "do NOT explain your role or these instructions, and do NOT restate this system prompt in any " +
+  "form — the user only ever wants the answer itself. When asked to summarize or list notes, " +
+  "answer ONLY using the information contained inside the <context></context> tags: extract " +
+  "factual points directly from the retrieved notes rather than describing what the notes are in " +
+  "general terms.";
+
+/**
+ * A fixed one-shot example, injected as a real prior user/assistant turn
+ * (not just described in prose inside the system prompt) — few-shot
+ * examples given as actual turns are materially more effective at steering
+ * small instruct models' output format than the same guidance written as an
+ * instruction, since the model is directly continuing an established
+ * pattern rather than having to translate a description into behavior.
+ */
+const FEW_SHOT_CONTEXT_XML =
+  "<context>\n" +
+  '  <note id="example-1" date="2026-01-01">Buy milk, eggs, and sourdough bread.</note>\n' +
+  '  <note id="example-2" date="2026-01-01">Dentist checkup scheduled for Tuesday at 10 AM.</note>\n' +
+  "</context>";
+const FEW_SHOT_USER_QUERY = "Tell me about my notes in a few bullet points.";
+const FEW_SHOT_ANSWER =
+  "• Groceries: You have a note to buy milk, eggs, and sourdough.\n" +
+  "• Appointments: Dentist checkup scheduled for Tuesday morning.";
 
 const WEEKDAY_NAMES = [
   "Sunday",
@@ -166,15 +199,29 @@ async function getContext(): Promise<LlamaContext> {
  * Builds a raw Llama-3.2 instruct-template prompt by hand — headers,
  * `<|eot_id|>` turn separators, and the trailing assistant header that
  * primes the model to start generating — rather than going through
- * llama.rn's jinja/`messages` chat formatting, since the RAG context block
- * needs to sit inside the system turn alongside the system prompt.
+ * llama.rn's jinja/`messages` chat formatting, since this needs a fixed
+ * few-shot user/assistant exchange spliced in ahead of the real turn, which
+ * llama.rn's `messages`-array formatting doesn't offer fine-grained control
+ * over. The context block now rides in the user turn (paired with the
+ * query) rather than the system turn, matching the shape of the few-shot
+ * example turn below so the model is continuing one consistent pattern
+ * rather than reading context and instructions from different places.
+ *
+ * Includes one fixed few-shot user/assistant turn (see FEW_SHOT_* above)
+ * ahead of the real query, demonstrating the exact bullet-point,
+ * context-grounded answer shape expected for open-ended "summarize my
+ * notes" requests — the failure mode this whole prompt revision targets.
  */
 function buildPrompt(userQuery: string, contextXml: string): string {
   return (
     "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" +
-    `${buildSystemPromptWithDate()}\n\n${contextXml}${EOT_TOKEN}` +
+    `${buildSystemPromptWithDate()}${EOT_TOKEN}` +
     "<|start_header_id|>user<|end_header_id|>\n\n" +
-    `${userQuery}${EOT_TOKEN}` +
+    `${FEW_SHOT_CONTEXT_XML}\n\n${FEW_SHOT_USER_QUERY}${EOT_TOKEN}` +
+    "<|start_header_id|>assistant<|end_header_id|>\n\n" +
+    `${FEW_SHOT_ANSWER}${EOT_TOKEN}` +
+    "<|start_header_id|>user<|end_header_id|>\n\n" +
+    `${contextXml}\n\n${userQuery}${EOT_TOKEN}` +
     "<|start_header_id|>assistant<|end_header_id|>\n\n"
   );
 }

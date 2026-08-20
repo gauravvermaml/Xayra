@@ -1,18 +1,13 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
+import { colors, radius, spacing, typography } from "../constants/theme";
 import { AudioPlayerControls } from "./AudioPlayerControls";
-
-const colors = {
-  surface: "#1e293b",
-  border: "#334155",
-  textPrimary: "#f8fafc",
-  textMuted: "#94a3b8",
-  danger: "#f87171",
-};
 
 export type NoteCardProps = {
   content: string;
   audioUri?: string | null;
+  /** Unix seconds; renders as a relative/short timestamp badge when present. */
+  createdAt?: number;
   /** Reciprocal-rank-fusion score from hybrid search (higher = better); omitted for the plain notes list. */
   score?: number;
   /** Opens the full note detail (transcript, timestamp, audio, delete) — omit to disable tap-to-open. */
@@ -20,9 +15,23 @@ export type NoteCardProps = {
   onDelete: () => void;
 };
 
-export function NoteCard({ content, audioUri, score, onPress, onDelete }: NoteCardProps) {
+function formatTimestamp(createdAtUnixSeconds: number): string {
+  const date = new Date(createdAtUnixSeconds * 1000);
+  const now = new Date();
+  const isToday = date.toDateString() === now.toDateString();
+  if (isToday) {
+    return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  }
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+export function NoteCard({ content, audioUri, createdAt, score, onPress, onDelete }: NoteCardProps) {
   return (
-    <Pressable onPress={onPress} disabled={!onPress} style={styles.card}>
+    <Pressable
+      onPress={onPress}
+      disabled={!onPress}
+      style={({ pressed }) => [styles.card, pressed && onPress && styles.cardPressed]}
+    >
       <Pressable
         onPress={onDelete}
         hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
@@ -30,10 +39,24 @@ export function NoteCard({ content, audioUri, score, onPress, onDelete }: NoteCa
       >
         <Text style={styles.deleteIcon}>🗑</Text>
       </Pressable>
-      <Text style={styles.content}>{content}</Text>
+
+      <View style={styles.tagRow}>
+        <View style={styles.tagPill}>
+          <Text style={styles.tagPillText}>{audioUri ? "#Voice" : "#Text"}</Text>
+        </View>
+        {createdAt !== undefined && (
+          <Text style={styles.metaText}>{formatTimestamp(createdAt)}</Text>
+        )}
+      </View>
+
+      <Text style={styles.content} numberOfLines={6}>
+        {content}
+      </Text>
+
       {score !== undefined && (
         <Text style={styles.distance}>match score {score.toFixed(3)}</Text>
       )}
+
       {!!audioUri && <AudioPlayerControls audioUri={audioUri} compact style={styles.player} />}
     </Pressable>
   );
@@ -44,23 +67,47 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
-    padding: 16,
-    marginBottom: 12,
+    borderRadius: radius.lg,
+    padding: spacing.base,
+    marginBottom: spacing.md,
+  },
+  cardPressed: {
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.borderStrong,
+  },
+  tagRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: spacing.sm,
+    paddingRight: 36,
+  },
+  tagPill: {
+    backgroundColor: colors.accentMuted,
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+  },
+  tagPillText: {
+    color: colors.accent,
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  metaText: {
+    color: colors.textMuted,
+    ...typography.caption,
   },
   content: {
     color: colors.textPrimary,
-    fontSize: 15,
-    lineHeight: 21,
-    paddingRight: 36,
+    ...typography.body,
   },
   distance: {
     color: colors.textMuted,
-    fontSize: 12,
-    marginTop: 8,
+    ...typography.caption,
+    marginTop: spacing.sm,
   },
   player: {
-    marginTop: 12,
+    marginTop: spacing.md,
     backgroundColor: "transparent",
     borderWidth: 0,
     padding: 0,
@@ -69,8 +116,8 @@ const styles = StyleSheet.create({
   // targets: a solid danger-red circle is easy to spot and easy to tap.
   deleteButton: {
     position: "absolute",
-    top: 10,
-    right: 10,
+    top: spacing.sm + 2,
+    right: spacing.sm + 2,
     width: 32,
     height: 32,
     borderRadius: 16,

@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Image,
   Pressable,
   StyleSheet,
   Text,
@@ -18,6 +19,7 @@ import { NoteCard } from "../components/NoteCard";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { SmartNudgeBanner } from "../components/SmartNudgeBanner";
 import { ViewToggle } from "../components/ViewToggle";
+import { colors, radius, spacing, typography } from "../constants/theme";
 import { asrRouter } from "../services/ai/asrRouter";
 import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
 import { useVoiceRecorder } from "../services/audio/recorder";
@@ -41,18 +43,14 @@ import {
 
 const NUDGE_BANNER_MIN_NOTES = 5;
 
-const colors = {
-  background: "#0f172a",
-  surface: "#1e293b",
-  border: "#334155",
-  textPrimary: "#f8fafc",
-  textMuted: "#94a3b8",
-  accent: "#6366f1",
-  danger: "#f87171",
-};
-
 type ProcessingState = "idle" | "processing";
-type DisplayNote = { id: string; content: string; audioUri: string | null; score?: number };
+type DisplayNote = {
+  id: string;
+  content: string;
+  audioUri: string | null;
+  createdAt: number;
+  score?: number;
+};
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -256,16 +254,26 @@ export default function HomeScreen() {
         id: note.id,
         content: note.content,
         audioUri: note.audioUri,
+        createdAt: note.createdAt,
         score: note.score,
       }))
-    : allNotes.map((note) => ({ id: note.id, content: note.content, audioUri: note.audioUri }));
+    : allNotes.map((note) => ({
+        id: note.id,
+        content: note.content,
+        audioUri: note.audioUri,
+        createdAt: note.createdAt,
+      }));
 
   return (
     <SafeAreaView style={styles.safeArea}>
       <View style={styles.container}>
         <View style={styles.headerRow}>
           <View style={styles.headerTextGroup}>
-            <Text style={styles.title}>Remi</Text>
+            <View style={styles.brandRow}>
+              {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
+              <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
+              <Text style={styles.title}>Xayra</Text>
+            </View>
             <Text style={styles.subtitle}>
               Your notes, kept between you and your device.
             </Text>
@@ -273,7 +281,7 @@ export default function HomeScreen() {
           <Pressable
             onPress={() => router.push("/settings")}
             hitSlop={12}
-            style={styles.settingsButton}
+            style={({ pressed }) => [styles.settingsButton, pressed && styles.settingsButtonPressed]}
           >
             <Text style={styles.settingsButtonIcon}>⚙</Text>
           </Pressable>
@@ -345,15 +353,31 @@ export default function HomeScreen() {
           <Text style={styles.purgeButtonText}>Clear all notes (dev)</Text>
         </Pressable>
 
+        {displayedNotes.length > 0 && (
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionHeader}>
+              {isSearchActive ? "Matching notes" : "Recent notes"}
+            </Text>
+            <Text style={styles.sectionCount}>{displayedNotes.length}</Text>
+          </View>
+        )}
+
         <FlatList
           style={styles.results}
+          contentContainerStyle={displayedNotes.length === 0 && styles.resultsEmptyContainer}
           data={displayedNotes}
           keyExtractor={(item) => item.id}
           ListEmptyComponent={
             !isSearching ? (
-              <View>
+              <View style={styles.emptyState}>
+                <Text style={styles.emptyIcon}>{isSearchActive ? "🔍" : "🎙"}</Text>
                 <Text style={styles.emptyText}>
                   {isSearchActive ? "No matching notes yet." : "No notes recorded yet."}
+                </Text>
+                <Text style={styles.emptySubtext}>
+                  {isSearchActive
+                    ? "Try a different search term."
+                    : "Tap the mic below to record your first note."}
                 </Text>
                 {!isSearchActive && (
                   <Pressable
@@ -377,6 +401,7 @@ export default function HomeScreen() {
             <NoteCard
               content={item.content}
               audioUri={item.audioUri}
+              createdAt={item.createdAt}
               score={item.score}
               onPress={() => setSelectedNoteId(item.id)}
               onDelete={() => handleDeleteNote(item.id)}
@@ -405,8 +430,8 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
-    paddingHorizontal: 24,
-    paddingTop: 32,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xxl,
   },
   headerRow: {
     flexDirection: "row",
@@ -415,6 +440,16 @@ const styles = StyleSheet.create({
   },
   headerTextGroup: {
     flex: 1,
+  },
+  brandRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
+  brandLogo: {
+    width: 28,
+    height: 28,
+    borderRadius: radius.sm,
   },
   settingsButton: {
     width: 36,
@@ -425,25 +460,44 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     alignItems: "center",
     justifyContent: "center",
-    marginLeft: 12,
+    marginLeft: spacing.md,
+  },
+  settingsButtonPressed: {
+    backgroundColor: colors.surfaceElevated,
   },
   settingsButtonIcon: {
-    color: colors.textMuted,
+    color: colors.textSecondary,
     fontSize: 17,
   },
   title: {
     color: colors.textPrimary,
-    fontSize: 28,
-    fontWeight: "700",
+    ...typography.title,
   },
   subtitle: {
     color: colors.textMuted,
     fontSize: 14,
     marginTop: 4,
-    marginBottom: 20,
+    marginBottom: spacing.lg,
+  },
+  sectionHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  sectionHeader: {
+    color: colors.textSecondary,
+    ...typography.subheading,
+    textTransform: "uppercase",
+    letterSpacing: 0.5,
+  },
+  sectionCount: {
+    color: colors.textMuted,
+    ...typography.caption,
   },
   restoreLinkRow: {
-    marginTop: 16,
+    marginTop: spacing.lg,
     alignItems: "center",
   },
   restoreLinkText: {
@@ -458,14 +512,14 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
-    paddingHorizontal: 16,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.base,
     height: 48,
   },
   searchIcon: {
     color: colors.textMuted,
     fontSize: 18,
-    marginRight: 8,
+    marginRight: spacing.sm,
   },
   searchInput: {
     flex: 1,
@@ -475,25 +529,42 @@ const styles = StyleSheet.create({
   errorText: {
     color: colors.danger,
     fontSize: 13,
-    marginTop: 12,
+    marginTop: spacing.md,
   },
   results: {
     flex: 1,
-    marginTop: 12,
+  },
+  resultsEmptyContainer: {
+    flexGrow: 1,
+  },
+  emptyState: {
+    alignItems: "center",
+    paddingTop: spacing.xxl,
+    paddingHorizontal: spacing.lg,
+  },
+  emptyIcon: {
+    fontSize: 32,
+    marginBottom: spacing.sm,
+    opacity: 0.7,
   },
   emptyText: {
+    color: colors.textSecondary,
+    ...typography.subheading,
+    textAlign: "center",
+  },
+  emptySubtext: {
     color: colors.textMuted,
-    fontSize: 14,
-    marginTop: 24,
+    fontSize: 13,
+    marginTop: spacing.xs,
     textAlign: "center",
   },
   recordingStatusRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
-    gap: 12,
+    gap: spacing.md,
     marginTop: -8,
-    marginBottom: 12,
+    marginBottom: spacing.md,
   },
   recordingStatusText: {
     color: colors.danger,
@@ -503,8 +574,8 @@ const styles = StyleSheet.create({
   resetButton: {
     borderColor: colors.danger,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 999,
-    paddingHorizontal: 10,
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.sm,
     paddingVertical: 3,
   },
   resetButtonText: {
@@ -514,11 +585,11 @@ const styles = StyleSheet.create({
   },
   purgeButton: {
     alignSelf: "flex-end",
-    marginTop: 14,
+    marginTop: spacing.md,
   },
   purgeButtonText: {
-    color: colors.danger,
-    fontSize: 12,
+    color: colors.textMuted,
+    fontSize: 11,
     fontWeight: "600",
     textDecorationLine: "underline",
   },

@@ -1,15 +1,8 @@
-import { ActivityIndicator, Pressable, StyleSheet, Text } from "react-native";
+import { useEffect, useRef } from "react";
+import { Animated, Pressable, StyleSheet, Text } from "react-native";
 
+import { colors, radius, spacing, typography } from "../constants/theme";
 import type { ActiveModeState } from "../services/audio/activeMode";
-
-const colors = {
-  surface: "#1e293b",
-  surfaceActive: "#312e81",
-  border: "#334155",
-  borderActive: "#6366f1",
-  textPrimary: "#f8fafc",
-  textMuted: "#94a3b8",
-};
 
 export type ActiveModePillProps = {
   isActive: boolean;
@@ -20,17 +13,33 @@ export type ActiveModePillProps = {
 
 function labelForState(isActive: boolean, state: ActiveModeState): string {
   if (!isActive) {
-    return "🚿 Active Mode";
+    return "Active Mode";
   }
   switch (state) {
     case "listening":
-      return "👂 Listening…";
+      return "Listening…";
     case "processing":
-      return "⏳ Thinking…";
+      return "Thinking…";
     case "speaking":
-      return "🔊 Speaking…";
+      return "Speaking…";
     default:
-      return "🚿 Active Mode";
+      return "Active Mode";
+  }
+}
+
+function dotColorForState(isActive: boolean, state: ActiveModeState): string {
+  if (!isActive) {
+    return colors.textMuted;
+  }
+  switch (state) {
+    case "listening":
+      return colors.danger;
+    case "processing":
+      return colors.warning;
+    case "speaking":
+      return colors.success;
+    default:
+      return colors.accent;
   }
 }
 
@@ -42,6 +51,26 @@ function labelForState(isActive: boolean, state: ActiveModeState): string {
  * philosophy from the Category A pass.
  */
 export function ActiveModePill({ isActive, state, onPress, disabled }: ActiveModePillProps) {
+  const dotPulse = useRef(new Animated.Value(1)).current;
+
+  // Subtle breathing dot while active — a quieter echo of the mic button's
+  // aura ring, communicating "still listening/thinking" without a spinner
+  // dominating a small pill.
+  useEffect(() => {
+    if (!isActive) {
+      dotPulse.setValue(1);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(dotPulse, { toValue: 0.35, duration: 700, useNativeDriver: true }),
+        Animated.timing(dotPulse, { toValue: 1, duration: 700, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [isActive, dotPulse]);
+
   return (
     <Pressable
       onPress={onPress}
@@ -53,9 +82,12 @@ export function ActiveModePill({ isActive, state, onPress, disabled }: ActiveMod
         disabled && styles.pillDisabled,
       ]}
     >
-      {isActive && state === "processing" && (
-        <ActivityIndicator color={colors.textPrimary} size="small" style={styles.spinner} />
-      )}
+      <Animated.View
+        style={[
+          styles.dot,
+          { backgroundColor: dotColorForState(isActive, state), opacity: dotPulse },
+        ]}
+      />
       <Text style={[styles.label, isActive && styles.labelActive]}>{labelForState(isActive, state)}</Text>
     </Pressable>
   );
@@ -70,15 +102,15 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 999,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    marginBottom: 16,
-    gap: 8,
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.base,
+    paddingVertical: spacing.sm,
+    marginBottom: spacing.base,
+    gap: spacing.sm,
   },
   pillActive: {
     backgroundColor: colors.surfaceActive,
-    borderColor: colors.borderActive,
+    borderColor: colors.accent,
   },
   pillPressed: {
     opacity: 0.85,
@@ -86,13 +118,14 @@ const styles = StyleSheet.create({
   pillDisabled: {
     opacity: 0.5,
   },
-  spinner: {
-    marginRight: 2,
+  dot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
   },
   label: {
     color: colors.textMuted,
-    fontSize: 13,
-    fontWeight: "700",
+    ...typography.label,
   },
   labelActive: {
     color: colors.textPrimary,

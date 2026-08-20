@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   FlatList,
+  Image,
   KeyboardAvoidingView,
   Platform,
   Pressable,
@@ -17,8 +19,10 @@ import * as Crypto from "expo-crypto";
 
 import { ActiveModePill } from "../components/ActiveModePill";
 import { CentralMicButton } from "../components/CentralMicButton";
+import { MarkdownText } from "../components/MarkdownText";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { ViewToggle } from "../components/ViewToggle";
+import { colors, radius, spacing, typography } from "../constants/theme";
 import { asrRouter } from "../services/ai/asrRouter";
 import { generateRAGAnswer, type RagCitation } from "../services/ai/rag";
 import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
@@ -26,16 +30,24 @@ import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakText, speakTextAndWait, stopSpeech } from "../services/audio/tts";
 import { isSilentTranscript } from "../services/notes/noteManager";
 
-const colors = {
-  background: "#0f172a",
-  surface: "#1e293b",
-  surfaceAlt: "#27324a",
-  border: "#334155",
-  textPrimary: "#f8fafc",
-  textMuted: "#94a3b8",
-  accent: "#6366f1",
-  danger: "#f87171",
-};
+/** Blinking "▋" cursor shown at the end of a message still streaming in
+ * from local Llama — a quiet visual cue that generation is live, not stalled. */
+function StreamingCursor({ color }: { color: string }) {
+  const opacity = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 0, duration: 450, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 1, duration: 450, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [opacity]);
+
+  return <Animated.Text style={{ color, opacity }}>{"▋"}</Animated.Text>;
+}
 
 type ChatMessage = {
   id: string;
@@ -318,13 +330,17 @@ export default function ChatScreen() {
         <View style={styles.container}>
           <View style={styles.headerRow}>
             <View style={styles.headerTextGroup}>
-              <Text style={styles.title}>Remi</Text>
+              <View style={styles.brandRow}>
+                {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
+                <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
+                <Text style={styles.title}>Xayra</Text>
+              </View>
               <Text style={styles.subtitle}>Ask questions about your voice notes.</Text>
             </View>
             <Pressable
               onPress={() => router.push("/settings")}
               hitSlop={12}
-              style={styles.settingsButton}
+              style={({ pressed }) => [styles.settingsButton, pressed && styles.settingsButtonPressed]}
             >
               <Text style={styles.settingsButtonIcon}>⚙</Text>
             </Pressable>
@@ -363,16 +379,24 @@ export default function ChatScreen() {
                   item.role === "user" ? styles.bubbleUser : styles.bubbleAssistant,
                 ]}
               >
-                <Text style={styles.bubbleText}>
-                  {item.text}
-                  {item.isStreaming && item.text.length === 0 ? "…" : ""}
-                </Text>
-                {item.isStreaming && item.text.length > 0 && (
-                  <ActivityIndicator
-                    style={styles.streamingIndicator}
-                    color={colors.textMuted}
-                    size="small"
-                  />
+                <Text style={styles.roleLabel}>{item.role === "user" ? "You" : "Xayra"}</Text>
+                {item.isStreaming && item.text.length === 0 ? (
+                  <View style={styles.streamingStartRow}>
+                    <ActivityIndicator color={colors.textMuted} size="small" />
+                    <Text style={styles.streamingStartText}>Thinking…</Text>
+                  </View>
+                ) : (
+                  <View style={styles.bubbleTextWrap}>
+                    <MarkdownText
+                      text={item.text}
+                      color={item.role === "user" ? colors.onAccent : colors.textPrimary}
+                    />
+                    {item.isStreaming && (
+                      <StreamingCursor
+                        color={item.role === "user" ? colors.onAccent : colors.accent}
+                      />
+                    )}
+                  </View>
                 )}
                 {item.role === "assistant" && !item.isStreaming && item.text.length > 0 && (
                   <Pressable
@@ -475,8 +499,8 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
-    paddingHorizontal: 24,
-    paddingTop: 32,
+    paddingHorizontal: spacing.xl,
+    paddingTop: spacing.xxl,
   },
   headerRow: {
     flexDirection: "row",
@@ -485,6 +509,16 @@ const styles = StyleSheet.create({
   },
   headerTextGroup: {
     flex: 1,
+  },
+  brandRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
+  brandLogo: {
+    width: 28,
+    height: 28,
+    borderRadius: radius.sm,
   },
   settingsButton: {
     width: 36,
@@ -495,22 +529,24 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     alignItems: "center",
     justifyContent: "center",
-    marginLeft: 12,
+    marginLeft: spacing.md,
+  },
+  settingsButtonPressed: {
+    backgroundColor: colors.surfaceElevated,
   },
   settingsButtonIcon: {
-    color: colors.textMuted,
+    color: colors.textSecondary,
     fontSize: 17,
   },
   title: {
     color: colors.textPrimary,
-    fontSize: 28,
-    fontWeight: "700",
+    ...typography.title,
   },
   subtitle: {
     color: colors.textMuted,
     fontSize: 14,
     marginTop: 4,
-    marginBottom: 20,
+    marginBottom: spacing.lg,
   },
   messageList: {
     flex: 1,
@@ -518,14 +554,15 @@ const styles = StyleSheet.create({
   emptyText: {
     color: colors.textMuted,
     fontSize: 14,
-    marginTop: 24,
+    marginTop: spacing.xl,
     textAlign: "center",
+    paddingHorizontal: spacing.lg,
   },
   bubble: {
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    marginBottom: 10,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.base,
+    paddingVertical: spacing.sm + 2,
+    marginBottom: spacing.sm + 2,
     maxWidth: "88%",
   },
   bubbleUser: {
@@ -540,18 +577,32 @@ const styles = StyleSheet.create({
     alignSelf: "flex-start",
     borderBottomLeftRadius: 4,
   },
-  bubbleText: {
-    color: colors.textPrimary,
-    fontSize: 15,
-    lineHeight: 21,
+  roleLabel: {
+    color: colors.textMuted,
+    fontSize: 10,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+    marginBottom: 3,
   },
-  streamingIndicator: {
-    marginTop: 6,
-    alignSelf: "flex-start",
+  bubbleTextWrap: {
+    // Block container for MarkdownText's mix of Text/View children plus the
+    // trailing streaming cursor — must be a View, not Text, since Markdown
+    // bullets/code blocks render as Views and can't nest inside RN <Text>.
+  },
+  streamingStartRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
+  streamingStartText: {
+    color: colors.textMuted,
+    fontSize: 13,
+    fontStyle: "italic",
   },
   speakerButton: {
     alignSelf: "flex-start",
-    marginTop: 10,
+    marginTop: spacing.sm + 2,
   },
   speakerButtonText: {
     color: colors.accent,
@@ -561,27 +612,27 @@ const styles = StyleSheet.create({
   citationRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: 6,
-    marginTop: 10,
+    gap: spacing.xs + 2,
+    marginTop: spacing.sm + 2,
   },
   citationChip: {
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: colors.surfaceElevated,
     borderColor: colors.border,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 999,
-    paddingHorizontal: 10,
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.sm,
     paddingVertical: 4,
   },
   citationChipText: {
-    color: colors.textMuted,
+    color: colors.textSecondary,
     fontSize: 12,
     fontWeight: "600",
   },
   voiceStatusRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    paddingBottom: 8,
+    gap: spacing.sm,
+    paddingBottom: spacing.sm,
   },
   voiceStatusDot: {
     width: 8,
@@ -598,8 +649,8 @@ const styles = StyleSheet.create({
   resetButton: {
     borderColor: colors.danger,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 999,
-    paddingHorizontal: 10,
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.sm,
     paddingVertical: 3,
     marginLeft: "auto",
   },
@@ -611,26 +662,26 @@ const styles = StyleSheet.create({
   inputBar: {
     flexDirection: "row",
     alignItems: "flex-end",
-    gap: 10,
-    paddingVertical: 12,
+    gap: spacing.sm + 2,
+    paddingVertical: spacing.md,
   },
   input: {
     flex: 1,
     backgroundColor: colors.surface,
     borderColor: colors.border,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.base - 2,
+    paddingVertical: spacing.sm + 2,
     color: colors.textPrimary,
     fontSize: 15,
     maxHeight: 120,
   },
   sendButton: {
     backgroundColor: colors.accent,
-    borderRadius: 14,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.lg - 2,
+    paddingVertical: spacing.md,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -641,7 +692,7 @@ const styles = StyleSheet.create({
     opacity: 0.85,
   },
   sendButtonText: {
-    color: colors.textPrimary,
+    color: colors.onAccent,
     fontSize: 14,
     fontWeight: "600",
   },

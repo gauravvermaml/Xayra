@@ -1,10 +1,7 @@
-import { ActivityIndicator, Pressable, StyleSheet, Text, View } from "react-native";
+import { useEffect, useRef } from "react";
+import { ActivityIndicator, Animated, Image, Pressable, StyleSheet, View } from "react-native";
 
-const colors = {
-  accent: "#6366f1",
-  danger: "#f87171",
-  textPrimary: "#f8fafc",
-};
+import { colors, elevation } from "../constants/theme";
 
 export type CentralMicButtonState = "idle" | "recording" | "busy";
 
@@ -22,8 +19,58 @@ export type CentralMicButtonProps = {
  * extra positioning logic.
  */
 export function CentralMicButton({ state, onPress, disabled }: CentralMicButtonProps) {
+  const pulse = useRef(new Animated.Value(0)).current;
+
+  // A slow breathing aura while actively recording — RN's built-in Animated
+  // API (no reanimated in this project), looped scale + fade so the ring
+  // expands outward and dissolves, then resets. Two rings (violet + cyan),
+  // the cyan one started on a slight delay so the two glows visibly
+  // separate as they expand rather than staying perfectly stacked — that
+  // offset is what actually reads as a "neon violet/cyan" pulse rather than
+  // a single-color ring.
+  useEffect(() => {
+    if (state !== "recording") {
+      pulse.setValue(0);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.timing(pulse, {
+        toValue: 1,
+        duration: 1600,
+        useNativeDriver: true,
+      })
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [state, pulse]);
+
+  const violetAuraScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.7] });
+  const violetAuraOpacity = pulse.interpolate({ inputRange: [0, 0.6, 1], outputRange: [0.5, 0.18, 0] });
+  const cyanAuraScale = pulse.interpolate({ inputRange: [0, 1], outputRange: [1, 1.45] });
+  const cyanAuraOpacity = pulse.interpolate({ inputRange: [0, 0.5, 1], outputRange: [0.55, 0.2, 0] });
+
   return (
     <View style={styles.wrapper}>
+      {state === "recording" && (
+        <>
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.aura,
+              styles.auraViolet,
+              { transform: [{ scale: violetAuraScale }], opacity: violetAuraOpacity },
+            ]}
+          />
+          <Animated.View
+            pointerEvents="none"
+            style={[
+              styles.aura,
+              styles.auraCyan,
+              { transform: [{ scale: cyanAuraScale }], opacity: cyanAuraOpacity },
+            ]}
+          />
+        </>
+      )}
       <Pressable
         onPress={onPress}
         disabled={disabled}
@@ -36,9 +83,10 @@ export function CentralMicButton({ state, onPress, disabled }: CentralMicButtonP
         ]}
       >
         {state === "busy" ? (
-          <ActivityIndicator color={colors.textPrimary} size="small" />
+          <ActivityIndicator color={colors.onAccent} size="small" />
         ) : (
-          <Text style={styles.icon}>{state === "recording" ? "■" : "🎤"}</Text>
+          // eslint-disable-next-line @typescript-eslint/no-require-imports
+          <Image source={require("../assets/icon.png")} style={styles.emblem} resizeMode="contain" />
         )}
       </Pressable>
     </View>
@@ -48,7 +96,20 @@ export function CentralMicButton({ state, onPress, disabled }: CentralMicButtonP
 const styles = StyleSheet.create({
   wrapper: {
     alignItems: "center",
+    justifyContent: "center",
     marginBottom: 20,
+  },
+  aura: {
+    position: "absolute",
+    width: 76,
+    height: 76,
+    borderRadius: 38,
+  },
+  auraViolet: {
+    backgroundColor: colors.accent,
+  },
+  auraCyan: {
+    backgroundColor: colors.accentCyan,
   },
   button: {
     width: 76,
@@ -57,15 +118,11 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accent,
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: colors.accent,
-    shadowOpacity: 0.45,
-    shadowRadius: 16,
-    shadowOffset: { width: 0, height: 6 },
-    elevation: 8,
+    ...elevation.floating,
   },
   buttonRecording: {
-    backgroundColor: colors.danger,
-    shadowColor: colors.danger,
+    backgroundColor: colors.accentCyan,
+    shadowColor: colors.accentCyan,
   },
   buttonDisabled: {
     opacity: 0.5,
@@ -73,7 +130,8 @@ const styles = StyleSheet.create({
   buttonPressed: {
     opacity: 0.85,
   },
-  icon: {
-    fontSize: 28,
+  emblem: {
+    width: 44,
+    height: 44,
   },
 });

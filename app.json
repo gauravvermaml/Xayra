@@ -1,12 +1,12 @@
 {
   "expo": {
-    "name": "Remi",
-    "slug": "silent-confidant",
+    "name": "Xayra",
+    "slug": "xayra",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
-    "scheme": "silentconfidant",
+    "scheme": "xayra",
     "ios": {
       "supportsTablet": true
     },
@@ -36,7 +36,7 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow Silent Confidant to access your microphone to record voice notes."
+          "microphonePermission": "Allow Xayra to access your microphone to record voice notes."
         }
       ],
       "onnxruntime-react-native",
@@ -44,8 +44,8 @@
       [
         "expo-speech-recognition",
         {
-          "microphonePermission": "Allow Remi to access your microphone.",
-          "speechRecognitionPermission": "Allow Remi to use on-device speech recognition for faster note transcription.",
+          "microphonePermission": "Allow Xayra to access your microphone.",
+          "speechRecognitionPermission": "Allow Xayra to use on-device speech recognition for faster note transcription.",
           "androidSpeechServicePackages": ["com.google.android.googlequicksearchbox"]
         }
       ],
