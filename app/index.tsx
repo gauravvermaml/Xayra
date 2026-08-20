@@ -349,9 +349,11 @@ export default function HomeScreen() {
 
         {error && <Text style={styles.errorText}>{error}</Text>}
 
-        <Pressable onPress={handlePurgeAll} style={styles.purgeButton}>
-          <Text style={styles.purgeButtonText}>Clear all notes (dev)</Text>
-        </Pressable>
+        {__DEV__ && (
+          <Pressable onPress={handlePurgeAll} style={styles.purgeButton}>
+            <Text style={styles.purgeButtonText}>Clear all notes (dev)</Text>
+          </Pressable>
+        )}
 
         {displayedNotes.length > 0 && (
           <View style={styles.sectionHeaderRow}>
