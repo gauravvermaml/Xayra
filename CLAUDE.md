@@ -1,6 +1,6 @@
 @AGENTS.md
 
-# Silent Confidant — Project Context & Developer Guidelines
+# Xayra — Project Context & Developer Guidelines
 
 ## Architecture
 
@@ -42,6 +42,8 @@ npx expo run:android
 **Environment notes for this machine (Windows)**:
 - `JAVA_HOME` must point at JDK 17 (`~/.gradle/jdks/eclipse_adoptium-17-amd64-windows.2`, auto-provisioned by Gradle) before any native/`gradlew` build — the system default JDK (25, JetBrains Runtime) is too new for the current Android Gradle Plugin's native CMake step.
 - Run `npm install` for any package with a native-artifact-download postinstall step (anything that shells out to `tar`, e.g. `llama.rn`) through **PowerShell**, not the Bash/Git-Bash tool — Git Bash's `tar` is MSYS's GNU tar, which doesn't understand Windows drive letters and misparses `C:\...` paths as a remote `host:path` spec, causing the download step to fail.
+
+**Troubleshooting**: if a dev build installs successfully but the app hangs on a blank white/black screen, the Metro dev server has likely gone unresponsive (this happens after it's been kept running across many rebuilds in one session — sometimes with a corrupted on-disk cache) rather than anything being wrong with the build itself. Confirm with a quick `curl http://localhost:8081/status` (it'll hang instead of responding), then restart Metro with `npx expo start --clear` (the `--clear` flag also discards a stale/corrupted transform cache), re-run `adb reverse tcp:8081 tcp:8081`, and cold-launch the app via its dev-client deep link rather than the plain launcher icon.
 
 ## Local AI model assets
 

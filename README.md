@@ -1,8 +1,10 @@
-# Silent Confidant
+# Xayra
 
-**100% Private, On-Device, Air-Gapped Voice AI Assistant**
+**A private, local-first memory recall assistant.**
 
 Record a voice note. It's transcribed, embedded, and indexed — entirely on your phone. Ask a question in chat and get a spoken, cited answer grounded in your own notes — entirely on your phone. No cloud API, no account, no network call, ever, in the core loop.
+
+*(Formerly built and shipped internally as "Silent Confidant," then "Remi," before the full rebrand to Xayra.)*
 
 ---
 
@@ -10,9 +12,11 @@ Record a voice note. It's transcribed, embedded, and indexed — entirely on you
 
 - 🎙️ **Local speech-to-text** — [`whisper.rn`](https://github.com/mybigday/whisper.rn) (whisper.cpp) transcribes voice notes and spoken chat queries on-device.
 - 🔎 **384-dim local vector search** — a quantized [`bge-small-en-v1.5`](https://huggingface.co/BAAI/bge-small-en-v1.5) embedding model runs via [`onnxruntime-react-native`](https://github.com/microsoft/onnxruntime), indexed with [`sqlite-vec`](https://github.com/asg017/sqlite-vec) and fused with SQLite FTS5 keyword search (reciprocal rank fusion) for hybrid retrieval.
-- 🧠 **Local LLM RAG answers** — a quantized **Llama 3.2 1B Instruct** GGUF model runs via [`llama.rn`](https://github.com/mybigday/llama.rn) (llama.cpp), streaming a cited, grounded answer token-by-token.
+- 🧠 **On-device Llama 3.2 inference** — a quantized **Llama 3.2 1B Instruct** GGUF model runs via [`llama.rn`](https://github.com/mybigday/llama.rn) (llama.cpp), streaming a cited, grounded RAG answer token-by-token (a 3B variant is supported and preferred automatically if pushed to a device with the headroom for it).
 - 🔊 **Native text-to-speech** — Android's built-in TTS engine reads answers aloud, hands-free.
 - 🔐 **Encrypted at rest** — the SQLite database is encrypted (SQLCipher via `op-sqlite`), with the encryption key held in the OS keystore/keychain and gated behind biometrics wherever they're enrolled.
+- ☁️ **Hidden Google Drive backup, opt-in** — an optional encrypted backup to the `drive.appdata` scope only: a hidden, per-app Drive folder invisible in your normal Drive UI and unreadable by any other app or client. Off by default; the core loop never depends on it.
+- 🎨 **Custom OLED dark UI** — a hand-built charcoal/near-black (`#0E0F12`) design system with a single violet accent and a dual violet/cyan glow on the recording indicator, tuned for true-black/OLED displays.
 
 ## Architecture
 
