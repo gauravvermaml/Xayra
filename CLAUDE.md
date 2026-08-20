@@ -16,7 +16,7 @@
 ## Directory layout
 
 - `app/` — Expo Router screens (`index.tsx` = Notes tab, `chat.tsx` = Chat/RAG tab).
-- `services/ai/` — local-first AI: `localWhisper.ts`, `localEmbeddings.ts`, `tokenizer.ts` (from-scratch BERT WordPiece), `localLlama.ts`, `rag.ts`. (`whisper.ts` and `embeddings.ts` are legacy OpenAI-backed code, fully unreferenced by any live path — kept as reference, not wired into anything.)
+- `services/ai/` — local-first AI: `localWhisper.ts`, `localEmbeddings.ts`, `tokenizer.ts` (from-scratch BERT WordPiece), `localLlama.ts`, `rag.ts`. (The legacy OpenAI-backed `whisper.ts`/`embeddings.ts` and their `config/env.ts` — unreferenced by any live path and requiring an `EXPO_PUBLIC_`-prefixed key that Metro would have inlined into the client bundle — were deleted as a security cleanup; see git history if that reference implementation is ever needed again.)
 - `services/audio/` — recording (`recorder.ts`), playback (`player.ts`), TTS (`tts.ts`), each a single-instance singleton so only one audio source is ever active app-wide.
 - `services/notes/noteManager.ts` — note CRUD and hybrid (vector + FTS5, reciprocal-rank-fusion) search.
 - `services/crypto/keyManager.ts` — database encryption key lifecycle (SecureStore, biometric-gated where enrolled).
