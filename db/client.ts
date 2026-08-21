@@ -126,6 +126,14 @@ async function createCoreTables(db: DB): Promise<void> {
     }
   }
 
+  try {
+    await db.execute("ALTER TABLE notes ADD COLUMN transcription_model TEXT;");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/duplicate column/i.test(message)) {
+      throw err;
+    }
+  }
 }
 
 /**

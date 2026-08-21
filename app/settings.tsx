@@ -12,6 +12,17 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
+import { resetWhisperContext } from "../services/ai/localWhisper";
+import {
+  deleteWhisperModel,
+  downloadWhisperModel,
+  getActiveWhisperModel,
+  getDownloadedWhisperModels,
+  setActiveWhisperModel,
+  WHISPER_MODELS,
+  WHISPER_MODEL_IDS,
+  type WhisperModelId,
+} from "../services/ai/whisperModels";
 import {
   backupToDrive,
   getAutoSyncOnWifi,
@@ -41,6 +52,12 @@ export default function SettingsScreen() {
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
 
+  const [activeModel, setActiveModelState] = useState<WhisperModelId | null>(null);
+  const [downloadedModels, setDownloadedModels] = useState<WhisperModelId[]>([]);
+  const [downloadingModel, setDownloadingModel] = useState<WhisperModelId | null>(null);
+  const [downloadProgress, setDownloadProgress] = useState(0);
+  const [isLoadingModels, setIsLoadingModels] = useState(true);
+
   const refreshStatus = useCallback(async () => {
     try {
       const [syncStatus, autoSync] = await Promise.all([getSyncStatus(), getAutoSyncOnWifi()]);
@@ -53,10 +70,80 @@ export default function SettingsScreen() {
     }
   }, []);
 
+  const refreshModels = useCallback(async () => {
+    try {
+      const [active, downloaded] = await Promise.all([
+        getActiveWhisperModel(),
+        getDownloadedWhisperModels(),
+      ]);
+      setActiveModelState(active);
+      setDownloadedModels(downloaded);
+    } catch (err) {
+      console.error("[Settings] Failed to load Whisper model state", err);
+    } finally {
+      setIsLoadingModels(false);
+    }
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       void refreshStatus();
-    }, [refreshStatus])
+      void refreshModels();
+    }, [refreshStatus, refreshModels])
+  );
+
+  const handleSwitchModel = useCallback(
+    async (id: WhisperModelId) => {
+      if (downloadedModels.includes(id)) {
+        await setActiveWhisperModel(id);
+        resetWhisperContext();
+        await refreshModels();
+        return;
+      }
+
+      setDownloadingModel(id);
+      setDownloadProgress(0);
+      try {
+        await downloadWhisperModel(id, setDownloadProgress);
+        resetWhisperContext();
+        await refreshModels();
+      } catch (err) {
+        Alert.alert(
+          "Download Failed",
+          err instanceof Error ? err.message : "Failed to download the transcription engine."
+        );
+      } finally {
+        setDownloadingModel(null);
+      }
+    },
+    [downloadedModels, refreshModels]
+  );
+
+  const handleDeleteModel = useCallback(
+    (id: WhisperModelId) => {
+      Alert.alert(
+        "Delete Model",
+        `Remove the ${WHISPER_MODELS[id].label} (${WHISPER_MODELS[id].sizeLabel}) from this device? You can re-download it anytime.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          {
+            text: "Delete",
+            style: "destructive",
+            onPress: () => {
+              void deleteWhisperModel(id)
+                .then(() => {
+                  resetWhisperContext();
+                  return refreshModels();
+                })
+                .catch((err) => {
+                  Alert.alert("Error", err instanceof Error ? err.message : "Failed to delete model.");
+                });
+            },
+          },
+        ]
+      );
+    },
+    [refreshModels]
   );
 
   const handleConnect = useCallback(async () => {
@@ -235,6 +322,94 @@ export default function SettingsScreen() {
             </>
           )}
         </View>
+
+        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Voice Recognition</Text>
+        <View style={styles.card}>
+          {isLoadingModels ? (
+            <ActivityIndicator color={colors.textMuted} style={styles.cardLoading} />
+          ) : (
+            WHISPER_MODEL_IDS.map((id, index) => {
+              const model = WHISPER_MODELS[id];
+              const isActive = activeModel === id;
+              const isDownloaded = downloadedModels.includes(id);
+              const isBusy = downloadingModel === id;
+
+              return (
+                <View key={id}>
+                  {index > 0 && <View style={styles.divider} />}
+                  <View style={styles.cardHeaderRow}>
+                    <View style={styles.statusDotWrap}>
+                      <View
+                        style={[
+                          styles.statusDot,
+                          isActive ? styles.statusDotConnected : styles.statusDotDisconnected,
+                        ]}
+                      />
+                    </View>
+                    <View style={styles.cardHeaderTextGroup}>
+                      <Text style={styles.cardTitle}>
+                        {model.label} ({model.sizeLabel})
+                      </Text>
+                      <Text style={styles.cardSubtitle}>
+                        {isActive
+                          ? "Active"
+                          : isDownloaded
+                            ? "Downloaded"
+                            : "Not downloaded"}
+                      </Text>
+                    </View>
+                  </View>
+
+                  {isBusy && (
+                    <View style={styles.progressWrap}>
+                      <View style={styles.progressTrack}>
+                        <View
+                          style={[styles.progressFill, { width: `${Math.round(downloadProgress * 100)}%` }]}
+                        />
+                      </View>
+                      <Text style={styles.progressLabel}>{Math.round(downloadProgress * 100)}%</Text>
+                    </View>
+                  )}
+
+                  <View style={styles.modelButtonRow}>
+                    <Pressable
+                      onPress={() => void handleSwitchModel(id)}
+                      disabled={isActive || downloadingModel !== null}
+                      style={({ pressed }) => [
+                        styles.primaryButton,
+                        styles.modelButtonFlex,
+                        pressed && styles.buttonPressed,
+                        (isActive || downloadingModel !== null) && styles.buttonDisabled,
+                      ]}
+                    >
+                      {isBusy ? (
+                        <ActivityIndicator color={colors.background} size="small" />
+                      ) : (
+                        <Text style={styles.primaryButtonText}>
+                          {isActive ? "Active" : isDownloaded ? `Switch to ${model.label.split(" (")[0]}` : `Download & Switch (${model.sizeLabel})`}
+                        </Text>
+                      )}
+                    </Pressable>
+
+                    {isDownloaded && !isActive && (
+                      <Pressable
+                        onPress={() => handleDeleteModel(id)}
+                        disabled={downloadingModel !== null}
+                        style={({ pressed }) => [
+                          styles.dangerButton,
+                          styles.modelDeleteButton,
+                          pressed && styles.buttonPressed,
+                        ]}
+                      >
+                        <Text style={styles.dangerButtonText}>Delete</Text>
+                      </Pressable>
+                    )}
+                  </View>
+                </View>
+              );
+            })
+          )}
+        </View>
       </View>
     </SafeAreaView>
   );
@@ -389,5 +564,42 @@ const styles = StyleSheet.create({
     color: colors.danger,
     fontSize: 15,
     fontWeight: "700",
+  },
+  sectionSpacing: {
+    marginTop: spacing.xl,
+  },
+  progressWrap: {
+    marginTop: spacing.md,
+  },
+  progressTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.surfaceElevated,
+    overflow: "hidden",
+  },
+  progressFill: {
+    height: "100%",
+    backgroundColor: colors.accent,
+    borderRadius: 3,
+  },
+  progressLabel: {
+    color: colors.textMuted,
+    ...typography.caption,
+    marginTop: spacing.xs,
+    textAlign: "right",
+  },
+  modelButtonRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    marginTop: spacing.md,
+  },
+  modelButtonFlex: {
+    flex: 1,
+    marginTop: 0,
+  },
+  modelDeleteButton: {
+    marginTop: 0,
+    paddingHorizontal: spacing.base,
   },
 });

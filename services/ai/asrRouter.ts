@@ -2,12 +2,16 @@ import { ExpoSpeechRecognitionModule } from "expo-speech-recognition";
 
 import { transcribeAudioLocal } from "./localWhisper";
 import { logDuration, nowMs } from "./perf";
+import type { WhisperModelId } from "./whisperModels";
 
 export type ASRTier = "native" | "whisper";
 
 export type ASRTranscriptionResult = {
   transcript: string;
   tier: ASRTier;
+  /** Which local Whisper engine produced this transcript — unset when
+   * `tier` is "native" (no local model involved) or nothing was captured. */
+  whisperModelId?: WhisperModelId;
 };
 
 /**
@@ -188,10 +192,10 @@ export async function transcribe(audioUri: string | null): Promise<ASRTranscript
     return { transcript: "", tier: "whisper" };
   }
   const start = nowMs();
-  const transcript = await transcribeAudioLocal(audioUri);
+  const { transcript, modelId } = await transcribeAudioLocal(audioUri);
   logDuration("[ASRRouter] Tier 2 (local Whisper) transcription", start);
-  console.log("[ASRRouter] Used Tier 2: local Whisper (ggml-base.en.bin)");
-  return { transcript, tier: "whisper" };
+  console.log(`[ASRRouter] Used Tier 2: local Whisper (${modelId})`);
+  return { transcript, tier: "whisper", whisperModelId: modelId };
 }
 
 export const asrRouter = { startListening, restartListening, cancelListening, transcribe };

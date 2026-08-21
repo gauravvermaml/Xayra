@@ -10,9 +10,13 @@ export type NoteCardProps = {
   createdAt?: number;
   /** Reciprocal-rank-fusion score from hybrid search (higher = better); omitted for the plain notes list. */
   score?: number;
+  /** Which local Whisper engine ("base" | "tiny") transcribed this note, if any. */
+  transcriptionModel?: string | null;
   /** Opens the full note detail (transcript, timestamp, audio, delete) — omit to disable tap-to-open. */
   onPress?: () => void;
   onDelete: () => void;
+  /** Called when the "switch engine" nudge on a Tiny-transcribed note is tapped. */
+  onSwitchEngine?: () => void;
 };
 
 function formatTimestamp(createdAtUnixSeconds: number): string {
@@ -25,7 +29,16 @@ function formatTimestamp(createdAtUnixSeconds: number): string {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-export function NoteCard({ content, audioUri, createdAt, score, onPress, onDelete }: NoteCardProps) {
+export function NoteCard({
+  content,
+  audioUri,
+  createdAt,
+  score,
+  transcriptionModel,
+  onPress,
+  onDelete,
+  onSwitchEngine,
+}: NoteCardProps) {
   return (
     <Pressable
       onPress={onPress}
@@ -58,6 +71,14 @@ export function NoteCard({ content, audioUri, createdAt, score, onPress, onDelet
       )}
 
       {!!audioUri && <AudioPlayerControls audioUri={audioUri} compact style={styles.player} />}
+
+      {transcriptionModel === "tiny" && (
+        <Pressable onPress={onSwitchEngine} disabled={!onSwitchEngine} hitSlop={6} style={styles.engineChip}>
+          <Text style={styles.engineChipText}>
+            Tiny Engine used · Tap to switch to Base Engine in Settings
+          </Text>
+        </Pressable>
+      )}
     </Pressable>
   );
 }
@@ -131,5 +152,20 @@ const styles = StyleSheet.create({
   },
   deleteIcon: {
     fontSize: 15,
+  },
+  engineChip: {
+    alignSelf: "flex-start",
+    marginTop: spacing.sm,
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+  },
+  engineChipText: {
+    color: colors.textMuted,
+    fontSize: 10,
+    fontWeight: "600",
   },
 });

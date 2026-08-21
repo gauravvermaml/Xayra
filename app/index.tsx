@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -34,6 +34,7 @@ import {
   type HybridSearchResult,
   type Note,
 } from "../services/notes/noteManager";
+import { readPreferences } from "../services/settings/preferences";
 import {
   getSyncStatus,
   restoreFromDrive,
@@ -48,6 +49,7 @@ type DisplayNote = {
   id: string;
   content: string;
   audioUri: string | null;
+  transcriptionModel: string | null;
   createdAt: number;
   score?: number;
 };
@@ -65,6 +67,17 @@ export default function HomeScreen() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({ isConnected: false });
   const [isNudgeDismissed, setIsNudgeDismissed] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
+
+  // First-launch only (not on every focus): if the user hasn't completed or
+  // explicitly skipped the Whisper engine setup, send them there before
+  // they can try to record and hit the "no model" error instead.
+  useEffect(() => {
+    void readPreferences().then((prefs) => {
+      if (!prefs.onboardingComplete) {
+        router.replace("/onboarding");
+      }
+    });
+  }, [router]);
 
   const refreshNotes = useCallback(async () => {
     try {
@@ -121,11 +134,11 @@ export default function HomeScreen() {
   const handleActiveModeUtterance: ActiveModeUtteranceHandler = useCallback(
     async (audioUri, reportState) => {
       try {
-        const { transcript } = await asrRouter.transcribe(audioUri);
+        const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
         if (isSilentTranscript(transcript)) {
           return;
         }
-        await createVoiceNote(audioUri, transcript);
+        await createVoiceNote(audioUri, transcript, whisperModelId ?? null);
         await refreshNotes();
         reportState("speaking");
         await speakTextAndWait("Saved.");
@@ -158,7 +171,7 @@ export default function HomeScreen() {
         setProcessingState("processing");
         void asrRouter
           .transcribe(audioUri)
-          .then(({ transcript }) => createVoiceNote(audioUri, transcript))
+          .then(({ transcript, whisperModelId }) => createVoiceNote(audioUri, transcript, whisperModelId ?? null))
           .then(() => refreshNotes())
           .catch((err) => {
             console.error("[RecordError]", err, err?.stack);
@@ -254,6 +267,7 @@ export default function HomeScreen() {
         id: note.id,
         content: note.content,
         audioUri: note.audioUri,
+        transcriptionModel: note.transcriptionModel,
         createdAt: note.createdAt,
         score: note.score,
       }))
@@ -261,6 +275,7 @@ export default function HomeScreen() {
         id: note.id,
         content: note.content,
         audioUri: note.audioUri,
+        transcriptionModel: note.transcriptionModel,
         createdAt: note.createdAt,
       }));
 
@@ -405,8 +420,10 @@ export default function HomeScreen() {
               audioUri={item.audioUri}
               createdAt={item.createdAt}
               score={item.score}
+              transcriptionModel={item.transcriptionModel}
               onPress={() => setSelectedNoteId(item.id)}
               onDelete={() => handleDeleteNote(item.id)}
+              onSwitchEngine={() => router.push("/settings")}
             />
           )}
         />

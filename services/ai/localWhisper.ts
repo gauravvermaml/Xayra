@@ -7,55 +7,70 @@ import * as FileSystem from "expo-file-system/legacy";
 import { initWhisper, type WhisperContext } from "whisper.rn/index";
 
 import { logDuration, nowMs } from "./perf";
+import { getActiveWhisperModel, getWhisperModelPath, type WhisperModelId } from "./whisperModels";
 
-/** Preferred first — base is materially more accurate than tiny (tiny was
- * observed mis-hearing "AirPods" as "airports" on-device) and Pixel-class
- * hardware has enough headroom that base's extra latency isn't a real
- * tradeoff; falls back to tiny if that's the only model present. */
-const MODEL_FILENAMES = ["ggml-base.en.bin", "ggml-tiny.en.bin"] as const;
+export type LocalTranscriptionResult = {
+  transcript: string;
+  modelId: WhisperModelId;
+};
 
-let whisperContextPromise: Promise<WhisperContext> | null = null;
+let whisperContextPromise: Promise<{ context: WhisperContext; modelId: WhisperModelId }> | null = null;
+let loadedModelId: WhisperModelId | null = null;
 
 /**
  * Models aren't bundled into the app (they're tens/hundreds of MB) — the
- * user or a setup step drops one into the document directory ahead of time.
+ * user downloads one via the first-launch onboarding screen or
+ * Settings > Voice Recognition (services/ai/whisperModels.ts), which writes
+ * it into the document directory and records it as the active model.
  */
-async function resolveModelPath(): Promise<string> {
-  const dir = FileSystem.documentDirectory;
-  if (!dir) {
+async function resolveModelPath(): Promise<{ path: string; modelId: WhisperModelId }> {
+  if (!FileSystem.documentDirectory) {
     throw new Error("No writable document directory available on this platform.");
   }
 
-  for (const filename of MODEL_FILENAMES) {
-    const path = `${dir}${filename}`;
-    const info = await FileSystem.getInfoAsync(path);
-    if (info.exists) {
-      return path;
-    }
+  const modelId = await getActiveWhisperModel();
+  if (!modelId) {
+    throw new Error(
+      "No local Whisper model downloaded. Open Settings > Voice Recognition to download a transcription engine before recording."
+    );
   }
 
-  throw new Error(
-    `No local Whisper model found. Place ${MODEL_FILENAMES.join(" or ")} in ${dir} before transcribing on-device.`
-  );
+  return { path: getWhisperModelPath(modelId), modelId };
+}
+
+/** Called after switching the active model in Settings so the next
+ * transcription loads the newly-selected engine instead of reusing the
+ * previous one's already-initialized native context. */
+export function resetWhisperContext(): void {
+  whisperContextPromise = null;
+  loadedModelId = null;
 }
 
 /**
  * initWhisper() loads the GGML model into native memory — expensive, so the
  * context is created once and reused across every transcription call rather
- * than per-recording. If initialization fails, the next call retries instead
- * of being stuck replaying a cached rejection.
+ * than per-recording. If initialization fails, or the active model has
+ * changed since the context was created, the next call (re)loads instead of
+ * being stuck replaying a cached rejection or a stale engine.
  */
-async function getWhisperContext(): Promise<WhisperContext> {
+async function getWhisperContext(): Promise<{ context: WhisperContext; modelId: WhisperModelId }> {
+  const currentModelId = await getActiveWhisperModel();
+  if (whisperContextPromise && loadedModelId !== null && loadedModelId !== currentModelId) {
+    resetWhisperContext();
+  }
+
   if (!whisperContextPromise) {
     const coldStart = nowMs();
     whisperContextPromise = resolveModelPath()
-      .then((filePath) => initWhisper({ filePath }))
-      .then((context) => {
-        logDuration("Whisper cold-start (model load from disk)", coldStart);
-        return context;
+      .then(async ({ path, modelId }) => {
+        const context = await initWhisper({ filePath: path });
+        loadedModelId = modelId;
+        logDuration(`Whisper cold-start (${modelId} model load from disk)`, coldStart);
+        return { context, modelId };
       });
     whisperContextPromise.catch(() => {
       whisperContextPromise = null;
+      loadedModelId = null;
     });
   }
   return whisperContextPromise;
@@ -67,13 +82,14 @@ async function getWhisperContext(): Promise<WhisperContext> {
  * result through `isSilentTranscript()` (services/notes/noteManager.ts)
  * themselves, same as the OpenAI-backed `transcribeAudio()` before it;
  * importing it here would create a cycle (noteManager -> localWhisper ->
- * noteManager).
+ * noteManager). Returns which model produced the transcript so callers can
+ * persist it as note metadata.
  */
-export async function transcribeAudioLocal(fileUri: string): Promise<string> {
+export async function transcribeAudioLocal(fileUri: string): Promise<LocalTranscriptionResult> {
   const start = nowMs();
-  const context = await getWhisperContext();
+  const { context, modelId } = await getWhisperContext();
   const { promise } = context.transcribe(fileUri, { language: "en" });
   const { result } = await promise;
   logDuration("Whisper STT transcription", start);
-  return result.trim();
+  return { transcript: result.trim(), modelId };
 }

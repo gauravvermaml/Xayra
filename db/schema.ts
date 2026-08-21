@@ -11,6 +11,10 @@ export const notes = sqliteTable("notes", {
   audioUri: text("audio_uri"),
   transcript: text("transcript"),
   status: text("status").notNull().default("pending"),
+  /** Which local Whisper engine ("base" | "tiny") produced this note's
+   * transcript — null for text notes or notes transcribed by the native
+   * (Tier 1) speech recognizer instead of local Whisper. */
+  transcriptionModel: text("transcription_model"),
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`),

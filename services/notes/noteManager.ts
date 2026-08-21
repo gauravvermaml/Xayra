@@ -12,6 +12,9 @@ export type Note = {
   audioUri: string | null;
   transcript: string | null;
   status: NoteStatus;
+  /** Which local Whisper engine ("base" | "tiny") transcribed this note —
+   * null for text notes or notes transcribed by the native speech recognizer. */
+  transcriptionModel: string | null;
   createdAt: number;
 };
 
@@ -55,11 +58,11 @@ function nowUnix(): number {
 async function updateNoteStatus(
   id: string,
   status: NoteStatus,
-  fields: { content?: string; transcript?: string } = {}
+  fields: { content?: string; transcript?: string; transcriptionModel?: string | null } = {}
 ): Promise<void> {
   const db = await getRawDatabase();
   const setClauses = ["status = ?", "updated_at = ?"];
-  const params: (string | number)[] = [status, nowUnix()];
+  const params: (string | number | null)[] = [status, nowUnix()];
 
   if (fields.content !== undefined) {
     setClauses.push("content = ?");
@@ -68,6 +71,10 @@ async function updateNoteStatus(
   if (fields.transcript !== undefined) {
     setClauses.push("transcript = ?");
     params.push(fields.transcript);
+  }
+  if (fields.transcriptionModel !== undefined) {
+    setClauses.push("transcription_model = ?");
+    params.push(fields.transcriptionModel);
   }
   params.push(id);
 
@@ -102,7 +109,11 @@ async function insertEmbedding(noteId: string, embedding: number[]): Promise<voi
  * Tier 2 Whisper) — the caller passes the resolved transcript in rather than
  * this function calling Whisper directly, since the router may have already
  * produced it live during recording via the native tier. */
-export async function createVoiceNote(audioUri: string, transcript: string): Promise<Note> {
+export async function createVoiceNote(
+  audioUri: string,
+  transcript: string,
+  transcriptionModel: string | null = null
+): Promise<Note> {
   if (typeof FileSystem.getInfoAsync !== "function") {
     throw new Error(
       "expo-file-system/legacy: getInfoAsync is not available on this build."
@@ -131,7 +142,7 @@ export async function createVoiceNote(audioUri: string, transcript: string): Pro
     if (isSilentTranscript(transcript)) {
       throw new SilentRecordingError();
     }
-    await updateNoteStatus(id, "transcribed", { content: transcript, transcript });
+    await updateNoteStatus(id, "transcribed", { content: transcript, transcript, transcriptionModel });
 
     const embedding = await generateEmbeddingLocal(transcript);
     await insertEmbedding(id, embedding);
@@ -144,6 +155,7 @@ export async function createVoiceNote(audioUri: string, transcript: string): Pro
       audioUri,
       transcript,
       status: "embedded",
+      transcriptionModel,
       createdAt,
     };
   } catch (err) {
@@ -181,6 +193,7 @@ export async function createTextNote(text: string): Promise<Note> {
     audioUri: null,
     transcript: null,
     status: "embedded",
+    transcriptionModel: null,
     createdAt,
   };
 }
@@ -234,7 +247,7 @@ export async function listNotes(): Promise<Note[]> {
 
   const result = await db.execute(
     `
-      SELECT id, content, audio_uri, transcript, status, created_at
+      SELECT id, content, audio_uri, transcript, status, transcription_model, created_at
       FROM notes
       WHERE status != 'failed'
       ORDER BY created_at DESC
@@ -247,6 +260,7 @@ export async function listNotes(): Promise<Note[]> {
     audioUri: (row.audio_uri as string | null) ?? null,
     transcript: (row.transcript as string | null) ?? null,
     status: row.status as NoteStatus,
+    transcriptionModel: (row.transcription_model as string | null) ?? null,
     createdAt: row.created_at as number,
   }));
 }
@@ -257,7 +271,7 @@ export async function getNoteById(id: string): Promise<Note | null> {
   const db = await getRawDatabase();
 
   const result = await db.execute(
-    "SELECT id, content, audio_uri, transcript, status, created_at FROM notes WHERE id = ?",
+    "SELECT id, content, audio_uri, transcript, status, transcription_model, created_at FROM notes WHERE id = ?",
     [id]
   );
 
@@ -272,6 +286,7 @@ export async function getNoteById(id: string): Promise<Note | null> {
     audioUri: (row.audio_uri as string | null) ?? null,
     transcript: (row.transcript as string | null) ?? null,
     status: row.status as NoteStatus,
+    transcriptionModel: (row.transcription_model as string | null) ?? null,
     createdAt: row.created_at as number,
   };
 }
@@ -307,7 +322,7 @@ export async function purgeAllNotes(): Promise<void> {
 
 export type HybridSearchResult = Pick<
   Note,
-  "id" | "content" | "transcript" | "audioUri" | "createdAt"
+  "id" | "content" | "transcript" | "audioUri" | "transcriptionModel" | "createdAt"
 > & {
   score: number;
 };
@@ -371,7 +386,7 @@ export async function hybridSearchNotes(
   const searchStart = nowMs();
   const vectorResult = await db.execute(
     `
-      SELECT n.id, n.content, n.transcript, n.audio_uri, n.created_at
+      SELECT n.id, n.content, n.transcript, n.audio_uri, n.transcription_model, n.created_at
       FROM note_embeddings e
       JOIN notes n ON n.rowid = e.rowid
       WHERE n.status = 'embedded'
@@ -385,7 +400,7 @@ export async function hybridSearchNotes(
   if (await isFtsAvailable()) {
     const ftsResult = await db.execute(
       `
-        SELECT notes.id, notes.content, notes.transcript, notes.audio_uri, notes.created_at
+        SELECT notes.id, notes.content, notes.transcript, notes.audio_uri, notes.transcription_model, notes.created_at
         FROM notes_fts
         JOIN notes ON notes.rowid = notes_fts.rowid
         WHERE notes_fts MATCH ? AND notes.status = 'embedded'
@@ -401,7 +416,7 @@ export async function hybridSearchNotes(
   const fused = new Map<
     string,
     {
-      note: Pick<Note, "id" | "content" | "transcript" | "audioUri" | "createdAt">;
+      note: Pick<Note, "id" | "content" | "transcript" | "audioUri" | "transcriptionModel" | "createdAt">;
       score: number;
     }
   >();
@@ -423,6 +438,7 @@ export async function hybridSearchNotes(
             content: row.content as string,
             transcript: (row.transcript as string | null) ?? null,
             audioUri: (row.audio_uri as string | null) ?? null,
+            transcriptionModel: (row.transcription_model as string | null) ?? null,
             createdAt: row.created_at as number,
           },
           score: contribution,
