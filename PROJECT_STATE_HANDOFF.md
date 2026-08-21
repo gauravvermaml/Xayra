@@ -260,3 +260,15 @@ What's left is hands-on-device verification and Phase 5 scoping:
 
    all five need to land in the app's document directory via `adb push` before voice notes, chat voice query, embedding/search, or RAG answers will actually produce output — the native build only links the libraries, it doesn't supply model weights. Full end-to-end (record → transcribe → embed → search → RAG answer, entirely offline) has not yet been exercised on-device with real model files.
 2. **Phase 5+ — further on-device work**: not yet scoped. Candidates already flagged during Phase 4: in-app model download/picker instead of manual `adb push` for all three models; a "free up memory" action to call the now-exported-but-unwired `releaseLocalLlama()`; removing the now fully-unreferenced OpenAI-backed files (`services/ai/whisper.ts`, `services/ai/embeddings.ts`) instead of leaving them as dead code; the long-standing vestigial `drizzle-orm`/`drizzle-kit` cleanup noted below.
+
+## v1.0.0 Production Release Build
+
+- **Build ID**: `c03aa160-9c9e-4e02-83c2-8227874ba9f1`
+- **Date queued**: 2026-08-21
+- **Platform / profile**: Android, `production` profile (`eas.json` — App Bundle, EAS-managed remote signing credentials)
+- **Status at queue time**: queued/running (triggered via `eas build --platform android --profile production --non-interactive`)
+- **Dashboard / logs URL**: https://expo.dev/accounts/gauravsinghverma/projects/silent-confidant/builds/c03aa160-9c9e-4e02-83c2-8227874ba9f1
+- **EAS project**: `@gauravsinghverma/silent-confidant` (ID `553e5d3d-2971-4de6-8309-3feb4f6cbe49`) — note the EAS/`app.json` slug remains `silent-confidant` (pre-rebrand identifier, same as the unchanged Android package `com.anonymous.silentconfidant`) even though the app's display name is "Xayra." An attempt to rename the EAS project slug to `xayra` via the Expo dashboard did not take effect (slug appears immutable post-creation there); `app.json`'s `slug` was reverted to `silent-confidant` to match rather than provisioning a new EAS project and losing the existing keystore/credential history. Treat `silent-confidant` as the durable project/package identifier going forward — only the display name/branding is "Xayra."
+- **Signing**: used existing EAS-managed remote Android keystore (`Build Credentials lp_i--wIup`, default) — no new keystore was generated, so this build is signed consistently with any prior builds under this project.
+- **Known non-blocking warning**: `eas.json`'s `cli.appVersionSource` is unset; EAS currently defaults this but will require it explicitly in a future CLI version — worth setting (`"appVersionSource": "remote"` or `"local"`) before the next release cycle.
+- **Next step**: check the dashboard URL above for final build status (success/failure) and, once green, retrieve the `.aab` download link from that same page for Play Console upload.
