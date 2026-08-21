@@ -24,6 +24,8 @@ import { NoteDetailModal } from "../components/NoteDetailModal";
 import { ViewToggle } from "../components/ViewToggle";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { asrRouter } from "../services/ai/asrRouter";
+import { downloadLlamaModel, LLAMA_MODEL_SIZE_LABEL } from "../services/ai/llamaModel";
+import { LLAMA_MODEL_MISSING_ERROR_PREFIX } from "../services/ai/localLlama";
 import { generateRAGAnswer, type RagCitation } from "../services/ai/rag";
 import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
 import { useVoiceRecorder } from "../services/audio/recorder";
@@ -72,8 +74,29 @@ export default function ChatScreen() {
   const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+  const [chatModelMissing, setChatModelMissing] = useState(false);
+  const [isDownloadingChatModel, setIsDownloadingChatModel] = useState(false);
+  const [chatModelDownloadProgress, setChatModelDownloadProgress] = useState(0);
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const recorder = useVoiceRecorder();
+
+  const isChatModelMissingError = useCallback(
+    (err: unknown) => err instanceof Error && err.message.startsWith(LLAMA_MODEL_MISSING_ERROR_PREFIX),
+    []
+  );
+
+  const handleDownloadChatModel = useCallback(async () => {
+    setIsDownloadingChatModel(true);
+    setChatModelDownloadProgress(0);
+    try {
+      await downloadLlamaModel(setChatModelDownloadProgress);
+      setChatModelMissing(false);
+    } catch (err) {
+      Alert.alert("Download Failed", err instanceof Error ? err.message : "Failed to download the chat model.");
+    } finally {
+      setIsDownloadingChatModel(false);
+    }
+  }, []);
 
   // Derived, not duplicated: recorder.isRecording is already the source of
   // truth for whether we're actively recording a voice query.
@@ -192,6 +215,14 @@ export default function ChatScreen() {
         });
         return { assistantId, text: answer.text };
       } catch (err) {
+        if (isChatModelMissingError(err)) {
+          setChatModelMissing(true);
+          updateMessage(assistantId, {
+            text: "The on-device chat model isn't downloaded yet — see the prompt below to get started.",
+            isStreaming: false,
+          });
+          throw err;
+        }
         const message = err instanceof Error ? err.message : "Failed to get a response.";
         updateMessage(assistantId, {
           text: `Sorry, something went wrong: ${message}`,
@@ -200,7 +231,7 @@ export default function ChatScreen() {
         throw err;
       }
     },
-    [updateMessage]
+    [updateMessage, isChatModelMissingError]
   );
 
   const handleSend = useCallback(async (overrideText?: string, source: "text" | "voice" = "text") => {
@@ -229,11 +260,13 @@ export default function ChatScreen() {
         playMessageSpeech({ id: assistantId, text });
       }
     } catch (err) {
-      Alert.alert("Chat Error", err instanceof Error ? err.message : "Failed to get a response.");
+      if (!isChatModelMissingError(err)) {
+        Alert.alert("Chat Error", err instanceof Error ? err.message : "Failed to get a response.");
+      }
     } finally {
       setIsSending(false);
     }
-  }, [input, isSending, runRagExchange, playMessageSpeech]);
+  }, [input, isSending, runRagExchange, playMessageSpeech, isChatModelMissingError]);
 
   // Active/"Shower" Mode's per-utterance handler: transcribe, run the RAG
   // exchange (which already appends it to the visible chat transcript),
@@ -444,6 +477,35 @@ export default function ChatScreen() {
                   style={styles.resetButton}
                 >
                   <Text style={styles.resetButtonText}>Reset</Text>
+                </Pressable>
+              )}
+            </View>
+          )}
+
+          {chatModelMissing && (
+            <View style={styles.chatModelPrompt}>
+              <Text style={styles.chatModelPromptTitle}>Chat model not downloaded</Text>
+              <Text style={styles.chatModelPromptBody}>
+                Answering questions needs the on-device Llama chat model ({LLAMA_MODEL_SIZE_LABEL}, one-time
+                download).
+              </Text>
+              {isDownloadingChatModel ? (
+                <View style={styles.chatModelProgressWrap}>
+                  <View style={styles.chatModelProgressTrack}>
+                    <View
+                      style={[
+                        styles.chatModelProgressFill,
+                        { width: `${Math.round(chatModelDownloadProgress * 100)}%` },
+                      ]}
+                    />
+                  </View>
+                  <Text style={styles.chatModelProgressLabel}>
+                    {Math.round(chatModelDownloadProgress * 100)}%
+                  </Text>
+                </View>
+              ) : (
+                <Pressable onPress={() => void handleDownloadChatModel()} style={styles.chatModelDownloadButton}>
+                  <Text style={styles.chatModelDownloadButtonText}>Download Chat Model</Text>
                 </Pressable>
               )}
             </View>
@@ -695,5 +757,55 @@ const styles = StyleSheet.create({
     color: colors.onAccent,
     fontSize: 14,
     fontWeight: "600",
+  },
+  chatModelPrompt: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.lg,
+    padding: spacing.base,
+    marginBottom: spacing.sm,
+  },
+  chatModelPromptTitle: {
+    color: colors.textPrimary,
+    ...typography.heading,
+    marginBottom: spacing.xs,
+  },
+  chatModelPromptBody: {
+    color: colors.textMuted,
+    fontSize: 13,
+    marginBottom: spacing.md,
+  },
+  chatModelDownloadButton: {
+    backgroundColor: colors.accent,
+    borderRadius: radius.md,
+    paddingVertical: 11,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  chatModelDownloadButtonText: {
+    color: colors.onAccent,
+    fontSize: 14,
+    fontWeight: "700",
+  },
+  chatModelProgressWrap: {
+    marginBottom: spacing.xs,
+  },
+  chatModelProgressTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.surfaceElevated,
+    overflow: "hidden",
+  },
+  chatModelProgressFill: {
+    height: "100%",
+    backgroundColor: colors.accent,
+    borderRadius: 3,
+  },
+  chatModelProgressLabel: {
+    color: colors.textMuted,
+    ...typography.caption,
+    marginTop: spacing.xs,
+    textAlign: "right",
   },
 });

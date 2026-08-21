@@ -4,16 +4,24 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 
 import { colors, elevation, radius, spacing, typography } from "../constants/theme";
+import { downloadEmbeddingAssets } from "../services/ai/embeddingModel";
 import { downloadWhisperModel, WHISPER_MODELS, type WhisperModelId } from "../services/ai/whisperModels";
 import { writePreferences } from "../services/settings/preferences";
 
 const CARD_ORDER: WhisperModelId[] = ["base", "tiny"];
+
+/** Coarse weighting for the combined progress bar: the selected Whisper
+ * engine (75-142MB) dominates the embedding model (~34MB), so it gets the
+ * larger share of the bar rather than splitting evenly. */
+const WHISPER_PHASE_WEIGHT = 0.75;
+const EMBEDDING_PHASE_WEIGHT = 1 - WHISPER_PHASE_WEIGHT;
 
 export default function OnboardingScreen() {
   const router = useRouter();
   const [selected, setSelected] = useState<WhisperModelId>("base");
   const [isDownloading, setIsDownloading] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [downloadPhase, setDownloadPhase] = useState<"engine" | "search">("engine");
 
   const finishOnboarding = useCallback(async () => {
     await writePreferences({ onboardingComplete: true });
@@ -23,13 +31,18 @@ export default function OnboardingScreen() {
   const handleDownload = useCallback(async () => {
     setIsDownloading(true);
     setProgress(0);
+    setDownloadPhase("engine");
     try {
-      await downloadWhisperModel(selected, setProgress);
+      await downloadWhisperModel(selected, (fraction) => setProgress(fraction * WHISPER_PHASE_WEIGHT));
+      setDownloadPhase("search");
+      await downloadEmbeddingAssets((fraction) =>
+        setProgress(WHISPER_PHASE_WEIGHT + fraction * EMBEDDING_PHASE_WEIGHT)
+      );
       await finishOnboarding();
     } catch (err) {
       Alert.alert(
         "Download Failed",
-        err instanceof Error ? err.message : "Failed to download the transcription engine."
+        err instanceof Error ? err.message : "Failed to download the required on-device models."
       );
     } finally {
       setIsDownloading(false);
@@ -53,8 +66,9 @@ export default function OnboardingScreen() {
         <Text style={styles.eyebrow}>ONE-TIME SETUP</Text>
         <Text style={styles.title}>Choose your transcription engine</Text>
         <Text style={styles.subtitle}>
-          Xayra transcribes voice notes entirely on your device. Pick which local Whisper engine to
-          download — you can switch anytime in Settings.
+          Xayra transcribes and searches voice notes entirely on your device. Pick which local
+          transcription engine to download — the semantic search model downloads alongside it
+          automatically. You can switch engines anytime in Settings.
         </Text>
 
         <View style={styles.cards}>
@@ -85,7 +99,12 @@ export default function OnboardingScreen() {
             <View style={styles.progressTrack}>
               <View style={[styles.progressFill, { width: `${Math.round(progress * 100)}%` }]} />
             </View>
-            <Text style={styles.progressLabel}>{Math.round(progress * 100)}%</Text>
+            <View style={styles.progressLabelRow}>
+              <Text style={styles.progressPhaseText}>
+                {downloadPhase === "engine" ? "Downloading transcription engine…" : "Downloading search model…"}
+              </Text>
+              <Text style={styles.progressLabel}>{Math.round(progress * 100)}%</Text>
+            </View>
           </View>
         )}
 
@@ -211,11 +230,19 @@ const styles = StyleSheet.create({
     backgroundColor: colors.accent,
     borderRadius: 3,
   },
+  progressLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: spacing.xs,
+  },
+  progressPhaseText: {
+    color: colors.textMuted,
+    ...typography.caption,
+  },
   progressLabel: {
     color: colors.textMuted,
     ...typography.caption,
-    marginTop: spacing.xs,
-    textAlign: "right",
   },
   primaryButton: {
     backgroundColor: colors.accent,

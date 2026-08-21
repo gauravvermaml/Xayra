@@ -12,6 +12,12 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
+import {
+  deleteLlamaModel,
+  downloadLlamaModel,
+  isLlamaModelDownloaded,
+  LLAMA_MODEL_SIZE_LABEL,
+} from "../services/ai/llamaModel";
 import { resetWhisperContext } from "../services/ai/localWhisper";
 import {
   deleteWhisperModel,
@@ -58,6 +64,11 @@ export default function SettingsScreen() {
   const [downloadProgress, setDownloadProgress] = useState(0);
   const [isLoadingModels, setIsLoadingModels] = useState(true);
 
+  const [isChatModelDownloaded, setIsChatModelDownloaded] = useState(false);
+  const [isLoadingChatModel, setIsLoadingChatModel] = useState(true);
+  const [isDownloadingChatModel, setIsDownloadingChatModel] = useState(false);
+  const [chatModelDownloadProgress, setChatModelDownloadProgress] = useState(0);
+
   const refreshStatus = useCallback(async () => {
     try {
       const [syncStatus, autoSync] = await Promise.all([getSyncStatus(), getAutoSyncOnWifi()]);
@@ -85,12 +96,57 @@ export default function SettingsScreen() {
     }
   }, []);
 
+  const refreshChatModel = useCallback(async () => {
+    try {
+      setIsChatModelDownloaded(await isLlamaModelDownloaded());
+    } catch (err) {
+      console.error("[Settings] Failed to load chat model state", err);
+    } finally {
+      setIsLoadingChatModel(false);
+    }
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       void refreshStatus();
       void refreshModels();
-    }, [refreshStatus, refreshModels])
+      void refreshChatModel();
+    }, [refreshStatus, refreshModels, refreshChatModel])
   );
+
+  const handleDownloadChatModel = useCallback(async () => {
+    setIsDownloadingChatModel(true);
+    setChatModelDownloadProgress(0);
+    try {
+      await downloadLlamaModel(setChatModelDownloadProgress);
+      await refreshChatModel();
+    } catch (err) {
+      Alert.alert("Download Failed", err instanceof Error ? err.message : "Failed to download the chat model.");
+    } finally {
+      setIsDownloadingChatModel(false);
+    }
+  }, [refreshChatModel]);
+
+  const handleDeleteChatModel = useCallback(() => {
+    Alert.alert(
+      "Delete Chat Model",
+      `Remove the on-device Llama chat model (${LLAMA_MODEL_SIZE_LABEL}) from this device? You can re-download it anytime.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => {
+            void deleteLlamaModel()
+              .then(refreshChatModel)
+              .catch((err) => {
+                Alert.alert("Error", err instanceof Error ? err.message : "Failed to delete chat model.");
+              });
+          },
+        },
+      ]
+    );
+  }, [refreshChatModel]);
 
   const handleSwitchModel = useCallback(
     async (id: WhisperModelId) => {
@@ -408,6 +464,78 @@ export default function SettingsScreen() {
                 </View>
               );
             })
+          )}
+        </View>
+
+        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Chat Model</Text>
+        <View style={styles.card}>
+          {isLoadingChatModel ? (
+            <ActivityIndicator color={colors.textMuted} style={styles.cardLoading} />
+          ) : (
+            <>
+              <View style={styles.cardHeaderRow}>
+                <View style={styles.statusDotWrap}>
+                  <View
+                    style={[
+                      styles.statusDot,
+                      isChatModelDownloaded ? styles.statusDotConnected : styles.statusDotDisconnected,
+                    ]}
+                  />
+                </View>
+                <View style={styles.cardHeaderTextGroup}>
+                  <Text style={styles.cardTitle}>Llama 3.2 1B ({LLAMA_MODEL_SIZE_LABEL})</Text>
+                  <Text style={styles.cardSubtitle}>
+                    {isChatModelDownloaded ? "Downloaded" : "Not downloaded"}
+                  </Text>
+                </View>
+              </View>
+
+              {isDownloadingChatModel && (
+                <View style={styles.progressWrap}>
+                  <View style={styles.progressTrack}>
+                    <View
+                      style={[styles.progressFill, { width: `${Math.round(chatModelDownloadProgress * 100)}%` }]}
+                    />
+                  </View>
+                  <Text style={styles.progressLabel}>{Math.round(chatModelDownloadProgress * 100)}%</Text>
+                </View>
+              )}
+
+              <View style={styles.modelButtonRow}>
+                <Pressable
+                  onPress={() => void handleDownloadChatModel()}
+                  disabled={isChatModelDownloaded || isDownloadingChatModel}
+                  style={({ pressed }) => [
+                    styles.primaryButton,
+                    styles.modelButtonFlex,
+                    pressed && styles.buttonPressed,
+                    (isChatModelDownloaded || isDownloadingChatModel) && styles.buttonDisabled,
+                  ]}
+                >
+                  {isDownloadingChatModel ? (
+                    <ActivityIndicator color={colors.background} size="small" />
+                  ) : (
+                    <Text style={styles.primaryButtonText}>
+                      {isChatModelDownloaded ? "Downloaded" : `Download (${LLAMA_MODEL_SIZE_LABEL})`}
+                    </Text>
+                  )}
+                </Pressable>
+
+                {isChatModelDownloaded && (
+                  <Pressable
+                    onPress={handleDeleteChatModel}
+                    disabled={isDownloadingChatModel}
+                    style={({ pressed }) => [
+                      styles.dangerButton,
+                      styles.modelDeleteButton,
+                      pressed && styles.buttonPressed,
+                    ]}
+                  >
+                    <Text style={styles.dangerButtonText}>Delete</Text>
+                  </Pressable>
+                )}
+              </View>
+            </>
           )}
         </View>
       </View>

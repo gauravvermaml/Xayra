@@ -11,10 +11,22 @@ import { logDuration, nowMs } from "./perf";
  * project hit at 1B) and is preferred whenever a device has it pushed;
  * falls back to the 1B model, which is smaller and still ships as the
  * baseline every device is expected to have. */
-const MODEL_FILENAMES = [
+export const LLAMA_MODEL_FILENAMES = [
   { filename: "llama-3.2-3b-instruct-q4_k_m.gguf", label: "3B" },
   { filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf", label: "1B" },
 ] as const;
+const MODEL_FILENAMES = LLAMA_MODEL_FILENAMES;
+
+/** The one variant offered through the managed download flow (Settings /
+ * the chat-tab missing-model prompt) — the 3B model stays a manual-push,
+ * power-user option since it's roughly 2GB. */
+export const LLAMA_MANAGED_MODEL_FILENAME = "Llama-3.2-1B-Instruct-Q4_K_M.gguf";
+
+/** Missing-model errors are matched against this exact prefix by
+ * app/chat.tsx to distinguish "no model downloaded yet" (show a graceful
+ * inline download prompt) from any other generation failure (show a plain
+ * error). Keep this string and the check in chat.tsx in sync. */
+export const LLAMA_MODEL_MISSING_ERROR_PREFIX = "No local Llama model found.";
 
 /**
  * Strict-grounding directive per the Category A refinement pass: the model
@@ -166,8 +178,8 @@ async function resolveModelPath(): Promise<ResolvedModel> {
   }
 
   throw new Error(
-    `No local Llama model found. Place ${MODEL_FILENAMES.map((m) => m.filename).join(" or ")} ` +
-      `in ${dir} before generating an answer.`
+    `${LLAMA_MODEL_MISSING_ERROR_PREFIX} Place ${MODEL_FILENAMES.map((m) => m.filename).join(" or ")} ` +
+      `in ${dir} before generating an answer, or download one from Settings > Chat Model.`
   );
 }
 

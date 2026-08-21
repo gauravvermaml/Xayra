@@ -21,6 +21,7 @@ import { SmartNudgeBanner } from "../components/SmartNudgeBanner";
 import { ViewToggle } from "../components/ViewToggle";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { asrRouter } from "../services/ai/asrRouter";
+import { onEmbeddingDownloadProgress } from "../services/ai/embeddingModel";
 import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakTextAndWait } from "../services/audio/tts";
@@ -67,6 +68,17 @@ export default function HomeScreen() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({ isConnected: false });
   const [isNudgeDismissed, setIsNudgeDismissed] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
+  const [embeddingDownloadProgress, setEmbeddingDownloadProgress] = useState<number | null>(null);
+
+  // Surfaces progress for the embedding model auto-download that
+  // localEmbeddings.ts's ensureEmbeddingAssets() triggers transparently the
+  // first time a note is saved without it already present — a quiet global
+  // subscription rather than something wired through every save call site.
+  useEffect(() => {
+    return onEmbeddingDownloadProgress((fraction) => {
+      setEmbeddingDownloadProgress(fraction < 1 ? fraction : null);
+    });
+  }, []);
 
   // First-launch only (not on every focus): if the user hasn't completed or
   // explicitly skipped the Whisper engine setup, send them there before
@@ -332,7 +344,11 @@ export default function HomeScreen() {
         {(recorder.isRecording || processingState === "processing") && (
           <View style={styles.recordingStatusRow}>
             <Text style={styles.recordingStatusText}>
-              {recorder.isRecording ? "Recording… tap mic to stop" : "Saving voice note…"}
+              {recorder.isRecording
+                ? "Recording… tap mic to stop"
+                : embeddingDownloadProgress !== null
+                  ? `Downloading embedding model… ${Math.round(embeddingDownloadProgress * 100)}%`
+                  : "Saving voice note…"}
             </Text>
             {recorder.isRecording && (
               <Pressable

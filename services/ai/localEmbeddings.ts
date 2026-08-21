@@ -1,6 +1,7 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { InferenceSession, Tensor } from "onnxruntime-react-native";
 
+import { ensureEmbeddingAssets } from "./embeddingModel";
 import { logDuration, nowMs } from "./perf";
 import { encode, loadVocab, type Vocab } from "./tokenizer";
 
@@ -31,13 +32,24 @@ function resolveAssetPath(filename: string): string {
   return `${dir}${filename}`;
 }
 
+/**
+ * Auto-remediating: rather than immediately throwing when the model/vocab
+ * files are missing (e.g. the user skipped onboarding, or the app was
+ * reinstalled), this transparently downloads them first via
+ * embeddingModel.ts's `ensureEmbeddingAssets()` — a background fetch, not a
+ * blocking modal, so a note being saved just takes a bit longer the first
+ * time instead of failing outright. Still throws a clear error if that
+ * download itself fails (e.g. genuinely offline), rather than pretending
+ * the file exists.
+ */
 async function requireAssetExists(filename: string): Promise<string> {
+  await ensureEmbeddingAssets();
   const path = resolveAssetPath(filename);
   const info = await FileSystem.getInfoAsync(path);
   if (!info.exists) {
     throw new Error(
-      `${filename} not found. Place it in the app's document directory ` +
-        `(${FileSystem.documentDirectory}) before generating embeddings.`
+      `${filename} could not be downloaded automatically. Check your connection and try again, ` +
+        `or place it manually in the app's document directory (${FileSystem.documentDirectory}).`
     );
   }
   return path;
