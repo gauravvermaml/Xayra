@@ -3,12 +3,13 @@ import {
   ActivityIndicator,
   Alert,
   Pressable,
+  ScrollView,
   StyleSheet,
   Switch,
   Text,
   View,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
@@ -53,6 +54,7 @@ function formatTimestamp(iso: string): string {
 
 export default function SettingsScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const [status, setStatus] = useState<SyncStatus>({ isConnected: false });
   const [autoSyncOnWifi, setAutoSyncOnWifiState] = useState(false);
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
@@ -256,8 +258,15 @@ export default function SettingsScreen() {
   }, []);
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.container}>
+    <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
+      <ScrollView
+        style={styles.container}
+        contentContainerStyle={[
+          styles.scrollContent,
+          { paddingBottom: Math.max(insets.bottom + 40, 48) },
+        ]}
+        showsVerticalScrollIndicator={false}
+      >
         <View style={styles.header}>
           <Pressable
             onPress={() => router.back()}
@@ -538,7 +547,7 @@ export default function SettingsScreen() {
             </>
           )}
         </View>
-      </View>
+      </ScrollView>
     </SafeAreaView>
   );
 }
@@ -550,6 +559,8 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
+  },
+  scrollContent: {
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.xxl,
   },

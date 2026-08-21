@@ -69,6 +69,19 @@ export class NoBackupFoundError extends DriveSyncError {
 let configured = false;
 
 /**
+ * The OAuth 2.0 "Web application" client ID from the same Google Cloud
+ * Console project as the Android client below — required by
+ * `GoogleSignin.configure()` for `addScopes`/token exchange to work
+ * reliably on Android (without it, `getTokens()` can return an identity
+ * token that the Drive API rejects as insufficiently scoped). This is a
+ * public identifier (safe to ship in the client, unlike a client *secret*),
+ * but it's still project-specific and must be swapped for a real value
+ * before Drive backup will work — same placeholder pattern as
+ * `iosUrlScheme` in app.json.
+ */
+const WEB_CLIENT_ID = "REPLACE_WITH_WEB_OAUTH_CLIENT_ID";
+
+/**
  * NOTE on `app.json`: this requires a real OAuth 2.0 "Android" client ID
  * registered in Google Cloud Console (Drive API enabled, client tied to
  * this app's package name + release/debug signing SHA-1) before sign-in
@@ -81,8 +94,57 @@ function ensureConfigured(): void {
   if (configured) {
     return;
   }
-  GoogleSignin.configure({ scopes: [DRIVE_APPDATA_SCOPE] });
+  if (WEB_CLIENT_ID.startsWith("REPLACE_WITH_")) {
+    console.warn(
+      "[DriveSync] GoogleSignin webClientId is still the placeholder value — replace WEB_CLIENT_ID " +
+        "in services/sync/driveSync.ts with this project's real Web OAuth client ID from Google Cloud " +
+        "Console before shipping Drive backup."
+    );
+  }
+  GoogleSignin.configure({ scopes: [DRIVE_APPDATA_SCOPE], webClientId: WEB_CLIENT_ID });
   configured = true;
+}
+
+/**
+ * `DEVELOPER_ERROR` (native Android status code 10) is this library's most
+ * common — and most opaque — failure: it almost always means the SHA-1
+ * fingerprint of the build's signing certificate doesn't match what's
+ * registered against the Android OAuth client in Google Cloud Console (a
+ * debug-keystore SHA-1 registered but a release-signed APK installed, or
+ * vice versa, is the usual cause). Neither this library's `statusCodes` nor
+ * its error objects consistently expose a typed constant for it across
+ * versions, so detection here matches on the raw native code/message rather
+ * than a single well-typed check.
+ */
+function isDeveloperError(err: unknown): boolean {
+  if (!(err instanceof Error)) {
+    return false;
+  }
+  const code = (err as { code?: string | number }).code;
+  return (
+    String(code) === "10" ||
+    String(code).toUpperCase() === "DEVELOPER_ERROR" ||
+    /developer_error/i.test(err.message)
+  );
+}
+
+/** Wraps a Google Sign-In call so a `DEVELOPER_ERROR` surfaces as an
+ * actionable message instead of the SDK's bare, unhelpful native error. */
+async function withDeveloperErrorHandling<T>(action: () => Promise<T>): Promise<T> {
+  try {
+    return await action();
+  } catch (err) {
+    if (isDeveloperError(err)) {
+      throw new DriveSyncError(
+        "Google Sign-In configuration error (DEVELOPER_ERROR). This almost always means the SHA-1 " +
+          "certificate fingerprint of this build doesn't match what's registered for this app's " +
+          "Android OAuth client in Google Cloud Console — check whether this is a debug or release " +
+          "build and confirm its SHA-1 (`keytool -list -v -keystore <path-to-keystore>`) is added " +
+          "there, alongside a matching Web OAuth client ID configured in services/sync/driveSync.ts."
+      );
+    }
+    throw err;
+  }
 }
 
 export type DriveUser = {
@@ -104,13 +166,15 @@ function toDriveUser(user: User): DriveUser {
  */
 export async function signInWithGoogle(): Promise<DriveUser> {
   ensureConfigured();
-  await GoogleSignin.hasPlayServices();
-  const response = await GoogleSignin.signIn();
-  if (!isSuccessResponse(response)) {
-    throw new DriveSyncError("Google sign-in was cancelled.");
-  }
-  await GoogleSignin.addScopes({ scopes: [DRIVE_APPDATA_SCOPE] });
-  return toDriveUser(response.data);
+  return withDeveloperErrorHandling(async () => {
+    await GoogleSignin.hasPlayServices();
+    const response = await GoogleSignin.signIn();
+    if (!isSuccessResponse(response)) {
+      throw new DriveSyncError("Google sign-in was cancelled.");
+    }
+    await GoogleSignin.addScopes({ scopes: [DRIVE_APPDATA_SCOPE] });
+    return toDriveUser(response.data);
+  });
 }
 
 /** Revokes Drive access and clears the local session — deliberately does
