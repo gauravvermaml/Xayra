@@ -1,7 +1,7 @@
 import * as FileSystem from "expo-file-system/legacy";
 import { InferenceSession, Tensor } from "onnxruntime-react-native";
 
-import { ensureEmbeddingAssets } from "./embeddingModel";
+import { ensureEmbeddingAssets, toNativeFilePath } from "./embeddingModel";
 import { logDuration, nowMs } from "./perf";
 import { encode, loadVocab, type Vocab } from "./tokenizer";
 
@@ -64,7 +64,7 @@ async function getSession(): Promise<InferenceSession> {
   if (!sessionPromise) {
     const coldStart = nowMs();
     sessionPromise = requireAssetExists(MODEL_FILENAME)
-      .then((path) => InferenceSession.create(path))
+      .then((path) => InferenceSession.create(toNativeFilePath(path)))
       .then((session) => {
         const missing = EXPECTED_INPUT_NAMES.filter((name) => !session.inputNames.includes(name));
         if (missing.length > 0) {

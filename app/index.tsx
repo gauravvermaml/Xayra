@@ -32,6 +32,7 @@ import {
   isSilentTranscript,
   listNotes,
   purgeAllNotes,
+  retryPendingEmbeddings,
   type HybridSearchResult,
   type Note,
 } from "../services/notes/noteManager";
@@ -69,6 +70,17 @@ export default function HomeScreen() {
   const [isNudgeDismissed, setIsNudgeDismissed] = useState(false);
   const [isRestoring, setIsRestoring] = useState(false);
   const [embeddingDownloadProgress, setEmbeddingDownloadProgress] = useState<number | null>(null);
+  const [infoMessage, setInfoMessage] = useState<string | null>(null);
+
+  // A quiet, self-dismissing banner (distinct from `error`'s red styling)
+  // for non-blocking status like "saved without a vector index while
+  // offline" — informational, never something the user needs to act on.
+  const showInfoMessage = useCallback((message: string) => {
+    setInfoMessage(message);
+    setTimeout(() => {
+      setInfoMessage((current) => (current === message ? null : current));
+    }, 4000);
+  }, []);
 
   // Surfaces progress for the embedding model auto-download that
   // localEmbeddings.ts's ensureEmbeddingAssets() triggers transparently the
@@ -115,6 +127,15 @@ export default function HomeScreen() {
     useCallback(() => {
       void refreshNotes();
       void refreshSyncStatus();
+      // Cheap, instant no-op while offline/model-not-downloaded (see
+      // retryPendingEmbeddings' own guard) — only actually does work once
+      // the embedding model is available, catching up any notes saved
+      // while it wasn't.
+      void retryPendingEmbeddings().then((count) => {
+        if (count > 0) {
+          void refreshNotes();
+        }
+      });
     }, [refreshNotes, refreshSyncStatus])
   );
 
@@ -150,15 +171,18 @@ export default function HomeScreen() {
         if (isSilentTranscript(transcript)) {
           return;
         }
-        await createVoiceNote(audioUri, transcript, whisperModelId ?? null);
+        const note = await createVoiceNote(audioUri, transcript, whisperModelId ?? null);
         await refreshNotes();
+        if (note.status !== "embedded") {
+          showInfoMessage("Note saved. Vector search index will update when online.");
+        }
         reportState("speaking");
         await speakTextAndWait("Saved.");
       } catch (err) {
         console.error("[ActiveMode] Failed to save note", err);
       }
     },
-    [refreshNotes]
+    [refreshNotes, showInfoMessage]
   );
   const activeMode = useActiveMode(handleActiveModeUtterance);
 
@@ -184,7 +208,12 @@ export default function HomeScreen() {
         void asrRouter
           .transcribe(audioUri)
           .then(({ transcript, whisperModelId }) => createVoiceNote(audioUri, transcript, whisperModelId ?? null))
-          .then(() => refreshNotes())
+          .then((note) => {
+            if (note.status !== "embedded") {
+              showInfoMessage("Note saved. Vector search index will update when online.");
+            }
+            return refreshNotes();
+          })
           .catch((err) => {
             console.error("[RecordError]", err, err?.stack);
             const message = err?.message || String(err);
@@ -202,7 +231,7 @@ export default function HomeScreen() {
       console.error("[RecordError]", err, (err as Error | undefined)?.stack);
       setError(err instanceof Error ? err.message : "Recording failed.");
     }
-  }, [recorder, refreshNotes]);
+  }, [recorder, refreshNotes, showInfoMessage]);
 
   const handleDeleteNote = useCallback((noteId: string) => {
     Alert.alert(
@@ -379,6 +408,7 @@ export default function HomeScreen() {
         </View>
 
         {error && <Text style={styles.errorText}>{error}</Text>}
+        {infoMessage && <Text style={styles.infoText}>{infoMessage}</Text>}
 
         {__DEV__ && (
           <Pressable onPress={handlePurgeAll} style={styles.purgeButton}>
@@ -563,6 +593,11 @@ const styles = StyleSheet.create({
   },
   errorText: {
     color: colors.danger,
+    fontSize: 13,
+    marginTop: spacing.md,
+  },
+  infoText: {
+    color: colors.textMuted,
     fontSize: 13,
     marginTop: spacing.md,
   },

@@ -13,6 +13,17 @@ const VOCAB_APPROX_BYTES = 231_000;
 const MODEL_WEIGHT = MODEL_APPROX_BYTES / (MODEL_APPROX_BYTES + VOCAB_APPROX_BYTES);
 const VOCAB_WEIGHT = 1 - MODEL_WEIGHT;
 
+/**
+ * onnxruntime-react-native's native `InferenceSession.create()` expects a
+ * plain filesystem path, not a `file://` URI — `expo-file-system`'s
+ * `documentDirectory` (and therefore every path built from it in this file)
+ * is a `file://...` URI, so callers passing a path into the ONNX runtime
+ * must strip the prefix first or native model loading fails.
+ */
+export function toNativeFilePath(path: string): string {
+  return path.startsWith("file://") ? path.slice("file://".length) : path;
+}
+
 function documentDir(): string {
   const dir = FileSystem.documentDirectory;
   if (!dir) {

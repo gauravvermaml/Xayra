@@ -3,6 +3,7 @@ import * as FileSystem from "expo-file-system/legacy";
 
 import { getRawDatabase, isFtsAvailable } from "../../db/client";
 import type { NoteStatus } from "../../db/schema";
+import { isEmbeddingModelDownloaded } from "../ai/embeddingModel";
 import { generateEmbeddingLocal } from "../ai/localEmbeddings";
 import { logDuration, nowMs } from "../ai/perf";
 
@@ -88,6 +89,32 @@ async function updateNoteStatus(
  * correct even if another statement runs on the connection in between.
  * sqlite-vec accepts a JSON-text array for the vector column.
  */
+/**
+ * Best-effort embedding attempt for an already-saved note: on success,
+ * inserts the vector and flips status to `embedded`; on any failure (no
+ * network to auto-download the embedding model, model download itself
+ * failing, etc.) leaves the note at `transcribed` and returns false rather
+ * than throwing — a voice note must never be lost just because the device
+ * was offline when it was recorded. `notes` and `notes_fts` already have
+ * the row either way; only the vector index is deferred.
+ */
+async function tryEmbedNote(id: string, text: string): Promise<boolean> {
+  try {
+    const embedding = await generateEmbeddingLocal(text);
+    await insertEmbedding(id, embedding);
+    await updateNoteStatus(id, "embedded");
+    return true;
+  } catch (err) {
+    console.warn(
+      "[Note] Embedding unavailable (offline or model not downloaded) — note saved without a " +
+        "vector index; it will be indexed automatically next time the app is online.",
+      id,
+      err
+    );
+    return false;
+  }
+}
+
 async function insertEmbedding(noteId: string, embedding: number[]): Promise<void> {
   const db = await getRawDatabase();
 
@@ -144,21 +171,22 @@ export async function createVoiceNote(
     }
     await updateNoteStatus(id, "transcribed", { content: transcript, transcript, transcriptionModel });
 
-    const embedding = await generateEmbeddingLocal(transcript);
-    await insertEmbedding(id, embedding);
-    await updateNoteStatus(id, "embedded");
+    const embedded = await tryEmbedNote(id, transcript);
 
-    console.log("[Note] voice note saved", id, "status=embedded");
+    console.log("[Note] voice note saved", id, embedded ? "status=embedded" : "status=transcribed (offline)");
     return {
       id,
       content: transcript,
       audioUri,
       transcript,
-      status: "embedded",
+      status: embedded ? "embedded" : "transcribed",
       transcriptionModel,
       createdAt,
     };
   } catch (err) {
+    // Only reaches here for genuine failures (silent recording, DB errors) —
+    // embedding failures are handled inside tryEmbedNote and never surface
+    // as a failed note.
     console.error("[Note] voice note failed", id, err);
     await updateNoteStatus(id, "failed").catch(() => {});
     throw err;
@@ -173,26 +201,18 @@ export async function createTextNote(text: string): Promise<Note> {
 
   await db.execute(
     "INSERT INTO notes (id, content, audio_uri, transcript, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, text, null, null, "pending", createdAt]
+    [id, text, null, null, "transcribed", createdAt]
   );
 
-  try {
-    const embedding = await generateEmbeddingLocal(text);
-    await insertEmbedding(id, embedding);
-    await updateNoteStatus(id, "embedded");
-    console.log("[Note] text note saved", id, "status=embedded");
-  } catch (err) {
-    console.error("[Note] text note failed", id, err);
-    await updateNoteStatus(id, "failed").catch(() => {});
-    throw err;
-  }
+  const embedded = await tryEmbedNote(id, text);
+  console.log("[Note] text note saved", id, embedded ? "status=embedded" : "status=transcribed (offline)");
 
   return {
     id,
     content: text,
     audioUri: null,
     transcript: null,
-    status: "embedded",
+    status: embedded ? "embedded" : "transcribed",
     transcriptionModel: null,
     createdAt,
   };
@@ -236,6 +256,37 @@ export async function deleteNote(noteId: string): Promise<void> {
   if (audioUri && typeof FileSystem.deleteAsync === "function") {
     await FileSystem.deleteAsync(audioUri, { idempotent: true });
   }
+}
+
+/**
+ * Best-effort reconciliation pass for notes saved while the embedding
+ * model wasn't available (offline first-run skip, or the model download
+ * itself failed) — attempts to embed every note still sitting at
+ * `transcribed`. Checks `isEmbeddingModelDownloaded()` up front and returns
+ * immediately if it's not there yet, so this is a cheap, instant no-op when
+ * still offline rather than repeatedly attempting (and failing) a network
+ * download every time it's called. Returns how many notes were newly
+ * embedded, so callers can decide whether to refresh their note list.
+ */
+export async function retryPendingEmbeddings(): Promise<number> {
+  if (!(await isEmbeddingModelDownloaded())) {
+    return 0;
+  }
+
+  const db = await getRawDatabase();
+  const result = await db.execute("SELECT id, content, transcript FROM notes WHERE status = 'transcribed'");
+
+  let succeeded = 0;
+  for (const row of result.rows) {
+    const text = ((row.content as string) || (row.transcript as string) || "").trim();
+    if (!text) {
+      continue;
+    }
+    if (await tryEmbedNote(row.id as string, text)) {
+      succeeded += 1;
+    }
+  }
+  return succeeded;
 }
 
 /**
