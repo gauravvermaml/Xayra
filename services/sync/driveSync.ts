@@ -79,7 +79,7 @@ let configured = false;
  * before Drive backup will work — same placeholder pattern as
  * `iosUrlScheme` in app.json.
  */
-const WEB_CLIENT_ID = "REPLACE_WITH_WEB_OAUTH_CLIENT_ID";
+const WEB_CLIENT_ID = "275985105011-2rr1beo5b1j34fc8vh181rtvuhjs8mb6.apps.googleusercontent.com";
 
 /**
  * NOTE on `app.json`: this requires a real OAuth 2.0 "Android" client ID
