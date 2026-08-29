@@ -101,8 +101,38 @@ function ensureConfigured(): void {
         "Console before shipping Drive backup."
     );
   }
-  GoogleSignin.configure({ scopes: [DRIVE_APPDATA_SCOPE], webClientId: WEB_CLIENT_ID });
+  GoogleSignin.configure({
+    scopes: [DRIVE_APPDATA_SCOPE],
+    webClientId: WEB_CLIENT_ID,
+    // Requests a server auth code alongside the normal sign-in so a refresh
+    // token is available — without this, some Play Services versions only
+    // hand back a short-lived access token, and `getTokens()` silently
+    // starts failing once it expires with no way to renew it without
+    // re-prompting the account picker.
+    offlineAccess: true,
+  });
   configured = true;
+}
+
+/** Number of leading characters of `webClientId` surfaced in diagnostic
+ * logs — enough to eyeball "is this even the right project's client ID"
+ * without printing the whole (still-public, but no reason to be careless)
+ * identifier. */
+const WEB_CLIENT_ID_LOG_PREFIX_LENGTH = 15;
+
+/**
+ * Captures everything available about a failed native Google Sign-In call —
+ * `error.code`/`error.message`/`error.toString()` plus a prefix of the
+ * configured `webClientId` — so a `DEVELOPER_ERROR` (or any other opaque
+ * native failure) can actually be diagnosed from what's on screen/in logs
+ * instead of guessing.
+ */
+function formatSignInDiagnostics(err: unknown): string {
+  const code = (err as { code?: string | number } | null)?.code;
+  const message = err instanceof Error ? err.message : String(err);
+  const toStringValue = err instanceof Error ? err.toString() : String(err);
+  const webClientIdPrefix = WEB_CLIENT_ID.slice(0, WEB_CLIENT_ID_LOG_PREFIX_LENGTH);
+  return `code=${code ?? "unknown"} | message=${message} | toString=${toStringValue} | webClientId≈${webClientIdPrefix}…`;
 }
 
 /**
@@ -128,22 +158,36 @@ function isDeveloperError(err: unknown): boolean {
   );
 }
 
-/** Wraps a Google Sign-In call so a `DEVELOPER_ERROR` surfaces as an
- * actionable message instead of the SDK's bare, unhelpful native error. */
+/**
+ * Wraps a Google Sign-In call so a failure surfaces with everything needed
+ * to actually diagnose it — the raw native code/message/toString() and the
+ * configured `webClientId` prefix — appended to whichever message reaches
+ * the UI's `Alert.alert` (see app/settings.tsx's `handleConnect`), rather
+ * than the SDK's bare, unhelpful native error. An expected, already-clear
+ * `DriveSyncError` (e.g. "sign-in was cancelled") passes through untouched;
+ * diagnostics are only appended to genuine unexpected native failures.
+ */
 async function withDeveloperErrorHandling<T>(action: () => Promise<T>): Promise<T> {
   try {
     return await action();
   } catch (err) {
+    if (err instanceof DriveSyncError) {
+      throw err;
+    }
+
+    const diagnostics = formatSignInDiagnostics(err);
+    console.error("[DriveSync] Google Sign-In failed —", diagnostics);
+
     if (isDeveloperError(err)) {
       throw new DriveSyncError(
         "Google Sign-In configuration error (DEVELOPER_ERROR). This almost always means the SHA-1 " +
           "certificate fingerprint of this build doesn't match what's registered for this app's " +
           "Android OAuth client in Google Cloud Console — check whether this is a debug or release " +
           "build and confirm its SHA-1 (`keytool -list -v -keystore <path-to-keystore>`) is added " +
-          "there, alongside a matching Web OAuth client ID configured in services/sync/driveSync.ts."
+          `there, alongside a matching Web OAuth client ID configured in services/sync/driveSync.ts.\n\n${diagnostics}`
       );
     }
-    throw err;
+    throw new DriveSyncError(`Google Sign-In failed.\n\n${diagnostics}`);
   }
 }
 

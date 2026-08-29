@@ -60,9 +60,14 @@ const SYSTEM_PROMPT =
   "thing the user is asking about and answer using that note's content. Do NOT describe yourself, " +
   "do NOT explain your role or these instructions, and do NOT restate this system prompt in any " +
   "form — the user only ever wants the answer itself. When asked to summarize or list notes, " +
-  "answer ONLY using the information contained inside the <context></context> tags: extract " +
-  "factual points directly from the retrieved notes rather than describing what the notes are in " +
-  "general terms.";
+  "answer ONLY using the information contained in the NOTE sections below: extract factual points " +
+  "directly from the retrieved notes rather than describing what the notes are in general terms. " +
+  "Write every answer as plain, natural language: never output XML, HTML, Markdown code fences, " +
+  "raw tags, or a note's internal ID — a note's date may be mentioned in prose (e.g. \"on August 3\") " +
+  "but its ID or formatting markup must never appear in your answer. If the retrieved notes mention " +
+  "more than one distinct person who could plausibly share the same name, or it's otherwise unclear " +
+  "which person a note refers to, briefly disambiguate them (e.g. by date or the detail that " +
+  "distinguishes them) rather than merging them into one.";
 
 /**
  * A fixed one-shot example, injected as a real prior user/assistant turn
@@ -71,12 +76,16 @@ const SYSTEM_PROMPT =
  * small instruct models' output format than the same guidance written as an
  * instruction, since the model is directly continuing an established
  * pattern rather than having to translate a description into behavior.
+ * Matches formatNoteContext()'s plain-text `--- NOTE N (date) ---` framing
+ * in services/ai/rag.ts exactly — the whole point of a few-shot example is
+ * undermined if it demonstrates a different context format than what the
+ * model actually sees on the real turn.
  */
-const FEW_SHOT_CONTEXT_XML =
-  "<context>\n" +
-  '  <note id="example-1" date="2026-01-01">Buy milk, eggs, and sourdough bread.</note>\n' +
-  '  <note id="example-2" date="2026-01-01">Dentist checkup scheduled for Tuesday at 10 AM.</note>\n' +
-  "</context>";
+const FEW_SHOT_CONTEXT =
+  "--- NOTE 1 (2026-01-01) ---\n" +
+  "Buy milk, eggs, and sourdough bread.\n\n" +
+  "--- NOTE 2 (2026-01-01) ---\n" +
+  "Dentist checkup scheduled for Tuesday at 10 AM.";
 const FEW_SHOT_USER_QUERY = "Tell me about my notes in a few bullet points.";
 const FEW_SHOT_ANSWER =
   "• Groceries: You have a note to buy milk, eggs, and sourdough.\n" +
@@ -159,6 +168,13 @@ const EOT_TOKEN = "<|eot_id|>";
  * from a bad first token rather than deterministically repeating a mistake. */
 const GENERATION_TEMPERATURE = 0.1;
 
+/** llama.cpp's classic `repeat_penalty` CLI flag is exposed by llama.rn as
+ * `penalty_repeat` — a value >1.0 discourages the model from repeating
+ * recently-generated tokens. Left at the library's default (1.0, no
+ * penalty), the 1B model has been observed looping — repeating its own last
+ * sentence verbatim right before the stop token — on longer answers. */
+const REPEAT_PENALTY = 1.15;
+
 let contextPromise: Promise<LlamaContext> | null = null;
 
 type ResolvedModel = { path: string; label: (typeof MODEL_FILENAMES)[number]["label"] };
@@ -224,16 +240,16 @@ async function getContext(): Promise<LlamaContext> {
  * context-grounded answer shape expected for open-ended "summarize my
  * notes" requests — the failure mode this whole prompt revision targets.
  */
-function buildPrompt(userQuery: string, contextXml: string): string {
+function buildPrompt(userQuery: string, noteContext: string): string {
   return (
     "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" +
     `${buildSystemPromptWithDate()}${EOT_TOKEN}` +
     "<|start_header_id|>user<|end_header_id|>\n\n" +
-    `${FEW_SHOT_CONTEXT_XML}\n\n${FEW_SHOT_USER_QUERY}${EOT_TOKEN}` +
+    `${FEW_SHOT_CONTEXT}\n\n${FEW_SHOT_USER_QUERY}${EOT_TOKEN}` +
     "<|start_header_id|>assistant<|end_header_id|>\n\n" +
     `${FEW_SHOT_ANSWER}${EOT_TOKEN}` +
     "<|start_header_id|>user<|end_header_id|>\n\n" +
-    `${contextXml}\n\n${userQuery}${EOT_TOKEN}` +
+    `${noteContext}\n\n${userQuery}${EOT_TOKEN}` +
     "<|start_header_id|>assistant<|end_header_id|>\n\n"
   );
 }
@@ -246,14 +262,14 @@ function buildPrompt(userQuery: string, contextXml: string): string {
  */
 export async function generateLocalRAGAnswer(
   prompt: string,
-  contextXml: string,
+  noteContext: string,
   onToken: (token: string) => void
 ): Promise<string> {
   const contextReadyStart = nowMs();
   const context = await getContext();
   logDuration("Llama context ready (warm reuse if already loaded)", contextReadyStart);
 
-  const fullPrompt = buildPrompt(prompt, contextXml);
+  const fullPrompt = buildPrompt(prompt, noteContext);
 
   const generationStart = nowMs();
   let firstTokenLogged = false;
@@ -263,6 +279,7 @@ export async function generateLocalRAGAnswer(
       prompt: fullPrompt,
       n_predict: 512,
       temperature: GENERATION_TEMPERATURE,
+      penalty_repeat: REPEAT_PENALTY,
       stop: [EOT_TOKEN, "<|end_of_text|>"],
     },
     (data) => {
