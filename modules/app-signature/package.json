@@ -1,0 +1,9 @@
+{
+  "name": "expo-app-signature",
+  "version": "1.0.0",
+  "description": "Local Expo module exposing the running app's signing certificate SHA-1 fingerprint and package name for Google Sign-In DEVELOPER_ERROR diagnostics.",
+  "main": "index.ts",
+  "types": "index.ts",
+  "license": "UNLICENSED",
+  "private": true
+}

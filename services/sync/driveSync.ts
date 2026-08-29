@@ -4,8 +4,10 @@ import {
   isSuccessResponse,
   type User,
 } from "@react-native-google-signin/google-signin";
+import { getRuntimePackageName, getSigningSha1Fingerprint } from "expo-app-signature";
 import * as Crypto from "expo-crypto";
 import * as FileSystem from "expo-file-system/legacy";
+import { Platform } from "react-native";
 
 import { closeDatabase, getRawDatabase } from "../../db/client";
 import { getOrCreateDatabaseKey, setDatabaseKey } from "../crypto/keyManager";
@@ -121,18 +123,56 @@ function ensureConfigured(): void {
 const WEB_CLIENT_ID_LOG_PREFIX_LENGTH = 15;
 
 /**
+ * Reads the *running* APK's actual package name and signing-certificate
+ * SHA-1 straight from `PackageManager` (via the local `expo-app-signature`
+ * native module — see modules/app-signature/), rather than trusting
+ * app.json's `android.package` or a keystore file on disk that may not be
+ * the one that actually signed this particular install. This is exactly
+ * what has to match the Android OAuth client registered in Google Cloud
+ * Console for sign-in to work at all, so a `DEVELOPER_ERROR` can be
+ * root-caused by eyeballing this against that console entry instead of
+ * guessing which keystore/build produced the installed APK.
+ *
+ * Android-only (there's no APK signing certificate on iOS) — returns a
+ * clear "n/a" pair there rather than throwing, so diagnostics still render.
+ */
+function readRuntimeSigningInfo(): { packageName: string; sha1: string } {
+  if (Platform.OS !== "android") {
+    return { packageName: "n/a (iOS)", sha1: "n/a (iOS)" };
+  }
+  try {
+    return {
+      packageName: getRuntimePackageName() || "unknown",
+      sha1: getSigningSha1Fingerprint() ?? "unavailable",
+    };
+  } catch (err) {
+    // The native module itself failing to read should never block surfacing
+    // the rest of the sign-in diagnostics.
+    console.error("[DriveSync] Failed to read runtime signing info —", err);
+    return { packageName: "error reading package name", sha1: "error reading SHA-1" };
+  }
+}
+
+/**
  * Captures everything available about a failed native Google Sign-In call —
- * `error.code`/`error.message`/`error.toString()` plus a prefix of the
- * configured `webClientId` — so a `DEVELOPER_ERROR` (or any other opaque
- * native failure) can actually be diagnosed from what's on screen/in logs
- * instead of guessing.
+ * `error.code`/`error.message`/`error.toString()`, the running APK's actual
+ * package name and signing SHA-1, plus a prefix of the configured
+ * `webClientId` — so a `DEVELOPER_ERROR` (or any other opaque native
+ * failure) can actually be diagnosed from what's on screen/in logs instead
+ * of guessing.
  */
 function formatSignInDiagnostics(err: unknown): string {
   const code = (err as { code?: string | number } | null)?.code;
   const message = err instanceof Error ? err.message : String(err);
   const toStringValue = err instanceof Error ? err.toString() : String(err);
   const webClientIdPrefix = WEB_CLIENT_ID.slice(0, WEB_CLIENT_ID_LOG_PREFIX_LENGTH);
-  return `code=${code ?? "unknown"} | message=${message} | toString=${toStringValue} | webClientId≈${webClientIdPrefix}…`;
+  const { packageName, sha1 } = readRuntimeSigningInfo();
+  return (
+    `Package Name: ${packageName}\n` +
+    `Runtime SHA-1: ${sha1}\n` +
+    `Web Client ID: ${webClientIdPrefix}…\n` +
+    `Native Error: code=${code ?? "unknown"} | message=${message} | toString=${toStringValue}`
+  );
 }
 
 /**
@@ -182,9 +222,9 @@ async function withDeveloperErrorHandling<T>(action: () => Promise<T>): Promise<
       throw new DriveSyncError(
         "Google Sign-In configuration error (DEVELOPER_ERROR). This almost always means the SHA-1 " +
           "certificate fingerprint of this build doesn't match what's registered for this app's " +
-          "Android OAuth client in Google Cloud Console — check whether this is a debug or release " +
-          "build and confirm its SHA-1 (`keytool -list -v -keystore <path-to-keystore>`) is added " +
-          `there, alongside a matching Web OAuth client ID configured in services/sync/driveSync.ts.\n\n${diagnostics}`
+          "Android OAuth client in Google Cloud Console. The \"Runtime SHA-1\" below was read directly " +
+          "off the installed APK, not guessed from a keystore file — add it (and \"Package Name\") to " +
+          `an Android OAuth client in the same Google Cloud project as the Web Client ID below.\n\n${diagnostics}`
       );
     }
     throw new DriveSyncError(`Google Sign-In failed.\n\n${diagnostics}`);
