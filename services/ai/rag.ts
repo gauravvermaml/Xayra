@@ -65,8 +65,17 @@ function formatNoteContext(notes: HybridSearchResult[]): string {
  *   2. Looping: repeating its own last sentence/paragraph verbatim right
  *      before hitting the stop token.
  */
+/** Matches a residual Llama-3.2 instruct-template special token, e.g.
+ * `<|eot_id|>` or `<|start_header_id|>assistant<|end_header_id|>` — these
+ * use `<|...|>` delimiters, not `<tag>`, so the general XML/HTML regex below
+ * doesn't catch them on its own. A `stop` sequence should prevent these from
+ * ever being generated, but a truncated/edge-case completion has been
+ * observed leaking a trailing `<|eot_id|>` fragment on-device. */
+const SPECIAL_TOKEN_PATTERN = /<\|[a-zA-Z0-9_]+\|>/g;
+
 export function sanitizeLLMResponse(text: string): string {
-  const withoutTags = text.replace(/<\/?[a-zA-Z!][^>]*>/g, "").trim();
+  const withoutSpecialTokens = text.replace(SPECIAL_TOKEN_PATTERN, "");
+  const withoutTags = withoutSpecialTokens.replace(/<\/?[a-zA-Z!][^>]*>/g, "").trim();
   return stripDuplicatedTail(withoutTags);
 }
 
@@ -111,7 +120,13 @@ export async function generateRAGAnswer(
     createdAt: note.createdAt,
   }));
 
-  const noteContext = notes.length > 0 ? formatNoteContext(notes) : "No relevant voice notes were found.";
+  // Deliberately worded so an empty-context turn still reads as one of the
+  // "NOTE" sections the system prompt already knows how to ground answers
+  // in — that's what reliably gets the model to actually say the fixed
+  // "I couldn't find any details..." line instead of inventing something,
+  // rather than leaving it to notice an unusual, unlabeled context string.
+  const noteContext =
+    notes.length > 0 ? formatNoteContext(notes) : "--- NOTE CONTEXT ---\nNo relevant voice notes were found.";
 
   console.log("[RAG Prompt Context]", noteContext);
 

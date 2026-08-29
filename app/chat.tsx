@@ -59,6 +59,12 @@ type ChatMessage = {
   isStreaming?: boolean;
 };
 
+/** How often buffered streaming tokens are flushed into visible state — see
+ * the comment in runRagExchange below. 80ms is frequent enough that the text
+ * still reads as a smooth live stream, but coalesces what would otherwise be
+ * many dozens of per-token re-renders per second into ~12 batched ones. */
+const STREAM_FLUSH_INTERVAL_MS = 80;
+
 function formatDuration(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -198,16 +204,46 @@ export default function ChatScreen() {
       };
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
 
+      // Llama streams a token every few milliseconds — committing a state
+      // update (and the FlatList/Markdown re-render that follows) on every
+      // single one is what caused visible stutter on mid-range hardware
+      // (Galaxy A50). Instead, tokens are buffered into `pendingText` and
+      // flushed as one batched state update at most every
+      // STREAM_FLUSH_INTERVAL_MS — the visible cadence barely changes (still
+      // well under what feels "chunky" to read) but the render count drops
+      // by roughly the same factor as the flush interval vs. per-token timing.
+      let pendingText = "";
+      let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      const flushPendingText = () => {
+        flushTimer = null;
+        if (!pendingText) {
+          return;
+        }
+        const textToAppend = pendingText;
+        pendingText = "";
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.id === assistantId
+              ? { ...message, text: message.text + textToAppend }
+              : message
+          )
+        );
+      };
+
       try {
         const answer = await generateRAGAnswer(query, (chunk) => {
-          setMessages((prev) =>
-            prev.map((message) =>
-              message.id === assistantId
-                ? { ...message, text: message.text + chunk }
-                : message
-            )
-          );
+          pendingText += chunk;
+          if (!flushTimer) {
+            flushTimer = setTimeout(flushPendingText, STREAM_FLUSH_INTERVAL_MS);
+          }
         });
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        // The final update below replaces `text` with the complete, sanitized
+        // answer outright, so any not-yet-flushed buffered chunk is
+        // superseded rather than needing its own flush first.
         updateMessage(assistantId, {
           text: answer.text,
           citations: answer.citations,
@@ -215,6 +251,10 @@ export default function ChatScreen() {
         });
         return { assistantId, text: answer.text };
       } catch (err) {
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
         if (isChatModelMissingError(err)) {
           setChatModelMissing(true);
           updateMessage(assistantId, {
