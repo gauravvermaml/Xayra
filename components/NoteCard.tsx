@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
+import { copyTextWithFeedback } from "../utils/clipboard";
 import { AudioPlayerControls } from "./AudioPlayerControls";
 
 export type NoteCardProps = {
@@ -42,6 +43,10 @@ export function NoteCard({
   return (
     <Pressable
       onPress={onPress}
+      // Long-press copies the note body without needing to open the detail
+      // sheet first — a much faster path than tap-to-open > select-text for
+      // the common "just grab this text" case.
+      onLongPress={() => void copyTextWithFeedback(content)}
       disabled={!onPress}
       style={({ pressed }) => [styles.card, pressed && onPress && styles.cardPressed]}
     >
@@ -62,7 +67,7 @@ export function NoteCard({
         )}
       </View>
 
-      <Text style={styles.content} numberOfLines={6}>
+      <Text style={styles.content} numberOfLines={6} selectable>
         {content}
       </Text>
 

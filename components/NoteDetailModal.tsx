@@ -4,6 +4,7 @@ import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Tex
 import { AudioPlayerControls } from "./AudioPlayerControls";
 import { useAudioPlayerControls } from "../services/audio/player";
 import { deleteNote, getNoteById, type Note } from "../services/notes/noteManager";
+import { copyTextWithFeedback } from "../utils/clipboard";
 
 const colors = {
   backdrop: "rgba(2, 6, 23, 0.6)",
@@ -143,9 +144,15 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted }: NoteDet
               </View>
 
               <ScrollView style={styles.transcriptScroll}>
-                <Text style={styles.transcript}>
-                  {note.content || note.transcript || "(empty note)"}
-                </Text>
+                <Pressable
+                  onLongPress={() =>
+                    void copyTextWithFeedback(note.content || note.transcript || "")
+                  }
+                >
+                  <Text style={styles.transcript} selectable>
+                    {note.content || note.transcript || "(empty note)"}
+                  </Text>
+                </Pressable>
               </ScrollView>
 
               <AudioPlayerControls audioUri={note.audioUri ?? ""} style={styles.player} />

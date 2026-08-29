@@ -9,6 +9,12 @@ export type MarkdownTextProps = {
    * the caller decides the readable foreground rather than this component
    * guessing. */
   color?: string;
+  /** Enables native text selection/highlighting (long-press to select,
+   * system copy handles) on every rendered Text node. Defaults to true —
+   * chat answers are exactly the kind of content users want to select and
+   * copy, so opting in per call site would just mean every real call site
+   * remembering to pass it. */
+  selectable?: boolean;
 };
 
 /**
@@ -18,7 +24,7 @@ export type MarkdownTextProps = {
  * actually produces to read noticeably better than a raw text dump, without
  * pulling in a Markdown rendering library.
  */
-function renderInline(line: string, keyPrefix: string, color: string) {
+function renderInline(line: string, keyPrefix: string, color: string, selectable: boolean) {
   // Splits on **bold** and *italic* without consuming the other pattern —
   // simple alternation, good enough for single-level emphasis.
   const parts = line.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g).filter(Boolean);
@@ -26,27 +32,27 @@ function renderInline(line: string, keyPrefix: string, color: string) {
     const key = `${keyPrefix}-${i}`;
     if (part.startsWith("**") && part.endsWith("**")) {
       return (
-        <Text key={key} style={[styles.bold, { color }]}>
+        <Text key={key} selectable={selectable} style={[styles.bold, { color }]}>
           {part.slice(2, -2)}
         </Text>
       );
     }
     if (part.startsWith("*") && part.endsWith("*") && part.length > 1) {
       return (
-        <Text key={key} style={[styles.italic, { color }]}>
+        <Text key={key} selectable={selectable} style={[styles.italic, { color }]}>
           {part.slice(1, -1)}
         </Text>
       );
     }
     return (
-      <Text key={key} style={{ color }}>
+      <Text key={key} selectable={selectable} style={{ color }}>
         {part}
       </Text>
     );
   });
 }
 
-export function MarkdownText({ text, color = colors.textPrimary }: MarkdownTextProps) {
+export function MarkdownText({ text, color = colors.textPrimary, selectable = true }: MarkdownTextProps) {
   const lines = text.split("\n");
   const blocks: React.ReactNode[] = [];
   let paragraphBuffer: string[] = [];
@@ -59,8 +65,8 @@ export function MarkdownText({ text, color = colors.textPrimary }: MarkdownTextP
     }
     const joined = paragraphBuffer.join(" ");
     blocks.push(
-      <Text key={`p-${blockIndex++}`} style={[styles.paragraph, { color }]}>
-        {renderInline(joined, `p-${blockIndex}`, color)}
+      <Text key={`p-${blockIndex++}`} selectable={selectable} style={[styles.paragraph, { color }]}>
+        {renderInline(joined, `p-${blockIndex}`, color, selectable)}
       </Text>
     );
     paragraphBuffer = [];
@@ -76,7 +82,7 @@ export function MarkdownText({ text, color = colors.textPrimary }: MarkdownTextP
       } else {
         blocks.push(
           <View key={`code-${blockIndex++}`} style={styles.codeBlock}>
-            <Text style={styles.codeText}>{codeBuffer.join("\n")}</Text>
+            <Text selectable={selectable} style={styles.codeText}>{codeBuffer.join("\n")}</Text>
           </View>
         );
         codeBuffer = null;
@@ -95,6 +101,7 @@ export function MarkdownText({ text, color = colors.textPrimary }: MarkdownTextP
       blocks.push(
         <Text
           key={`h-${blockIndex++}`}
+          selectable={selectable}
           style={[level === 1 ? styles.h1 : level === 2 ? styles.h2 : styles.h3, { color }]}
         >
           {headingMatch[2]}
@@ -108,9 +115,9 @@ export function MarkdownText({ text, color = colors.textPrimary }: MarkdownTextP
       flushParagraph();
       blocks.push(
         <View key={`li-${blockIndex++}`} style={styles.bulletRow}>
-          <Text style={[styles.bulletMarker, { color }]}>{"•"}</Text>
-          <Text style={[styles.bulletText, { color }]}>
-            {renderInline(bulletMatch[1], `li-${blockIndex}`, color)}
+          <Text selectable={selectable} style={[styles.bulletMarker, { color }]}>{"•"}</Text>
+          <Text selectable={selectable} style={[styles.bulletText, { color }]}>
+            {renderInline(bulletMatch[1], `li-${blockIndex}`, color, selectable)}
           </Text>
         </View>
       );
@@ -130,7 +137,7 @@ export function MarkdownText({ text, color = colors.textPrimary }: MarkdownTextP
     // far rather than swallowing it.
     blocks.push(
       <View key={`code-${blockIndex++}`} style={styles.codeBlock}>
-        <Text style={styles.codeText}>{codeBuffer.join("\n")}</Text>
+        <Text selectable={selectable} style={styles.codeText}>{codeBuffer.join("\n")}</Text>
       </View>
     );
   }

@@ -31,6 +31,7 @@ import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audi
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakText, speakTextAndWait, stopSpeech } from "../services/audio/tts";
 import { isSilentTranscript } from "../services/notes/noteManager";
+import { copyTextWithFeedback } from "../utils/clipboard";
 
 /** Blinking "▋" cursor shown at the end of a message still streaming in
  * from local Llama — a quiet visual cue that generation is live, not stalled. */
@@ -446,7 +447,9 @@ export default function ChatScreen() {
               </Text>
             }
             renderItem={({ item }) => (
-              <View
+              <Pressable
+                onLongPress={() => void copyTextWithFeedback(item.text)}
+                disabled={item.text.trim().length === 0}
                 style={[
                   styles.bubble,
                   item.role === "user" ? styles.bubbleUser : styles.bubbleAssistant,
@@ -494,7 +497,7 @@ export default function ChatScreen() {
                     ))}
                   </View>
                 )}
-              </View>
+              </Pressable>
             )}
           />
 
