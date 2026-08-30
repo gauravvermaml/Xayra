@@ -579,6 +579,23 @@ export default function ChatScreen() {
           )}
 
           <View style={styles.inputBar}>
+            {/* Paste audit: this TextInput is a direct child of a plain View
+              (styles.inputBar) — no wrapping Pressable/gesture-responder
+              sits over it that could steal the long-press gesture Android
+              uses to show the native copy/paste context menu, so no
+              isolation wrapper is needed here. `editable` is intentionally
+              still a computed guard (not a hardcoded `true`): it's what
+              correctly blocks typing while a voice query is being sent,
+              recorded, or transcribed, or while Active Mode owns the mic —
+              removing that would let a user's paste/type collide with an
+              in-flight voice turn. `contextMenuHidden` is set explicitly
+              (rather than left to its default) so it's clear at a glance
+              this input deliberately keeps Android's native copy/paste menu
+              enabled. `selectTextOnFocus` is deliberately NOT set to true —
+              that would select-all this multi-line compose box's entire
+              draft every time it's tapped back into focus, which would make
+              a follow-up paste or keystroke silently overwrite the whole
+              thing instead of inserting at the cursor. */}
             <TextInput
               value={input}
               onChangeText={setInput}
@@ -586,6 +603,7 @@ export default function ChatScreen() {
               placeholderTextColor={colors.textMuted}
               style={styles.input}
               editable={!isSending && !isRecordingVoice && !isTranscribingVoice && !activeMode.isActive}
+              contextMenuHidden={false}
               multiline
               returnKeyType="send"
               onSubmitEditing={() => handleSend()}

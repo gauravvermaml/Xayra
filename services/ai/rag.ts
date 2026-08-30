@@ -23,8 +23,28 @@ export type RagAnswer = {
   citations: RagCitation[];
 };
 
+/**
+ * Full weekday + date + 24-hour time (e.g. "Thursday, 14 Aug 2026 at 09:32")
+ * rather than the previous bare `YYYY-MM-DD` — a small model asked "when did
+ * I say X" or "what did I record last Thursday" has nothing to resolve that
+ * against without an explicit, unambiguous timestamp on every note it's
+ * given. Deliberately in the device's local time (not UTC/ISO) since that's
+ * the time the user actually recorded in and would recognize.
+ */
 function formatNoteDate(createdAt: number): string {
-  return new Date(createdAt * 1000).toISOString().slice(0, 10);
+  const date = new Date(createdAt * 1000);
+  const datePart = date.toLocaleDateString("en-US", {
+    weekday: "long",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+  const timePart = date.toLocaleTimeString("en-GB", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  return `${datePart} at ${timePart}`;
 }
 
 /** `content` is the source of truth, but falls back to `transcript` in case
@@ -38,7 +58,7 @@ function resolveNoteText(note: HybridSearchResult): string {
  * from `hybridSearchNotes` — that order is preserved here and in the
  * citation list below, so "[Note 1]" is always the strongest match.
  *
- * Plain-text `--- NOTE N (date) ---` headers instead of XML tags
+ * Plain-text `--- NOTE N [Recorded: ...] ---` headers instead of XML tags
  * (`<note id="...">`): a small instruct model given XML-tagged context has
  * been observed occasionally echoing a stray tag back in its answer (see
  * `sanitizeLLMResponse` below for the safety-net side of this fix) — plain
@@ -46,11 +66,16 @@ function resolveNoteText(note: HybridSearchResult): string {
  * omits the note's own `id` from the context entirely (the model has no
  * legitimate reason to ever surface an internal note ID in an answer; the
  * UI's citation chips are attached structurally from `citations` below,
- * never parsed from the model's text).
+ * never parsed from the model's text). The `[Recorded: ...]` label (rather
+ * than a bare date in parens) is what the system prompt's date-resolution
+ * rule below refers to by name, so the two stay in sync.
  */
 function formatNoteContext(notes: HybridSearchResult[]): string {
   return notes
-    .map((note, i) => `--- NOTE ${i + 1} (${formatNoteDate(note.createdAt)}) ---\n${resolveNoteText(note)}`)
+    .map(
+      (note, i) =>
+        `--- NOTE ${i + 1} [Recorded: ${formatNoteDate(note.createdAt)}] ---\n${resolveNoteText(note)}`
+    )
     .join("\n\n");
 }
 

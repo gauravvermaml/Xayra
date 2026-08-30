@@ -74,7 +74,27 @@ const SYSTEM_PROMPT =
   "formatting markup must never appear in your answer. If the retrieved notes mention more than one " +
   "distinct person who could plausibly share the same name, or it's otherwise unclear which person a " +
   "note refers to, briefly disambiguate them (e.g. by date or the detail that distinguishes them) " +
-  "rather than merging them into one.";
+  "rather than merging them into one.\n\n" +
+  "PERSPECTIVE: every note is something the user recorded about themselves, in the user's own voice " +
+  "— when you turn that into an answer, always refer to the user as \"you\", never as \"I\". A note " +
+  "that says \"I saw Eli today\" means the user saw Eli, so the correct answer is \"You saw Eli\", " +
+  "never \"I saw Eli\" — you are not the person who recorded the note and must never speak as them in " +
+  "the first person.\n\n" +
+  "RELEVANCE FILTER: each retrieved NOTE section may or may not actually be about what the user is " +
+  "asking. Before using a note, check that it's actually relevant to the specific question — if a " +
+  "note is about a different person, place, or topic than what was asked (e.g. a note about a trip " +
+  "to Queenstown when the question is about a person named Eli), ignore that note completely and " +
+  "don't mention it, even in passing. Never blend unrelated notes together into one answer just " +
+  "because they were both retrieved — only ever answer from the notes that actually address the " +
+  "question. If none of the retrieved notes are relevant, say so with the fixed \"I couldn't find " +
+  "any details about that in your notes\" line above rather than answering from an unrelated one.\n\n" +
+  "DATE RESOLUTION: every NOTE section is labeled with exactly when the user recorded it — " +
+  "\"[Recorded: <day>, <date> at <time>]\". Use that timestamp, together with the Today/Current Week " +
+  "Baseline given below, to resolve relative time words in the notes or the question (\"yesterday\", " +
+  "\"Thursday\", \"last week\") into an exact calendar date. When the user asks \"when\" something " +
+  "happened, answer with the actual calculated calendar date (e.g. \"on Thursday, August 14\") — " +
+  "derived from that note's Recorded timestamp — never with the relative word alone and never with " +
+  "the raw \"[Recorded: ...]\" label text itself.";
 
 /**
  * A fixed one-shot example, injected as a real prior user/assistant turn
@@ -83,15 +103,15 @@ const SYSTEM_PROMPT =
  * small instruct models' output format than the same guidance written as an
  * instruction, since the model is directly continuing an established
  * pattern rather than having to translate a description into behavior.
- * Matches formatNoteContext()'s plain-text `--- NOTE N (date) ---` framing
- * in services/ai/rag.ts exactly — the whole point of a few-shot example is
- * undermined if it demonstrates a different context format than what the
- * model actually sees on the real turn.
+ * Matches formatNoteContext()'s plain-text `--- NOTE N [Recorded: ...] ---`
+ * framing in services/ai/rag.ts exactly — the whole point of a few-shot
+ * example is undermined if it demonstrates a different context format than
+ * what the model actually sees on the real turn.
  */
 const FEW_SHOT_CONTEXT =
-  "--- NOTE 1 (2026-01-01) ---\n" +
+  "--- NOTE 1 [Recorded: Thursday, 01 Jan 2026 at 09:00] ---\n" +
   "Buy milk, eggs, and sourdough bread.\n\n" +
-  "--- NOTE 2 (2026-01-01) ---\n" +
+  "--- NOTE 2 [Recorded: Thursday, 01 Jan 2026 at 09:05] ---\n" +
   "Dentist checkup scheduled for Tuesday at 10 AM.";
 const FEW_SHOT_USER_QUERY = "Tell me about my notes in a few bullet points.";
 const FEW_SHOT_ANSWER =
