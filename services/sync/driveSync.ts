@@ -1,3 +1,4 @@
+import { open, type DB } from "@op-engineering/op-sqlite";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   GoogleSignin,
@@ -9,21 +10,19 @@ import * as Crypto from "expo-crypto";
 import * as FileSystem from "expo-file-system/legacy";
 import { Platform } from "react-native";
 
-import { closeDatabase, getRawDatabase } from "../../db/client";
-import { getOrCreateDatabaseKey, setDatabaseKey } from "../crypto/keyManager";
+import { getRawDatabase } from "../../db/client";
+import { getOrCreateDatabaseKey } from "../crypto/keyManager";
+import { mergeMissingNotes, type CloudNoteRecord } from "../notes/noteManager";
 
 /**
- * op-sqlite (and SQLite's own VFS underneath it — `VACUUM INTO`, in
- * particular) deals exclusively in bare OS filesystem paths, never `file://`
- * URIs; `expo-file-system` is the opposite and requires the `file://`
- * scheme on every call. Every path that crosses between the two needs an
- * explicit conversion — silently passing one style where the other is
- * expected fails without a helpful error (SQLite would just try to create a
- * file literally named `file:...`).
+ * op-sqlite (and SQLite's own VFS underneath it — `VACUUM INTO`, `open()`'s
+ * `location`, etc.) deals exclusively in bare OS filesystem paths, never
+ * `file://` URIs; `expo-file-system` is the opposite and requires the
+ * `file://` scheme on every call. Every path that crosses between the two
+ * needs an explicit conversion — silently passing one style where the other
+ * is expected fails without a helpful error (SQLite would just try to
+ * create a file literally named `file:...`).
  */
-function toFileUri(barePath: string): string {
-  return barePath.startsWith("file://") ? barePath : `file://${barePath}`;
-}
 function toBarePath(uriOrPath: string): string {
   return uriOrPath.startsWith("file://") ? uriOrPath.slice("file://".length) : uriOrPath;
 }
@@ -475,14 +474,29 @@ export async function backupToDrive(): Promise<BackupRecord> {
   }
 }
 
+export type RestoreResult = {
+  /** Number of notes actually inserted — 0 means the local vault already had
+   * every note the cloud backup does (not an error, just nothing to do). */
+  restoredCount: number;
+  /** Ready-to-display summary, e.g. for a toast — see app/settings.tsx. */
+  message: string;
+};
+
 /**
- * Restores the notes database from the signed-in Google account's Drive
- * backup, swapping it in for the local database and re-keying so the
- * restored (possibly foreign-device-encrypted) file can actually be opened.
- * Closes and lets the caller re-open the database connection — callers
- * should refresh any note lists immediately after this resolves.
+ * Delta/merge restore: downloads the signed-in account's Drive backup and
+ * opens it as a second, read-only op-sqlite connection (keyed with the
+ * backup's own encryption key, downloaded alongside it) rather than closing
+ * and swapping out the live database the way a full restore would. Every
+ * note in the backup is diffed against this device's local note ids —
+ * `mergeMissingNotes` (services/notes/noteManager.ts) inserts only the ones
+ * missing locally and kicks off background re-embedding for them — so a
+ * restore run on a device that already has notes (e.g. reinstalling after
+ * keeping local notes, or restoring on a second device that's also been
+ * recording independently) can never overwrite or duplicate anything
+ * already here. The live database is never closed and stays fully usable
+ * throughout.
  */
-export async function restoreFromDrive(): Promise<void> {
+export async function restoreFromDrive(): Promise<RestoreResult> {
   const accessToken = await requireAccessToken();
 
   const dbFile = await findAppDataFile(accessToken, BACKUP_DB_FILENAME);
@@ -491,9 +505,16 @@ export async function restoreFromDrive(): Promise<void> {
     throw new NoBackupFoundError();
   }
 
-  const downloadedDbUri = `${FileSystem.cacheDirectory}remi-restore-snapshot-${Crypto.randomUUID()}.sqlite`;
-  const downloadedKeyUri = `${FileSystem.cacheDirectory}remi-restore-key-${Crypto.randomUUID()}.txt`;
+  const restoreId = Crypto.randomUUID();
+  // A real filename (not a fixed one, unlike backupToDrive's snapshot) since
+  // it's opened by op-sqlite's `name`/`location` pair below rather than only
+  // ever touched via expo-file-system — two concurrent restores (shouldn't
+  // happen from this UI, but cheap to make safe) can't collide on one name.
+  const backupDbFilename = `remi-restore-snapshot-${restoreId}.sqlite`;
+  const downloadedDbUri = `${FileSystem.cacheDirectory}${backupDbFilename}`;
+  const downloadedKeyUri = `${FileSystem.cacheDirectory}remi-restore-key-${restoreId}.txt`;
 
+  let backupDb: DB | null = null;
   try {
     await Promise.all([
       downloadFileContent(accessToken, dbFile.id, downloadedDbUri),
@@ -504,30 +525,43 @@ export async function restoreFromDrive(): Promise<void> {
       throw new DriveSyncError("Downloaded backup key was empty.");
     }
 
-    // Capture the live database's on-disk path before closing it — once
-    // closed there's no handle left to ask. op-sqlite returns a bare OS
-    // path here (see toFileUri/toBarePath above), so every FileSystem call
-    // below needs it converted to a file:// URI first.
-    const rawDb = await getRawDatabase();
-    const dbFileUri = toFileUri(rawDb.getDbPath());
-    closeDatabase();
+    // `location` is a bare directory path, matched to the bare `file://`-stripped
+    // cache directory the file was just downloaded into (see toBarePath above) —
+    // op-sqlite, like SQLCipher generally, works in OS paths, never file:// URIs.
+    backupDb = open({
+      name: backupDbFilename,
+      location: toBarePath(FileSystem.cacheDirectory ?? ""),
+      encryptionKey: restoredKey,
+      readOnly: true,
+    });
 
-    await deleteIfExists(dbFileUri);
-    // A rollback-journal/WAL side-car left over from the *old* database
-    // would otherwise sit next to the freshly-restored file and could be
-    // mistaken for its own journal on next open.
-    await deleteIfExists(`${dbFileUri}-wal`);
-    await deleteIfExists(`${dbFileUri}-shm`);
-    await deleteIfExists(`${dbFileUri}-journal`);
-    await FileSystem.copyAsync({ from: downloadedDbUri, to: dbFileUri });
+    const cloudRows = await backupDb.execute(
+      "SELECT id, content, transcript, transcription_model, created_at FROM notes"
+    );
+    const cloudNotes: CloudNoteRecord[] = cloudRows.rows.map((row) => ({
+      id: row.id as string,
+      content: (row.content as string) || (row.transcript as string) || "",
+      transcript: (row.transcript as string | null) ?? null,
+      transcriptionModel: (row.transcription_model as string | null) ?? null,
+      createdAt: row.created_at as number,
+    }));
 
-    await setDatabaseKey(restoredKey);
-    // The next getDatabase()/getRawDatabase() call lazily reopens against
-    // the swapped file and the restored key — that's the
-    // "re-initializes vector/database context" step; there is no separate
-    // explicit reinit call to make.
+    const restoredCount = await mergeMissingNotes(cloudNotes);
+    return {
+      restoredCount,
+      message:
+        restoredCount === 0
+          ? "All notes are already up to date!"
+          : `Restored ${restoredCount} missing note${restoredCount === 1 ? "" : "s"}.`,
+    };
   } finally {
+    backupDb?.close();
     await deleteIfExists(downloadedDbUri);
+    // SQLCipher/SQLite side-car files the backup connection may have left
+    // behind — same cleanup backupToDrive's own snapshot goes through.
+    await deleteIfExists(`${downloadedDbUri}-wal`);
+    await deleteIfExists(`${downloadedDbUri}-shm`);
+    await deleteIfExists(`${downloadedDbUri}-journal`);
     await deleteIfExists(downloadedKeyUri);
   }
 }

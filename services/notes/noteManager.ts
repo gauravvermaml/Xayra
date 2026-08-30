@@ -258,6 +258,82 @@ export async function deleteNote(noteId: string): Promise<void> {
   }
 }
 
+/** A note as read out of a downloaded Google Drive backup database — see
+ * driveSync.ts's `restoreFromDrive()`, which opens that backup as a second,
+ * read-only op-sqlite connection and extracts rows in this shape before
+ * handing them here. Deliberately excludes `audioUri`: backups only ever
+ * contain the notes database, never the audio files themselves (see
+ * `backupToDrive`), so a cloud note's original audio path is meaningless on
+ * whatever device is restoring it. */
+export type CloudNoteRecord = {
+  id: string;
+  content: string;
+  transcript: string | null;
+  transcriptionModel: string | null;
+  createdAt: number;
+};
+
+/**
+ * Delta/merge restore: inserts only the cloud notes this device doesn't
+ * already have (matched by `id`), never overwriting or duplicating a note
+ * that already exists locally — the local `notes` table is the source of
+ * truth for anything already here. Newly-inserted notes land at `transcribed`
+ * (not `content`'s original cloud `status`) and with no vector row yet, so
+ * they're immediately visible in the Notes tab but intentionally excluded
+ * from `hybridSearchNotes()`'s "WHERE status = 'embedded'" results until the
+ * fire-and-forget embedding pass below (or the next `retryPendingEmbeddings`
+ * call) catches up — the same "saved but not yet searchable" state every
+ * other note passes through while offline. Returns the number of notes
+ * actually restored.
+ */
+export async function mergeMissingNotes(cloudNotes: CloudNoteRecord[]): Promise<number> {
+  const db = await getRawDatabase();
+
+  const localIdsResult = await db.execute("SELECT id FROM notes");
+  const localIds = new Set(localIdsResult.rows.map((row) => row.id as string));
+  const missingNotes = cloudNotes.filter((note) => !localIds.has(note.id));
+  if (missingNotes.length === 0) {
+    return 0;
+  }
+
+  const insertedAt = nowUnix();
+  await db.transaction(async (tx) => {
+    for (const note of missingNotes) {
+      // `audio_uri` is deliberately NULL (see CloudNoteRecord above) and
+      // `INSERT OR IGNORE` is belt-and-suspenders against the id already
+      // existing — the id filter above already guarantees that in the
+      // common case, but guards against a note being created locally in the
+      // moment between that filter and this transaction committing.
+      await tx.execute(
+        `INSERT OR IGNORE INTO notes (id, content, audio_uri, transcript, status, transcription_model, created_at, updated_at)
+         VALUES (?, ?, NULL, ?, 'transcribed', ?, ?, ?)`,
+        [note.id, note.content, note.transcript, note.transcriptionModel, note.createdAt, insertedAt]
+      );
+    }
+  });
+
+  // Not awaited: embedding every restored note can take a while (a large
+  // backup could mean dozens of notes), and the restore itself should
+  // resolve as soon as the notes are safely on disk — `retryPendingEmbeddings`
+  // would catch any of these up anyway on the next app focus if this doesn't
+  // finish first (e.g. the app is backgrounded mid-restore).
+  void (async () => {
+    let embedded = 0;
+    for (const note of missingNotes) {
+      const text = (note.content || note.transcript || "").trim();
+      if (!text) {
+        continue;
+      }
+      if (await tryEmbedNote(note.id, text)) {
+        embedded += 1;
+      }
+    }
+    console.log(`[Note] Restore embedding pass complete: ${embedded}/${missingNotes.length} notes indexed.`);
+  })();
+
+  return missingNotes.length;
+}
+
 /**
  * Best-effort reconciliation pass for notes saved while the embedding
  * model wasn't available (offline first-run skip, or the model download

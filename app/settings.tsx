@@ -35,13 +35,15 @@ import {
   backupToDrive,
   getAutoSyncOnWifi,
   getSyncStatus,
+  restoreFromDrive,
   setAutoSyncOnWifi,
   signInWithGoogle,
   signOutFromGoogle,
   type SyncStatus,
 } from "../services/sync/driveSync";
+import { showToast } from "../components/Toast";
 
-type BusyAction = "connect" | "backup" | "disconnect" | null;
+type BusyAction = "connect" | "backup" | "disconnect" | "restore" | null;
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -239,6 +241,27 @@ export default function SettingsScreen() {
     }
   }, [refreshStatus]);
 
+  // Delta/merge restore (see driveSync.ts's restoreFromDrive): safe to tap
+  // repeatedly and safe even with local notes already on the device — it
+  // only ever adds notes this device doesn't already have, never overwrites
+  // or duplicates. `refreshStatus` re-fetches `notesStoredLocally` too, so
+  // the count on screen reflects the merge immediately.
+  const handleRestoreNotes = useCallback(async () => {
+    setBusyAction("restore");
+    try {
+      const { message } = await restoreFromDrive();
+      await refreshStatus();
+      showToast(message);
+    } catch (err) {
+      Alert.alert(
+        "Restore Failed",
+        err instanceof Error ? err.message : "Failed to restore notes from Google Drive."
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  }, [refreshStatus]);
+
   const handleDisconnect = useCallback(() => {
     Alert.alert(
       "Disconnect Google Drive",
@@ -351,21 +374,41 @@ export default function SettingsScreen() {
                 />
               </View>
 
-              <Pressable
-                onPress={handleBackupNow}
-                disabled={busyAction !== null}
-                style={({ pressed }) => [
-                  styles.primaryButton,
-                  pressed && styles.buttonPressed,
-                  busyAction !== null && styles.buttonDisabled,
-                ]}
-              >
-                {busyAction === "backup" ? (
-                  <ActivityIndicator color={colors.background} size="small" />
-                ) : (
-                  <Text style={styles.primaryButtonText}>Back Up Now</Text>
-                )}
-              </Pressable>
+              <View style={styles.modelButtonRow}>
+                <Pressable
+                  onPress={handleBackupNow}
+                  disabled={busyAction !== null}
+                  style={({ pressed }) => [
+                    styles.primaryButton,
+                    styles.modelButtonFlex,
+                    pressed && styles.buttonPressed,
+                    busyAction !== null && styles.buttonDisabled,
+                  ]}
+                >
+                  {busyAction === "backup" ? (
+                    <ActivityIndicator color={colors.background} size="small" />
+                  ) : (
+                    <Text style={styles.primaryButtonText}>Back Up Now</Text>
+                  )}
+                </Pressable>
+
+                <Pressable
+                  onPress={handleRestoreNotes}
+                  disabled={busyAction !== null}
+                  style={({ pressed }) => [
+                    styles.primaryButton,
+                    styles.modelButtonFlex,
+                    pressed && styles.buttonPressed,
+                    busyAction !== null && styles.buttonDisabled,
+                  ]}
+                >
+                  {busyAction === "restore" ? (
+                    <ActivityIndicator color={colors.background} size="small" />
+                  ) : (
+                    <Text style={styles.primaryButtonText}>Restore / Sync Notes</Text>
+                  )}
+                </Pressable>
+              </View>
 
               <Pressable
                 onPress={handleDisconnect}

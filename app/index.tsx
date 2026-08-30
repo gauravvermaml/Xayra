@@ -141,10 +141,10 @@ export default function HomeScreen() {
       if (!syncStatus.isConnected) {
         await signInWithGoogle();
       }
-      await restoreFromDrive();
+      const { message } = await restoreFromDrive();
       await refreshNotes();
       await refreshSyncStatus();
-      Alert.alert("Vault Restored", "Your notes have been restored from Google Drive.");
+      Alert.alert("Vault Restored", message);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to restore from Google Drive.";
       setError(message);
