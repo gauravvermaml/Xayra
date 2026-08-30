@@ -22,17 +22,18 @@ export const WHISPER_MODELS: Record<WhisperModelId, WhisperModelInfo> = {
   base: {
     id: "base",
     filename: "ggml-base.en.bin",
-    label: "High Accuracy (Base Engine)",
+    label: "Accurate Engine",
     sizeLabel: "142MB",
-    description: "Recommended. Best for accents, noisy environments, and technical speech.",
+    description:
+      "Higher Accuracy: Better for technical words and accents (uses slightly more storage).",
     downloadUrl: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
   },
   tiny: {
     id: "tiny",
     filename: "ggml-tiny.en.bin",
-    label: "Ultra Fast (Tiny Engine)",
+    label: "Fast Engine",
     sizeLabel: "75MB",
-    description: "Lightweight. Instant transcription, best for simple notes on quiet days.",
+    description: "Fast & Lightweight: Transcribes speech instantly using minimal battery.",
     downloadUrl: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
   },
 };

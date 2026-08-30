@@ -66,9 +66,9 @@ export default function OnboardingScreen() {
         <Text style={styles.eyebrow}>ONE-TIME SETUP</Text>
         <Text style={styles.title}>Choose your transcription engine</Text>
         <Text style={styles.subtitle}>
-          Xayra transcribes and searches voice notes entirely on your device. Pick which local
-          transcription engine to download — the semantic search model downloads alongside it
-          automatically. You can switch engines anytime in Settings.
+          Xayra transcribes and searches voice notes entirely on your device. Pick a transcription
+          engine to download — the smart search model downloads alongside it automatically. You
+          can switch engines anytime in Settings.
         </Text>
 
         <View style={styles.cards}>
@@ -120,9 +120,7 @@ export default function OnboardingScreen() {
           {isDownloading ? (
             <ActivityIndicator color={colors.onAccent} size="small" />
           ) : (
-            <Text style={styles.primaryButtonText}>
-              Download {WHISPER_MODELS[selected].label.split(" (")[0]} Engine
-            </Text>
+            <Text style={styles.primaryButtonText}>Download {WHISPER_MODELS[selected].label}</Text>
           )}
         </Pressable>
 

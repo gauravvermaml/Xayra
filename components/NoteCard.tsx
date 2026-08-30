@@ -80,7 +80,7 @@ export function NoteCard({
       {transcriptionModel === "tiny" && (
         <Pressable onPress={onSwitchEngine} disabled={!onSwitchEngine} hitSlop={6} style={styles.engineChip}>
           <Text style={styles.engineChipText}>
-            Tiny Engine used · Tap to switch to Base Engine in Settings
+            Transcribed with Fast Engine • Tap to change in Settings
           </Text>
         </Pressable>
       )}

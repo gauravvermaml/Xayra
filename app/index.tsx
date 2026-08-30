@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -28,12 +28,10 @@ import { speakTextAndWait } from "../services/audio/tts";
 import {
   createVoiceNote,
   deleteNote,
-  hybridSearchNotes,
   isSilentTranscript,
   listNotes,
   purgeAllNotes,
   retryPendingEmbeddings,
-  type HybridSearchResult,
   type Note,
 } from "../services/notes/noteManager";
 import { readPreferences } from "../services/settings/preferences";
@@ -53,7 +51,6 @@ type DisplayNote = {
   audioUri: string | null;
   transcriptionModel: string | null;
   createdAt: number;
-  score?: number;
 };
 
 export default function HomeScreen() {
@@ -61,10 +58,8 @@ export default function HomeScreen() {
   const recorder = useVoiceRecorder();
   const [processingState, setProcessingState] = useState<ProcessingState>("idle");
   const [searchQuery, setSearchQuery] = useState("");
-  const [results, setResults] = useState<HybridSearchResult[]>([]);
   const [allNotes, setAllNotes] = useState<Note[]>([]);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
-  const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({ isConnected: false });
   const [isNudgeDismissed, setIsNudgeDismissed] = useState(false);
@@ -174,7 +169,7 @@ export default function HomeScreen() {
         const note = await createVoiceNote(audioUri, transcript, whisperModelId ?? null);
         await refreshNotes();
         if (note.status !== "embedded") {
-          showInfoMessage("Note saved. Vector search index will update when online.");
+          showInfoMessage("Note saved. It'll become searchable once you're back online.");
         }
         reportState("speaking");
         await speakTextAndWait("Saved.");
@@ -210,7 +205,7 @@ export default function HomeScreen() {
           .then(({ transcript, whisperModelId }) => createVoiceNote(audioUri, transcript, whisperModelId ?? null))
           .then((note) => {
             if (note.status !== "embedded") {
-              showInfoMessage("Note saved. Vector search index will update when online.");
+              showInfoMessage("Note saved. It'll become searchable once you're back online.");
             }
             return refreshNotes();
           })
@@ -245,7 +240,6 @@ export default function HomeScreen() {
           onPress: () => {
             void deleteNote(noteId)
               .then(() => {
-                setResults((prev) => prev.filter((note) => note.id !== noteId));
                 setAllNotes((prev) => prev.filter((note) => note.id !== noteId));
               })
               .catch((err) => {
@@ -271,7 +265,6 @@ export default function HomeScreen() {
           onPress: () => {
             void purgeAllNotes()
               .then(() => {
-                setResults([]);
                 setAllNotes([]);
               })
               .catch((err) => {
@@ -285,40 +278,34 @@ export default function HomeScreen() {
     );
   }, []);
 
-  const handleSearchChange = useCallback(async (text: string) => {
-    setSearchQuery(text);
-    if (!text.trim()) {
-      setResults([]);
-      return;
-    }
-    setIsSearching(true);
-    try {
-      const matches = await hybridSearchNotes(text);
-      setResults(matches);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Search failed.");
-    } finally {
-      setIsSearching(false);
-    }
-  }, []);
-
   const isSearchActive = searchQuery.trim().length > 0;
-  const displayedNotes: DisplayNote[] = isSearchActive
-    ? results.map((note) => ({
-        id: note.id,
-        content: note.content,
-        audioUri: note.audioUri,
-        transcriptionModel: note.transcriptionModel,
-        createdAt: note.createdAt,
-        score: note.score,
-      }))
-    : allNotes.map((note) => ({
-        id: note.id,
-        content: note.content,
-        audioUri: note.audioUri,
-        transcriptionModel: note.transcriptionModel,
-        createdAt: note.createdAt,
-      }));
+
+  // Instant, local, client-side filter — no network/model round-trip and
+  // nothing that can spin forever. This replaces the previous
+  // `hybridSearchNotes` call (vector + FTS via op-sqlite), which needed the
+  // on-device embedding model to compute a query vector on every keystroke:
+  // if that model wasn't downloaded yet or the device was offline, the
+  // search bar's spinner would sit there indefinitely with no results and
+  // no error. Every note the list already has loaded (`allNotes`) is right
+  // there in memory, so a plain case-insensitive substring match against
+  // each note's text is both correct for "find the note with this word in
+  // it" and unconditionally fast — no field in the Note type is called
+  // "title", so this matches against the note's content (falling back to
+  // its raw transcript, same fallback rag.ts uses) — the only real text a
+  // note has.
+  const displayedNotes: DisplayNote[] = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    const source = query
+      ? allNotes.filter((note) => (note.content || note.transcript || "").toLowerCase().includes(query))
+      : allNotes;
+    return source.map((note) => ({
+      id: note.id,
+      content: note.content,
+      audioUri: note.audioUri,
+      transcriptionModel: note.transcriptionModel,
+      createdAt: note.createdAt,
+    }));
+  }, [allNotes, searchQuery]);
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -376,7 +363,7 @@ export default function HomeScreen() {
               {recorder.isRecording
                 ? "Recording… tap mic to stop"
                 : embeddingDownloadProgress !== null
-                  ? `Downloading embedding model… ${Math.round(embeddingDownloadProgress * 100)}%`
+                  ? `Setting up smart search… ${Math.round(embeddingDownloadProgress * 100)}%`
                   : "Saving voice note…"}
             </Text>
             {recorder.isRecording && (
@@ -398,13 +385,12 @@ export default function HomeScreen() {
           <Text style={styles.searchIcon}>⌕</Text>
           <TextInput
             value={searchQuery}
-            onChangeText={handleSearchChange}
+            onChangeText={setSearchQuery}
             placeholder="Search your notes…"
             placeholderTextColor={colors.textMuted}
             style={styles.searchInput}
             returnKeyType="search"
           />
-          {isSearching && <ActivityIndicator color={colors.textMuted} size="small" />}
         </View>
 
         {error && <Text style={styles.errorText}>{error}</Text>}
@@ -431,41 +417,38 @@ export default function HomeScreen() {
           data={displayedNotes}
           keyExtractor={(item) => item.id}
           ListEmptyComponent={
-            !isSearching ? (
-              <View style={styles.emptyState}>
-                <Text style={styles.emptyIcon}>{isSearchActive ? "🔍" : "🎙"}</Text>
-                <Text style={styles.emptyText}>
-                  {isSearchActive ? "No matching notes yet." : "No notes recorded yet."}
-                </Text>
-                <Text style={styles.emptySubtext}>
-                  {isSearchActive
-                    ? "Try a different search term."
-                    : "Tap the mic below to record your first note."}
-                </Text>
-                {!isSearchActive && (
-                  <Pressable
-                    onPress={handleRestoreFromDrive}
-                    disabled={isRestoring}
-                    style={styles.restoreLinkRow}
-                  >
-                    {isRestoring ? (
-                      <ActivityIndicator color={colors.accent} size="small" />
-                    ) : (
-                      <Text style={styles.restoreLinkText}>
-                        Already have a backup? Restore vault from Google Drive
-                      </Text>
-                    )}
-                  </Pressable>
-                )}
-              </View>
-            ) : null
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyIcon}>{isSearchActive ? "🔍" : "🎙"}</Text>
+              <Text style={styles.emptyText}>
+                {isSearchActive ? "No matching notes yet." : "No notes recorded yet."}
+              </Text>
+              <Text style={styles.emptySubtext}>
+                {isSearchActive
+                  ? "Try a different search term."
+                  : "Tap the mic below to record your first note."}
+              </Text>
+              {!isSearchActive && (
+                <Pressable
+                  onPress={handleRestoreFromDrive}
+                  disabled={isRestoring}
+                  style={styles.restoreLinkRow}
+                >
+                  {isRestoring ? (
+                    <ActivityIndicator color={colors.accent} size="small" />
+                  ) : (
+                    <Text style={styles.restoreLinkText}>
+                      Already have a backup? Restore vault from Google Drive
+                    </Text>
+                  )}
+                </Pressable>
+              )}
+            </View>
           }
           renderItem={({ item }) => (
             <NoteCard
               content={item.content}
               audioUri={item.audioUri}
               createdAt={item.createdAt}
-              score={item.score}
               transcriptionModel={item.transcriptionModel}
               onPress={() => setSelectedNoteId(item.id)}
               onDelete={() => handleDeleteNote(item.id)}
@@ -479,7 +462,6 @@ export default function HomeScreen() {
           visible={selectedNoteId !== null}
           onClose={() => setSelectedNoteId(null)}
           onDeleted={(noteId) => {
-            setResults((prev) => prev.filter((note) => note.id !== noteId));
             setAllNotes((prev) => prev.filter((note) => note.id !== noteId));
           }}
         />

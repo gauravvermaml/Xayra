@@ -30,6 +30,7 @@ import {
   WHISPER_MODEL_IDS,
   type WhisperModelId,
 } from "../services/ai/whisperModels";
+import { listNotes } from "../services/notes/noteManager";
 import {
   backupToDrive,
   getAutoSyncOnWifi,
@@ -59,6 +60,7 @@ export default function SettingsScreen() {
   const [autoSyncOnWifi, setAutoSyncOnWifiState] = useState(false);
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
+  const [notesStoredLocally, setNotesStoredLocally] = useState<number | null>(null);
 
   const [activeModel, setActiveModelState] = useState<WhisperModelId | null>(null);
   const [downloadedModels, setDownloadedModels] = useState<WhisperModelId[]>([]);
@@ -73,9 +75,17 @@ export default function SettingsScreen() {
 
   const refreshStatus = useCallback(async () => {
     try {
-      const [syncStatus, autoSync] = await Promise.all([getSyncStatus(), getAutoSyncOnWifi()]);
+      const [syncStatus, autoSync, notes] = await Promise.all([
+        getSyncStatus(),
+        getAutoSyncOnWifi(),
+        listNotes(),
+      ]);
       setStatus(syncStatus);
       setAutoSyncOnWifiState(autoSync);
+      // A plain count, not "vector index size" or any other internal
+      // storage detail — the one number a non-technical user actually wants
+      // here is "how many of my notes are safely on this device."
+      setNotesStoredLocally(notes.length);
     } catch (err) {
       console.error("[Settings] Failed to load sync status", err);
     } finally {
@@ -132,7 +142,7 @@ export default function SettingsScreen() {
   const handleDeleteChatModel = useCallback(() => {
     Alert.alert(
       "Delete Chat Model",
-      `Remove the on-device Llama chat model (${LLAMA_MODEL_SIZE_LABEL}) from this device? You can re-download it anytime.`,
+      `Remove the Private On-Device Assistant (${LLAMA_MODEL_SIZE_LABEL}) from this device? You can re-download it anytime.`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -290,7 +300,7 @@ export default function SettingsScreen() {
               />
             </View>
             <View style={styles.cardHeaderTextGroup}>
-              <Text style={styles.cardTitle}>Google Drive</Text>
+              <Text style={styles.cardTitle}>Private Google Drive Backup</Text>
               <Text style={styles.cardSubtitle}>
                 {isLoadingStatus
                   ? "Checking connection…"
@@ -307,8 +317,17 @@ export default function SettingsScreen() {
             <>
               <View style={styles.divider} />
 
+              <Text style={styles.metaText}>
+                Stores an encrypted backup in your personal Google Drive that only Xayra can read
+                — no one else, not even Google, can open it.
+              </Text>
+
               <View style={styles.metricRow}>
-                <Text style={styles.metricLabel}>Last backup</Text>
+                <Text style={styles.metricLabel}>Notes stored locally</Text>
+                <Text style={styles.metricValue}>{notesStoredLocally ?? "—"}</Text>
+              </View>
+              <View style={styles.metricRow}>
+                <Text style={styles.metricLabel}>Last backup time</Text>
                 <Text style={styles.metricValue}>
                   {status.lastBackupTime ? formatTimestamp(status.lastBackupTime) : "Never"}
                 </Text>
@@ -367,8 +386,13 @@ export default function SettingsScreen() {
           ) : (
             <>
               <Text style={styles.metaText}>
-                Your notes never leave this device unless you connect a backup destination.
+                Stores an encrypted backup in your personal Google Drive that only Xayra can
+                read. Your notes never leave this device until you connect Google Drive here.
               </Text>
+              <View style={styles.metricRow}>
+                <Text style={styles.metricLabel}>Notes stored locally</Text>
+                <Text style={styles.metricValue}>{notesStoredLocally ?? "—"}</Text>
+              </View>
               <Pressable
                 onPress={handleConnect}
                 disabled={busyAction !== null}
@@ -388,7 +412,7 @@ export default function SettingsScreen() {
           )}
         </View>
 
-        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Voice Recognition</Text>
+        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Transcription</Text>
         <View style={styles.card}>
           {isLoadingModels ? (
             <ActivityIndicator color={colors.textMuted} style={styles.cardLoading} />
@@ -425,6 +449,8 @@ export default function SettingsScreen() {
                     </View>
                   </View>
 
+                  <Text style={styles.cardDescription}>{model.description}</Text>
+
                   {isBusy && (
                     <View style={styles.progressWrap}>
                       <View style={styles.progressTrack}>
@@ -451,7 +477,7 @@ export default function SettingsScreen() {
                         <ActivityIndicator color={colors.background} size="small" />
                       ) : (
                         <Text style={styles.primaryButtonText}>
-                          {isActive ? "Active" : isDownloaded ? `Switch to ${model.label.split(" (")[0]}` : `Download & Switch (${model.sizeLabel})`}
+                          {isActive ? "Active" : isDownloaded ? `Switch to ${model.label}` : `Download & Switch (${model.sizeLabel})`}
                         </Text>
                       )}
                     </Pressable>
@@ -476,7 +502,7 @@ export default function SettingsScreen() {
           )}
         </View>
 
-        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Chat Model</Text>
+        <Text style={[styles.groupLabel, styles.sectionSpacing]}>AI Chat Assistant</Text>
         <View style={styles.card}>
           {isLoadingChatModel ? (
             <ActivityIndicator color={colors.textMuted} style={styles.cardLoading} />
@@ -492,12 +518,17 @@ export default function SettingsScreen() {
                   />
                 </View>
                 <View style={styles.cardHeaderTextGroup}>
-                  <Text style={styles.cardTitle}>Llama 3.2 1B ({LLAMA_MODEL_SIZE_LABEL})</Text>
+                  <Text style={styles.cardTitle}>Private On-Device Assistant</Text>
                   <Text style={styles.cardSubtitle}>
-                    {isChatModelDownloaded ? "Downloaded" : "Not downloaded"}
+                    {isChatModelDownloaded ? "Downloaded" : "Not downloaded"} ({LLAMA_MODEL_SIZE_LABEL})
                   </Text>
                 </View>
               </View>
+
+              <Text style={styles.cardDescription}>
+                Answers questions about your voice notes 100% offline and privately — nothing you
+                ask is ever sent anywhere.
+              </Text>
 
               {isDownloadingChatModel && (
                 <View style={styles.progressWrap}>
@@ -630,6 +661,12 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 13,
     marginTop: 2,
+  },
+  cardDescription: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: spacing.sm,
   },
   cardLoading: {
     marginTop: spacing.lg,
