@@ -345,25 +345,6 @@ export default function SettingsScreen() {
                 — no one else, not even Google, can open it.
               </Text>
 
-              <View style={styles.metricRow}>
-                <Text style={styles.metricLabel}>Notes stored locally</Text>
-                <Text style={styles.metricValue}>{notesStoredLocally ?? "—"}</Text>
-              </View>
-              <View style={styles.metricRow}>
-                <Text style={styles.metricLabel}>Last backup time</Text>
-                <Text style={styles.metricValue}>
-                  {status.lastBackupTime ? formatTimestamp(status.lastBackupTime) : "Never"}
-                </Text>
-              </View>
-              {status.backupSizeBytes != null && (
-                <View style={styles.metricRow}>
-                  <Text style={styles.metricLabel}>Backup size</Text>
-                  <Text style={styles.metricValue}>{formatBytes(status.backupSizeBytes)}</Text>
-                </View>
-              )}
-
-              <View style={styles.divider} />
-
               <View style={styles.toggleRow}>
                 <Text style={styles.toggleLabel}>Auto-sync on Wi-Fi</Text>
                 <Switch
@@ -386,7 +367,7 @@ export default function SettingsScreen() {
                   ]}
                 >
                   {busyAction === "backup" ? (
-                    <ActivityIndicator color={colors.background} size="small" />
+                    <ActivityIndicator color={colors.onAccent} size="small" />
                   ) : (
                     <Text style={styles.primaryButtonText}>Back Up Now</Text>
                   )}
@@ -396,16 +377,16 @@ export default function SettingsScreen() {
                   onPress={handleRestoreNotes}
                   disabled={busyAction !== null}
                   style={({ pressed }) => [
-                    styles.primaryButton,
+                    styles.secondaryButton,
                     styles.modelButtonFlex,
                     pressed && styles.buttonPressed,
                     busyAction !== null && styles.buttonDisabled,
                   ]}
                 >
                   {busyAction === "restore" ? (
-                    <ActivityIndicator color={colors.background} size="small" />
+                    <ActivityIndicator color={colors.accent} size="small" />
                   ) : (
-                    <Text style={styles.primaryButtonText}>Restore / Sync Notes</Text>
+                    <Text style={styles.secondaryButtonText}>Restore / Sync Notes</Text>
                   )}
                 </Pressable>
               </View>
@@ -432,10 +413,6 @@ export default function SettingsScreen() {
                 Stores an encrypted backup in your personal Google Drive that only Xayra can
                 read. Your notes never leave this device until you connect Google Drive here.
               </Text>
-              <View style={styles.metricRow}>
-                <Text style={styles.metricLabel}>Notes stored locally</Text>
-                <Text style={styles.metricValue}>{notesStoredLocally ?? "—"}</Text>
-              </View>
               <Pressable
                 onPress={handleConnect}
                 disabled={busyAction !== null}
@@ -446,7 +423,7 @@ export default function SettingsScreen() {
                 ]}
               >
                 {busyAction === "connect" ? (
-                  <ActivityIndicator color={colors.background} size="small" />
+                  <ActivityIndicator color={colors.onAccent} size="small" />
                 ) : (
                   <Text style={styles.primaryButtonText}>Connect Google Drive</Text>
                 )}
@@ -455,7 +432,31 @@ export default function SettingsScreen() {
           )}
         </View>
 
-        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Transcription</Text>
+        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Storage & Stats</Text>
+        <View style={styles.card}>
+          <View style={styles.metricRow}>
+            <Text style={styles.metricLabel}>Notes stored locally</Text>
+            <Text style={styles.metricValue}>{notesStoredLocally ?? "—"}</Text>
+          </View>
+          {status.isConnected && (
+            <>
+              <View style={styles.metricRow}>
+                <Text style={styles.metricLabel}>Last backup time</Text>
+                <Text style={styles.metricValue}>
+                  {status.lastBackupTime ? formatTimestamp(status.lastBackupTime) : "Never"}
+                </Text>
+              </View>
+              {status.backupSizeBytes != null && (
+                <View style={styles.metricRow}>
+                  <Text style={styles.metricLabel}>Backup size</Text>
+                  <Text style={styles.metricValue}>{formatBytes(status.backupSizeBytes)}</Text>
+                </View>
+              )}
+            </>
+          )}
+        </View>
+
+        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Speech-to-Text Engine</Text>
         <View style={styles.card}>
           {isLoadingModels ? (
             <ActivityIndicator color={colors.textMuted} style={styles.cardLoading} />
@@ -760,6 +761,26 @@ const styles = StyleSheet.create({
   },
   primaryButtonText: {
     color: colors.onAccent,
+    fontSize: 15,
+    fontWeight: "700",
+  },
+  // Deliberately lighter visual weight than primaryButton — a filled accent
+  // button reads as "the main action," so pairing two of them side by side
+  // (Back Up / Restore) made both look equally urgent when they aren't:
+  // backing up is the common, low-risk action; restoring is occasional and
+  // slightly more consequential (writes into the local vault), so it gets
+  // the outline treatment instead.
+  secondaryButton: {
+    backgroundColor: "transparent",
+    borderColor: colors.accent,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.md,
+    paddingVertical: 13,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  secondaryButtonText: {
+    color: colors.accent,
     fontSize: 15,
     fontWeight: "700",
   },

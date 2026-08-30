@@ -391,6 +391,15 @@ export default function HomeScreen() {
             style={styles.searchInput}
             returnKeyType="search"
           />
+          {isSearchActive && (
+            <Pressable
+              onPress={() => setSearchQuery("")}
+              hitSlop={10}
+              style={styles.searchClearButton}
+            >
+              <Text style={styles.searchClearButtonText}>✕</Text>
+            </Pressable>
+          )}
         </View>
 
         {error && <Text style={styles.errorText}>{error}</Text>}
@@ -425,7 +434,7 @@ export default function HomeScreen() {
               <Text style={styles.emptySubtext}>
                 {isSearchActive
                   ? "Try a different search term."
-                  : "Tap the mic below to record your first note."}
+                  : "Tap the microphone to record your first voice note."}
               </Text>
               {!isSearchActive && (
                 <Pressable
@@ -572,6 +581,20 @@ const styles = StyleSheet.create({
     flex: 1,
     color: colors.textPrimary,
     fontSize: 16,
+  },
+  searchClearButton: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: colors.surfaceElevated,
+    alignItems: "center",
+    justifyContent: "center",
+    marginLeft: spacing.sm,
+  },
+  searchClearButtonText: {
+    color: colors.textMuted,
+    fontSize: 12,
+    fontWeight: "700",
   },
   errorText: {
     color: colors.danger,

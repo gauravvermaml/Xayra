@@ -79,11 +79,20 @@ export function NoteCard({
 
       {transcriptionModel === "tiny" && (
         <Pressable onPress={onSwitchEngine} disabled={!onSwitchEngine} hitSlop={6} style={styles.engineChip}>
+          <Text style={styles.engineChipIcon}>⚡</Text>
           <Text style={styles.engineChipText}>
             Transcribed with Fast Engine • Tap to change in Settings
           </Text>
         </Pressable>
       )}
+
+      {/* A quiet, always-present affordance for the long-press-to-copy
+          gesture above — not interactive itself (a real Pressable here would
+          fight the card's own onLongPress for the gesture), just a visual
+          hint that this card's text can be grabbed. */}
+      <View pointerEvents="none" style={styles.copyHint}>
+        <Text style={styles.copyHintIcon}>⧉</Text>
+      </View>
     </Pressable>
   );
 }
@@ -94,7 +103,7 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: radius.lg,
-    padding: spacing.base,
+    padding: spacing.lg,
     marginBottom: spacing.md,
   },
   cardPressed: {
@@ -159,18 +168,32 @@ const styles = StyleSheet.create({
     fontSize: 15,
   },
   engineChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
     alignSelf: "flex-start",
-    marginTop: spacing.sm,
-    backgroundColor: colors.surfaceElevated,
-    borderColor: colors.border,
-    borderWidth: StyleSheet.hairlineWidth,
+    marginTop: spacing.md,
+    backgroundColor: colors.accentMuted,
     borderRadius: radius.pill,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: 5,
+  },
+  engineChipIcon: {
+    fontSize: 10,
   },
   engineChipText: {
-    color: colors.textMuted,
+    color: colors.accent,
     fontSize: 10,
-    fontWeight: "600",
+    fontWeight: "700",
+  },
+  copyHint: {
+    position: "absolute",
+    bottom: spacing.sm,
+    right: spacing.sm,
+    opacity: 0.35,
+  },
+  copyHintIcon: {
+    color: colors.textMuted,
+    fontSize: 13,
   },
 });

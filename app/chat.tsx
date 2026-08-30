@@ -66,6 +66,15 @@ type ChatMessage = {
  * many dozens of per-token re-renders per second into ~12 batched ones. */
 const STREAM_FLUSH_INTERVAL_MS = 80;
 
+/** Shown above the input box only before the first message of a session —
+ * a blank chat with no history gives a new user nothing to go on, these
+ * demonstrate the kind of question this screen is actually for. */
+const STARTER_PROMPTS = [
+  "Summarize my latest notes",
+  "What did I record about work?",
+  "List my recent tasks",
+] as const;
+
 function formatDuration(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -525,6 +534,21 @@ export default function ChatScreen() {
             </View>
           )}
 
+          {messages.length === 0 && !chatModelMissing && (
+            <View style={styles.starterChipRow}>
+              {STARTER_PROMPTS.map((prompt) => (
+                <Pressable
+                  key={prompt}
+                  onPress={() => void handleSend(prompt)}
+                  disabled={isSending}
+                  style={({ pressed }) => [styles.starterChip, pressed && styles.starterChipPressed]}
+                >
+                  <Text style={styles.starterChipText}>{prompt}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+
           {chatModelMissing && (
             <View style={styles.chatModelPrompt}>
               <Text style={styles.chatModelPromptTitle}>Chat model not downloaded</Text>
@@ -830,6 +854,29 @@ const styles = StyleSheet.create({
     color: colors.onAccent,
     fontSize: 14,
     fontWeight: "700",
+  },
+  starterChipRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: spacing.sm,
+    marginBottom: spacing.sm,
+  },
+  starterChip: {
+    backgroundColor: colors.surfaceElevated,
+    borderColor: colors.border,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.pill,
+    paddingHorizontal: spacing.base,
+    paddingVertical: spacing.sm + 2,
+  },
+  starterChipPressed: {
+    backgroundColor: colors.surfaceActive,
+    borderColor: colors.borderStrong,
+  },
+  starterChipText: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    fontWeight: "600",
   },
   chatModelProgressWrap: {
     marginBottom: spacing.xs,

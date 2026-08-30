@@ -2,21 +2,14 @@ import { useEffect, useState } from "react";
 import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
 import { AudioPlayerControls } from "./AudioPlayerControls";
+import { colors } from "../constants/theme";
 import { useAudioPlayerControls } from "../services/audio/player";
 import { deleteNote, getNoteById, type Note } from "../services/notes/noteManager";
 import { copyTextWithFeedback } from "../utils/clipboard";
 
-const colors = {
-  backdrop: "rgba(2, 6, 23, 0.6)",
-  background: "#0f172a",
-  surface: "#1e293b",
-  surfaceAlt: "#27324a",
-  border: "#334155",
-  textPrimary: "#f8fafc",
-  textMuted: "#94a3b8",
-  accent: "#6366f1",
-  danger: "#f87171",
-};
+/** Not in the shared theme: a backdrop scrim is a one-off for modals, not a
+ * reusable design-system token. */
+const backdropColor = "rgba(2, 6, 23, 0.6)";
 
 export type NoteDetailModalProps = {
   noteId: string | null;
@@ -174,7 +167,7 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted }: NoteDet
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: colors.backdrop,
+    backgroundColor: backdropColor,
     justifyContent: "flex-end",
   },
   sheet: {
@@ -239,7 +232,7 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   statusBadge: {
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: colors.surfaceElevated,
     borderRadius: 999,
     paddingHorizontal: 10,
     paddingVertical: 3,

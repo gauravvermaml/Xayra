@@ -6,26 +6,34 @@
  */
 
 export const colors = {
-  // Base surfaces — charcoal/OLED slate, darkest to most elevated.
-  background: "#0E0F12",
-  surface: "#181920",
-  surfaceElevated: "#1F212B",
-  surfaceActive: "#242640",
+  // Base surfaces — deep charcoal/slate, darkest to most elevated. Chosen
+  // deliberately over flat pure black (#000): a slight blue-slate tint reads
+  // as richer and less "OLED void" while still being dark-mode-correct.
+  // Previously a few components (NoteDetailModal, SmartNudgeBanner) hardcoded
+  // their own near-identical slate palette locally instead of importing this
+  // one — this revision folds those into the same values so there's exactly
+  // one dark palette in the app, not two that drift over time.
+  background: "#0F172A",
+  surface: "#1E293B",
+  surfaceElevated: "#27324A",
+  surfaceActive: "#2E2A5C",
 
-  // Borders — subtle by design; contrast comes from surface layering, not
-  // heavy outlines or drop shadows.
-  border: "#2A2C38",
-  borderStrong: "#383B4A",
+  // Borders — translucent white overlays rather than flat hex, so they read
+  // correctly against every surface tone above without needing a different
+  // border color per elevation level. Contrast comes from this subtle
+  // highlight plus surface layering, not heavy outlines or drop shadows.
+  border: "rgba(255, 255, 255, 0.08)",
+  borderStrong: "rgba(255, 255, 255, 0.16)",
 
   // Text hierarchy.
-  textPrimary: "#F5F6FA",
+  textPrimary: "#F8FAFC",
   textSecondary: "#B4B8C6",
-  textMuted: "#71758A",
+  textMuted: "#94A3B8",
 
   // Single vibrant accent — reserved for active states, primary actions,
   // and recording indicators. Everything else stays desaturated.
-  accent: "#7C6CFF",
-  accentMuted: "#3A3568",
+  accent: "#6366F1",
+  accentMuted: "#363269",
   onAccent: "#FFFFFF",
   // Secondary brand glow — used only for the Xayra emblem's neon aura pulse
   // (paired with `accent`), never as a general-purpose UI color.

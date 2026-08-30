@@ -1,17 +1,8 @@
 import { useCallback, useState } from "react";
 import { Pressable, StyleProp, StyleSheet, Text, View, ViewStyle } from "react-native";
 
+import { colors } from "../constants/theme";
 import { useAudioPlayerControls } from "../services/audio/player";
-
-const colors = {
-  surface: "#1e293b",
-  border: "#334155",
-  track: "#334155",
-  progress: "#6366f1",
-  textPrimary: "#f8fafc",
-  textMuted: "#94a3b8",
-  danger: "#f87171",
-};
 
 export type AudioPlayerControlsProps = {
   audioUri: string;
@@ -120,7 +111,7 @@ const styles = StyleSheet.create({
     width: 40,
     height: 40,
     borderRadius: 20,
-    backgroundColor: colors.progress,
+    backgroundColor: colors.accent,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -133,7 +124,7 @@ const styles = StyleSheet.create({
     opacity: 0.8,
   },
   playButtonIcon: {
-    color: colors.textPrimary,
+    color: colors.onAccent,
     fontSize: 14,
   },
   progressColumn: {
@@ -143,12 +134,12 @@ const styles = StyleSheet.create({
   track: {
     height: 6,
     borderRadius: 3,
-    backgroundColor: colors.track,
+    backgroundColor: colors.surfaceElevated,
     overflow: "hidden",
   },
   trackFill: {
     height: "100%",
-    backgroundColor: colors.progress,
+    backgroundColor: colors.accent,
     borderRadius: 3,
   },
   timeRow: {

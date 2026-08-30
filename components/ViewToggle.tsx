@@ -2,13 +2,7 @@ import { StyleSheet, Text, View } from "react-native";
 import { Pressable } from "react-native";
 import { useRouter } from "expo-router";
 
-const colors = {
-  surface: "#1e293b",
-  border: "#334155",
-  textMuted: "#94a3b8",
-  textPrimary: "#f8fafc",
-  accent: "#6366f1",
-};
+import { colors } from "../constants/theme";
 
 export function ViewToggle({ active }: { active: "notes" | "chat" }) {
   const router = useRouter();
@@ -56,6 +50,6 @@ const styles = StyleSheet.create({
     fontWeight: "600",
   },
   labelActive: {
-    color: colors.textPrimary,
+    color: colors.onAccent,
   },
 });

@@ -1,13 +1,6 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-const colors = {
-  surface: "#1e293b",
-  surfaceAlt: "#27324a",
-  border: "#334155",
-  textPrimary: "#f8fafc",
-  textMuted: "#94a3b8",
-  accent: "#6366f1",
-};
+import { colors, radius } from "../constants/theme";
 
 export type SmartNudgeBannerProps = {
   onConnect: () => void;
@@ -41,10 +34,10 @@ export function SmartNudgeBanner({ onConnect, onDismiss }: SmartNudgeBannerProps
 
 const styles = StyleSheet.create({
   container: {
-    backgroundColor: colors.surfaceAlt,
+    backgroundColor: colors.surfaceElevated,
     borderColor: colors.border,
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
+    borderRadius: radius.lg,
     padding: 14,
     marginBottom: 14,
   },
@@ -66,7 +59,7 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
   },
   connectButtonText: {
-    color: colors.textPrimary,
+    color: colors.onAccent,
     fontSize: 13,
     fontWeight: "700",
   },
