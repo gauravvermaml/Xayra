@@ -1,5 +1,7 @@
 import * as FileSystem from "expo-file-system/legacy";
 
+import { MODEL_CDN_BASE_URL } from "./modelCdn";
+
 /**
  * Base is the one and only local Whisper engine Xayra ships — the earlier
  * Base/Tiny choice (and its onboarding picker, Settings switch/delete UI,
@@ -15,11 +17,13 @@ export type WhisperModelId = "base";
 const WHISPER_BASE_FILENAME = "ggml-base.en.bin";
 
 /**
- * The official whisper.cpp GGML conversion, hosted by the whisper.cpp
- * project itself on Hugging Face — same source a manual `adb push` setup
- * would have pulled from.
+ * Routed through the same Cloudflare Worker CDN proxy as the Llama chat
+ * model (see modelCdn.ts) rather than fetched directly from Hugging Face —
+ * one consistent, resumable-download-friendly, uncapped source for every
+ * model file Xayra needs, instead of two different origins with two
+ * different reliability/rate-limit profiles.
  */
-const DOWNLOAD_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
+const DOWNLOAD_URL = `${MODEL_CDN_BASE_URL}/ggml-base.en.bin`;
 
 export function getWhisperModelPath(): string {
   const dir = FileSystem.documentDirectory;
@@ -42,7 +46,11 @@ export async function getActiveWhisperModel(): Promise<WhisperModelId | null> {
   return (await isWhisperModelDownloaded()) ? "base" : null;
 }
 
-export type DownloadProgressCallback = (fraction: number) => void;
+/** `bytesWritten`/`bytesTotal` (raw, not just the derived `fraction`) are
+ * passed through so callers — namely modelDownloadManager.ts — can compute
+ * real speed/ETA telemetry from actual observed bytes instead of estimating
+ * from a fixed approximate file size. */
+export type DownloadProgressCallback = (fraction: number, bytesWritten: number, bytesTotal: number) => void;
 
 /**
  * Downloads to a `.download` sibling file first and only moves it into
@@ -56,7 +64,11 @@ export async function downloadWhisperModel(onProgress?: DownloadProgressCallback
 
   const resumable = FileSystem.createDownloadResumable(DOWNLOAD_URL, tmpDest, {}, (progress) => {
     if (progress.totalBytesExpectedToWrite > 0) {
-      onProgress?.(progress.totalBytesWritten / progress.totalBytesExpectedToWrite);
+      onProgress?.(
+        progress.totalBytesWritten / progress.totalBytesExpectedToWrite,
+        progress.totalBytesWritten,
+        progress.totalBytesExpectedToWrite
+      );
     }
   });
 

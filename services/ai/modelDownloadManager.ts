@@ -3,9 +3,10 @@ import * as Device from "expo-device";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Network from "expo-network";
 
-import { resetWhisperContext } from "./localWhisper";
 import { downloadEmbeddingAssets, isEmbeddingModelDownloaded } from "./embeddingModel";
 import { LLAMA_MODEL_FILENAMES } from "./localLlama";
+import { resetWhisperContext } from "./localWhisper";
+import { MODEL_CDN_BASE_URL } from "./modelCdn";
 import { downloadWhisperModel, isWhisperModelDownloaded } from "./whisperModels";
 import { readPreferences, writePreferences } from "../settings/preferences";
 
@@ -13,12 +14,12 @@ import { readPreferences, writePreferences } from "../settings/preferences";
  * Replaces the old first-launch onboarding picker and per-model Settings
  * cards: every local model Xayra needs (Whisper Base, the ONNX embedding
  * model, and a RAM-tiered Llama chat model) now downloads automatically in
- * the background, gated only on network type and — for cellular — explicit
- * user consent. `initModelDownloads()` is called once from app/_layout.tsx;
- * every screen that cares about progress reads it via `useModelDownload()`.
+ * the background — through the Cloudflare Worker CDN proxy at
+ * MODEL_CDN_BASE_URL (see modelCdn.ts) rather than hitting Hugging Face/R2
+ * directly — gated only on network type and, for cellular, explicit user
+ * consent. `initModelDownloads()` is called once from app/_layout.tsx; every
+ * screen that cares about progress reads it via `useModelDownload()`.
  */
-
-const R2_BASE_URL = "https://pub-1620753009f6480ba336c118dbff9ad1.r2.dev";
 
 const LLAMA_1B_FILENAME = LLAMA_MODEL_FILENAMES.find((m) => m.label === "1B")!.filename;
 const LLAMA_3B_FILENAME = LLAMA_MODEL_FILENAMES.find((m) => m.label === "3B")!.filename;
@@ -30,35 +31,50 @@ const LLAMA_3B_FILENAME = LLAMA_MODEL_FILENAMES.find((m) => m.label === "3B")!.f
 const RAM_TIER_THRESHOLD_BYTES = 7 * 1024 * 1024 * 1024;
 
 /**
- * Approximate download sizes, measured directly off the R2 bucket
- * (`curl -I`) rather than trusted from a spec sheet — actual bytes were
- * ~0.78GB (1B) and ~1.92GB (3B) at the time of writing, both usefully close
- * to but not exactly the round "~1.2GB"/"~1.9GB" figures sometimes quoted
- * for these files elsewhere; used only to (a) weight the combined progress
- * bar across three very differently-sized assets and (b) show a human
- * label before the real download has started reporting bytes.
+ * Byte counts measured directly against the live Worker (`curl` a real GET,
+ * not a HEAD — the Worker's HEAD responses omit `Content-Length`, but a
+ * real GET, which is what expo-file-system's downloader actually issues,
+ * returns the correct one) rather than trusted from a spec sheet. These are
+ * used as the initial/fallback size estimate for a phase before its own
+ * download has reported a real `Content-Length` — see `onPhaseProgress`
+ * below, which swaps in the real number the moment it's known.
  */
-const WHISPER_APPROX_BYTES = 142_000_000;
+const WHISPER_APPROX_BYTES = 147_964_211;
 const EMBEDDING_APPROX_BYTES = 34_231_000;
-const LLAMA_1B_APPROX_BYTES = 834_000_000;
-const LLAMA_3B_APPROX_BYTES = 2_061_000_000;
+const LLAMA_1B_APPROX_BYTES = 834_203_680;
+const LLAMA_3B_APPROX_BYTES = 2_060_886_464;
+
+const BYTES_PER_MB = 1024 * 1024;
 
 export type ModelDownloadState = "idle" | "downloading" | "ready" | "error" | "cellular_blocked";
 
 export type ModelDownloadStatus = {
-  state: ModelDownloadState;
-  /** 0–100, combined across all three assets (Whisper + embeddings + chat model). */
-  progress: number;
+  status: ModelDownloadState;
+  /** 0–100, combined across every model that actually needs downloading. */
+  progressPercent: number;
+  downloadedMB: number;
+  totalMB: number;
+  /** Smoothed (not instantaneous-per-tick) throughput — see `recordSpeedSample`. */
+  speedMBps: number;
+  /** 0 whenever speed is unknown/zero (just started, or paused) — deliberately
+   * never NaN/Infinity, so it's always safe to interpolate directly into UI text. */
+  etaSeconds: number;
   /** Human-readable size of just the chat model for this device's RAM tier
-   * (e.g. "0.8 GB") — what the cellular-blocked callout and Settings show,
-   * since that's the one asset actually big enough for a user to care about
-   * before agreeing to burn mobile data on it. */
+   * (e.g. "0.8 GB") — shown on the cellular-blocked callout, since that's
+   * the one asset actually big enough for a user to weigh before agreeing
+   * to burn mobile data on it. */
   chatModelSizeLabel: string;
   error: string | null;
 };
 
 function formatGigabytes(bytes: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+function bytesToMB(bytes: number): number {
+  // One decimal place — enough precision to look "live" without jittering
+  // wildly on every progress tick.
+  return Math.round((bytes / BYTES_PER_MB) * 10) / 10;
 }
 
 type LlamaTier = { filename: string; approxBytes: number; sizeLabel: string };
@@ -95,17 +111,28 @@ async function isChatModelDownloaded(filename: string): Promise<boolean> {
   return info.exists;
 }
 
+type PhaseProgressCallback = (fraction: number, bytesWritten: number, bytesTotal: number) => void;
+
 /** Same atomic-download pattern used by whisperModels.ts/embeddingModel.ts:
  * download to a `.download` sibling, only move it into place on success. */
-async function downloadChatModel(filename: string, onProgress: (fraction: number) => void): Promise<void> {
+async function downloadChatModel(filename: string, onProgress: PhaseProgressCallback): Promise<void> {
   const dest = chatModelPath(filename);
   const tmpDest = `${dest}.download`;
 
-  const resumable = FileSystem.createDownloadResumable(`${R2_BASE_URL}/${filename}`, tmpDest, {}, (progress) => {
-    if (progress.totalBytesExpectedToWrite > 0) {
-      onProgress(progress.totalBytesWritten / progress.totalBytesExpectedToWrite);
+  const resumable = FileSystem.createDownloadResumable(
+    `${MODEL_CDN_BASE_URL}/${filename}`,
+    tmpDest,
+    {},
+    (progress) => {
+      if (progress.totalBytesExpectedToWrite > 0) {
+        onProgress(
+          progress.totalBytesWritten / progress.totalBytesExpectedToWrite,
+          progress.totalBytesWritten,
+          progress.totalBytesExpectedToWrite
+        );
+      }
     }
-  });
+  );
 
   try {
     const result = await resumable.downloadAsync();
@@ -122,8 +149,12 @@ async function downloadChatModel(filename: string, onProgress: (fraction: number
 type Listener = (status: ModelDownloadStatus) => void;
 let listeners: Listener[] = [];
 let currentStatus: ModelDownloadStatus = {
-  state: "idle",
-  progress: 0,
+  status: "idle",
+  progressPercent: 0,
+  downloadedMB: 0,
+  totalMB: 0,
+  speedMBps: 0,
+  etaSeconds: 0,
   chatModelSizeLabel: resolveLlamaTier().sizeLabel,
   error: null,
 };
@@ -155,6 +186,137 @@ export function useModelDownload(): ModelDownloadStatus {
   return status;
 }
 
+// ---- Telemetry (speed/ETA/MB) ---------------------------------------------
+//
+// Three phases (whisper -> embedding -> llama) are downloaded sequentially,
+// but reported as ONE continuous "Preparing Xayra" progress bar rather than
+// three separate ones — these track running totals across all three so
+// downloadedMB/totalMB/progressPercent never jump backward at a phase
+// boundary, and speed is smoothed (not recomputed raw on every single
+// progress tick) so it reads as a stable number instead of jittering.
+
+type PhaseName = "whisper" | "embedding" | "llama";
+const ALL_PHASES: PhaseName[] = ["whisper", "embedding", "llama"];
+
+let phaseApproxTotals: Record<PhaseName, number> = {
+  whisper: WHISPER_APPROX_BYTES,
+  embedding: EMBEDDING_APPROX_BYTES,
+  llama: LLAMA_1B_APPROX_BYTES,
+};
+let phaseRealTotals: Partial<Record<PhaseName, number>> = {};
+let phaseCompleted = new Set<PhaseName>();
+
+let lastSampleTimeMs = 0;
+let lastSampleBytes = 0;
+let smoothedSpeedBytesPerSec = 0;
+
+/** Below this, a fresh instantaneous-speed sample is skipped in favor of
+ * reusing the previous smoothed value — guards against a near-zero elapsed
+ * time producing a huge (or Infinity) speed spike from dividing by
+ * something close to zero. */
+const MIN_SAMPLE_INTERVAL_MS = 250;
+/** Exponential smoothing weight for each new sample — low enough that one
+ * noisy tick (a brief stall, a burst) doesn't yank the displayed number
+ * around, high enough that it still visibly responds within a second or two. */
+const SPEED_SMOOTHING_ALPHA = 0.3;
+
+function phaseTotal(phase: PhaseName): number {
+  return phaseRealTotals[phase] ?? phaseApproxTotals[phase];
+}
+
+function totalBytesAcrossPendingPhases(): number {
+  return ALL_PHASES.filter((p) => !isPhaseSkippedEntirely(p)).reduce((sum, p) => sum + phaseTotal(p), 0);
+}
+
+function completedBytesBeforeCurrentPhase(): number {
+  return ALL_PHASES.filter((p) => phaseCompleted.has(p) && !isPhaseSkippedEntirely(p)).reduce(
+    (sum, p) => sum + phaseTotal(p),
+    0
+  );
+}
+
+/** Phases that were already downloaded before this run started are excluded
+ * from the "how much is there to download" total entirely — a user who
+ * already has Whisper downloaded shouldn't see its ~140MB counted toward a
+ * total they're not actually waiting on. Tracked separately from
+ * `phaseCompleted` (which also includes phases finished *during* this run). */
+let phasesSkippedEntirely = new Set<PhaseName>();
+function isPhaseSkippedEntirely(phase: PhaseName): boolean {
+  return phasesSkippedEntirely.has(phase);
+}
+
+function resetTelemetry(tier: LlamaTier): void {
+  phaseApproxTotals = {
+    whisper: WHISPER_APPROX_BYTES,
+    embedding: EMBEDDING_APPROX_BYTES,
+    llama: tier.approxBytes,
+  };
+  phaseRealTotals = {};
+  phaseCompleted = new Set<PhaseName>();
+  phasesSkippedEntirely = new Set<PhaseName>();
+  lastSampleTimeMs = 0;
+  lastSampleBytes = 0;
+  smoothedSpeedBytesPerSec = 0;
+}
+
+/** Records one new (time, bytes) sample and derives a smoothed speed —
+ * called on every phase progress tick and once more at completion. Safe by
+ * construction: `etaSeconds`/`speedMBps` are 0 (never NaN/Infinity) until
+ * at least one real sample interval has elapsed. */
+function updateTelemetry(writtenBytes: number, totalBytes: number): void {
+  const now = Date.now();
+  if (lastSampleTimeMs > 0) {
+    const elapsedMs = now - lastSampleTimeMs;
+    if (elapsedMs >= MIN_SAMPLE_INTERVAL_MS) {
+      const deltaBytes = Math.max(0, writtenBytes - lastSampleBytes);
+      const instantBytesPerSec = (deltaBytes / elapsedMs) * 1000;
+      smoothedSpeedBytesPerSec =
+        smoothedSpeedBytesPerSec <= 0
+          ? instantBytesPerSec
+          : smoothedSpeedBytesPerSec * (1 - SPEED_SMOOTHING_ALPHA) + instantBytesPerSec * SPEED_SMOOTHING_ALPHA;
+      lastSampleTimeMs = now;
+      lastSampleBytes = writtenBytes;
+    }
+  } else {
+    lastSampleTimeMs = now;
+    lastSampleBytes = writtenBytes;
+  }
+
+  const safeSpeedBytesPerSec = Number.isFinite(smoothedSpeedBytesPerSec) && smoothedSpeedBytesPerSec > 0
+    ? smoothedSpeedBytesPerSec
+    : 0;
+  const remainingBytes = Math.max(0, totalBytes - writtenBytes);
+  const etaSeconds =
+    safeSpeedBytesPerSec > 0 && Number.isFinite(remainingBytes / safeSpeedBytesPerSec)
+      ? Math.round(remainingBytes / safeSpeedBytesPerSec)
+      : 0;
+  const progressPercent = totalBytes > 0 ? Math.min(100, Math.max(0, (writtenBytes / totalBytes) * 100)) : 0;
+
+  setStatus({
+    progressPercent,
+    downloadedMB: bytesToMB(writtenBytes),
+    totalMB: bytesToMB(totalBytes),
+    speedMBps: bytesToMB(safeSpeedBytesPerSec),
+    etaSeconds,
+  });
+}
+
+function onPhaseProgress(phase: PhaseName, fraction: number, bytesWritten: number, bytesTotal: number): void {
+  if (bytesTotal > 0) {
+    phaseRealTotals[phase] = bytesTotal;
+  }
+  const currentPhaseTotal = phaseTotal(phase);
+  // `bytesTotal > 0` means this tick carried real data (whisper/llama always
+  // do; the embedding phase's brief vocab-file step doesn't, and reports
+  // 0/0 — see embeddingModel.ts). Fall back to the fraction against the
+  // phase's known/approx total in that case, rather than showing 0 bytes.
+  const currentPhaseBytes = bytesTotal > 0 ? bytesWritten : fraction * currentPhaseTotal;
+
+  updateTelemetry(completedBytesBeforeCurrentPhase() + currentPhaseBytes, totalBytesAcrossPendingPhases());
+}
+
+// ---- Network / consent -----------------------------------------------------
+
 let networkChangeSubscription: { remove: () => void } | null = null;
 
 function stopWatchingForWifi(): void {
@@ -177,39 +339,57 @@ function watchForWifiThenResume(tier: LlamaTier): void {
 }
 
 async function beginDownloads(tier: LlamaTier): Promise<void> {
-  setStatus({ state: "downloading", progress: 0, error: null });
+  const [whisperDone, embeddingDone, llamaDone] = await Promise.all([
+    isWhisperModelDownloaded(),
+    isEmbeddingModelDownloaded(),
+    isChatModelDownloaded(tier.filename),
+  ]);
 
-  const totalBytes = WHISPER_APPROX_BYTES + EMBEDDING_APPROX_BYTES + tier.approxBytes;
-  const whisperWeight = WHISPER_APPROX_BYTES / totalBytes;
-  const embeddingWeight = EMBEDDING_APPROX_BYTES / totalBytes;
-  const llamaWeight = tier.approxBytes / totalBytes;
-  let completedWeight = 0;
+  resetTelemetry(tier);
+  if (whisperDone) {
+    phaseCompleted.add("whisper");
+    phasesSkippedEntirely.add("whisper");
+  }
+  if (embeddingDone) {
+    phaseCompleted.add("embedding");
+    phasesSkippedEntirely.add("embedding");
+  }
+  if (llamaDone) {
+    phaseCompleted.add("llama");
+    phasesSkippedEntirely.add("llama");
+  }
+
+  setStatus({ status: "downloading", error: null });
+  updateTelemetry(completedBytesBeforeCurrentPhase(), totalBytesAcrossPendingPhases());
 
   try {
-    if (!(await isWhisperModelDownloaded())) {
-      await downloadWhisperModel((fraction) => setStatus({ progress: (completedWeight + fraction * whisperWeight) * 100 }));
+    if (!whisperDone) {
+      await downloadWhisperModel((fraction, bytesWritten, bytesTotal) =>
+        onPhaseProgress("whisper", fraction, bytesWritten, bytesTotal)
+      );
       resetWhisperContext();
+      phaseCompleted.add("whisper");
     }
-    completedWeight += whisperWeight;
-    setStatus({ progress: completedWeight * 100 });
 
-    if (!(await isEmbeddingModelDownloaded())) {
-      await downloadEmbeddingAssets((fraction) =>
-        setStatus({ progress: (completedWeight + fraction * embeddingWeight) * 100 })
+    if (!embeddingDone) {
+      await downloadEmbeddingAssets((fraction, bytesWritten, bytesTotal) =>
+        onPhaseProgress("embedding", fraction, bytesWritten, bytesTotal)
       );
+      phaseCompleted.add("embedding");
     }
-    completedWeight += embeddingWeight;
-    setStatus({ progress: completedWeight * 100 });
 
-    if (!(await isChatModelDownloaded(tier.filename))) {
-      await downloadChatModel(tier.filename, (fraction) =>
-        setStatus({ progress: (completedWeight + fraction * llamaWeight) * 100 })
+    if (!llamaDone) {
+      await downloadChatModel(tier.filename, (fraction, bytesWritten, bytesTotal) =>
+        onPhaseProgress("llama", fraction, bytesWritten, bytesTotal)
       );
+      phaseCompleted.add("llama");
     }
 
-    setStatus({ state: "ready", progress: 100, error: null });
+    const totalBytes = totalBytesAcrossPendingPhases();
+    updateTelemetry(totalBytes, totalBytes);
+    setStatus({ status: "ready", progressPercent: 100, error: null });
   } catch (err) {
-    setStatus({ state: "error", error: err instanceof Error ? err.message : String(err) });
+    setStatus({ status: "error", error: err instanceof Error ? err.message : String(err) });
   }
 }
 
@@ -244,7 +424,7 @@ async function runInitialCheck(): Promise<void> {
     isChatModelDownloaded(tier.filename),
   ]);
   if (whisperReady && embeddingReady && chatReady) {
-    setStatus({ state: "ready", progress: 100, error: null });
+    setStatus({ status: "ready", progressPercent: 100, error: null });
     return;
   }
 
@@ -257,6 +437,6 @@ async function runInitialCheck(): Promise<void> {
     return;
   }
 
-  setStatus({ state: "cellular_blocked", progress: 0, error: null });
+  setStatus({ status: "cellular_blocked", progressPercent: 0, error: null });
   watchForWifiThenResume(tier);
 }

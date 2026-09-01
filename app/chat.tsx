@@ -98,7 +98,7 @@ export default function ChatScreen() {
   // "ready" means the chat model (and Whisper/embeddings) are actually on
   // disk; every other state is a reason input stays disabled.
   const modelDownload = useModelDownload();
-  const isModelReady = modelDownload.state === "ready";
+  const isModelReady = modelDownload.status === "ready";
 
   // A defensive fallback, not the primary gate (isModelReady above is): if
   // the download manager's state and the model file on disk ever disagree —
@@ -550,20 +550,24 @@ export default function ChatScreen() {
             </View>
           )}
 
-          {modelDownload.state === "downloading" && (
+          {modelDownload.status === "downloading" && (
             <View style={styles.setupStatusBar}>
               <View style={styles.setupStatusTrack}>
                 <View
-                  style={[styles.setupStatusFill, { width: `${Math.round(modelDownload.progress)}%` }]}
+                  style={[styles.setupStatusFill, { width: `${Math.round(modelDownload.progressPercent)}%` }]}
                 />
               </View>
               <Text style={styles.setupStatusText}>
-                Preparing Xayra… {Math.round(modelDownload.progress)}%
+                Preparing Xayra… {Math.round(modelDownload.progressPercent)}%
+              </Text>
+              <Text style={styles.setupStatusSubtext}>
+                {modelDownload.downloadedMB} MB / {modelDownload.totalMB} MB • {modelDownload.speedMBps} MB/s •{" "}
+                {modelDownload.etaSeconds}s remaining
               </Text>
             </View>
           )}
 
-          {modelDownload.state === "cellular_blocked" && (
+          {modelDownload.status === "cellular_blocked" && (
             <View style={styles.chatModelPrompt}>
               <Text style={styles.chatModelPromptTitle}>Chat model needed</Text>
               <Text style={styles.chatModelPromptBody}>
@@ -577,7 +581,7 @@ export default function ChatScreen() {
             </View>
           )}
 
-          {modelDownload.state === "error" && (
+          {modelDownload.status === "error" && (
             <View style={styles.chatModelPrompt}>
               <Text style={styles.chatModelPromptTitle}>Setup failed</Text>
               <Text style={styles.chatModelPromptBody}>
@@ -932,5 +936,12 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     ...typography.caption,
     textAlign: "center",
+  },
+  setupStatusSubtext: {
+    color: colors.textMuted,
+    fontSize: 11,
+    textAlign: "center",
+    marginTop: 2,
+    opacity: 0.8,
   },
 });

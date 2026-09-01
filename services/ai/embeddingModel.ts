@@ -70,7 +70,12 @@ async function downloadFile(url: string, dest: string): Promise<void> {
   }
 }
 
-export type DownloadProgressCallback = (fraction: number) => void;
+/** `bytesWritten`/`bytesTotal` describe only the ONNX model file itself
+ * (the dominant ~34MB of the two files this downloads) — unset (0) during
+ * the brief final vocab-file step, which has no granular byte progress of
+ * its own. Callers wanting real-bytes telemetry (modelDownloadManager.ts)
+ * should treat 0/0 as "no new byte data this tick," not "download stalled." */
+export type DownloadProgressCallback = (fraction: number, bytesWritten: number, bytesTotal: number) => void;
 
 /**
  * Downloads both the ONNX embedding model and its tokenizer vocab, in that
@@ -84,7 +89,11 @@ export async function downloadEmbeddingAssets(onProgress?: DownloadProgressCallb
     const tmpDest = `${modelPath()}.download`;
     const resumable = FileSystem.createDownloadResumable(MODEL_URL, tmpDest, {}, (progress) => {
       if (progress.totalBytesExpectedToWrite > 0) {
-        onProgress?.((progress.totalBytesWritten / progress.totalBytesExpectedToWrite) * MODEL_WEIGHT);
+        onProgress?.(
+          (progress.totalBytesWritten / progress.totalBytesExpectedToWrite) * MODEL_WEIGHT,
+          progress.totalBytesWritten,
+          progress.totalBytesExpectedToWrite
+        );
       }
     });
     try {
@@ -98,10 +107,10 @@ export async function downloadEmbeddingAssets(onProgress?: DownloadProgressCallb
       throw err instanceof Error ? err : new Error(String(err));
     }
   }
-  onProgress?.(MODEL_WEIGHT);
+  onProgress?.(MODEL_WEIGHT, 0, 0);
 
   await downloadFile(VOCAB_URL, vocabPath());
-  onProgress?.(MODEL_WEIGHT + VOCAB_WEIGHT);
+  onProgress?.(MODEL_WEIGHT + VOCAB_WEIGHT, 0, 0);
 }
 
 type ProgressListener = (fraction: number) => void;
