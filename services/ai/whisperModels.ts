@@ -1,83 +1,45 @@
 import * as FileSystem from "expo-file-system/legacy";
 
-import { readPreferences, writePreferences } from "../settings/preferences";
+/**
+ * Base is the one and only local Whisper engine Xayra ships — the earlier
+ * Base/Tiny choice (and its onboarding picker, Settings switch/delete UI,
+ * and the NoteCard "switch engine" nudge) was removed in favor of always
+ * downloading and using the more accurate model automatically in the
+ * background (see modelDownloadManager.ts). Kept as a literal-string type
+ * rather than deleted outright since `services/notes/noteManager.ts` still
+ * stores which engine transcribed a given note as free-form metadata, and
+ * `WhisperModelId` documents that "base" is the only value it can be now.
+ */
+export type WhisperModelId = "base";
 
-export type WhisperModelId = "base" | "tiny";
-
-export type WhisperModelInfo = {
-  id: WhisperModelId;
-  filename: string;
-  label: string;
-  sizeLabel: string;
-  description: string;
-  downloadUrl: string;
-};
+const WHISPER_BASE_FILENAME = "ggml-base.en.bin";
 
 /**
- * Both files are the official whisper.cpp GGML conversions, hosted by the
- * whisper.cpp project itself on Hugging Face — same source a manual
- * `adb push` setup would have pulled from.
+ * The official whisper.cpp GGML conversion, hosted by the whisper.cpp
+ * project itself on Hugging Face — same source a manual `adb push` setup
+ * would have pulled from.
  */
-export const WHISPER_MODELS: Record<WhisperModelId, WhisperModelInfo> = {
-  base: {
-    id: "base",
-    filename: "ggml-base.en.bin",
-    label: "Accurate Engine",
-    sizeLabel: "142MB",
-    description:
-      "Higher Accuracy: Better for technical words and accents (uses slightly more storage).",
-    downloadUrl: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin",
-  },
-  tiny: {
-    id: "tiny",
-    filename: "ggml-tiny.en.bin",
-    label: "Fast Engine",
-    sizeLabel: "75MB",
-    description: "Fast & Lightweight: Transcribes speech instantly using minimal battery.",
-    downloadUrl: "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin",
-  },
-};
+const DOWNLOAD_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
 
-export const WHISPER_MODEL_IDS = Object.keys(WHISPER_MODELS) as WhisperModelId[];
-
-export function getWhisperModelPath(id: WhisperModelId): string {
+export function getWhisperModelPath(): string {
   const dir = FileSystem.documentDirectory;
   if (!dir) {
     throw new Error("No writable document directory available on this platform.");
   }
-  return `${dir}${WHISPER_MODELS[id].filename}`;
+  return `${dir}${WHISPER_BASE_FILENAME}`;
 }
 
-export async function isWhisperModelDownloaded(id: WhisperModelId): Promise<boolean> {
-  const info = await FileSystem.getInfoAsync(getWhisperModelPath(id));
+export async function isWhisperModelDownloaded(): Promise<boolean> {
+  const info = await FileSystem.getInfoAsync(getWhisperModelPath());
   return info.exists;
 }
 
-export async function getDownloadedWhisperModels(): Promise<WhisperModelId[]> {
-  const flags = await Promise.all(
-    WHISPER_MODEL_IDS.map(async (id) => ((await isWhisperModelDownloaded(id)) ? id : null))
-  );
-  return flags.filter((id): id is WhisperModelId => id !== null);
-}
-
-/**
- * Resolves the model that should actually be used for the next
- * transcription: the user's saved preference if that file is still present,
- * otherwise whichever downloaded model is found first, otherwise `null`
- * (nothing downloaded — caller should direct the user to setup).
- */
+/** There's only ever one engine now, so "the active model" is just "is it
+ * downloaded" — kept as its own function (rather than inlining the check at
+ * every call site) so localWhisper.ts's resolveModelPath() reads the same
+ * way it did when there was a real choice to resolve. */
 export async function getActiveWhisperModel(): Promise<WhisperModelId | null> {
-  const prefs = await readPreferences();
-  const preferred = prefs.activeWhisperModel as WhisperModelId | null;
-  if (preferred && WHISPER_MODELS[preferred] && (await isWhisperModelDownloaded(preferred))) {
-    return preferred;
-  }
-  const downloaded = await getDownloadedWhisperModels();
-  return downloaded[0] ?? null;
-}
-
-export async function setActiveWhisperModel(id: WhisperModelId): Promise<void> {
-  await writePreferences({ activeWhisperModel: id });
+  return (await isWhisperModelDownloaded()) ? "base" : null;
 }
 
 export type DownloadProgressCallback = (fraction: number) => void;
@@ -88,23 +50,15 @@ export type DownloadProgressCallback = (fraction: number) => void;
  * never leave a truncated file at the real model path masquerading as a
  * complete one.
  */
-export async function downloadWhisperModel(
-  id: WhisperModelId,
-  onProgress?: DownloadProgressCallback
-): Promise<void> {
-  const dest = getWhisperModelPath(id);
+export async function downloadWhisperModel(onProgress?: DownloadProgressCallback): Promise<void> {
+  const dest = getWhisperModelPath();
   const tmpDest = `${dest}.download`;
 
-  const resumable = FileSystem.createDownloadResumable(
-    WHISPER_MODELS[id].downloadUrl,
-    tmpDest,
-    {},
-    (progress) => {
-      if (progress.totalBytesExpectedToWrite > 0) {
-        onProgress?.(progress.totalBytesWritten / progress.totalBytesExpectedToWrite);
-      }
+  const resumable = FileSystem.createDownloadResumable(DOWNLOAD_URL, tmpDest, {}, (progress) => {
+    if (progress.totalBytesExpectedToWrite > 0) {
+      onProgress?.(progress.totalBytesWritten / progress.totalBytesExpectedToWrite);
     }
-  );
+  });
 
   try {
     const result = await resumable.downloadAsync();
@@ -115,19 +69,5 @@ export async function downloadWhisperModel(
   } catch (err) {
     await FileSystem.deleteAsync(tmpDest, { idempotent: true });
     throw err instanceof Error ? err : new Error(String(err));
-  }
-
-  await setActiveWhisperModel(id);
-}
-
-/** Deletes a downloaded model's file. If it was the active model, falls
- * back to whatever else is still downloaded (or clears the preference). */
-export async function deleteWhisperModel(id: WhisperModelId): Promise<void> {
-  await FileSystem.deleteAsync(getWhisperModelPath(id), { idempotent: true });
-
-  const prefs = await readPreferences();
-  if (prefs.activeWhisperModel === id) {
-    const remaining = await getDownloadedWhisperModels();
-    await writePreferences({ activeWhisperModel: remaining[0] ?? null });
   }
 }

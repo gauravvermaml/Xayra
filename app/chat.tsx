@@ -24,8 +24,8 @@ import { NoteDetailModal } from "../components/NoteDetailModal";
 import { ViewToggle } from "../components/ViewToggle";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { asrRouter } from "../services/ai/asrRouter";
-import { downloadLlamaModel, LLAMA_MODEL_SIZE_LABEL } from "../services/ai/llamaModel";
 import { LLAMA_MODEL_MISSING_ERROR_PREFIX } from "../services/ai/localLlama";
+import { allowCellularDownloadAndResume, useModelDownload } from "../services/ai/modelDownloadManager";
 import { generateRAGAnswer, type RagCitation } from "../services/ai/rag";
 import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
 import { useVoiceRecorder } from "../services/audio/recorder";
@@ -90,28 +90,30 @@ export default function ChatScreen() {
   const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
-  const [chatModelMissing, setChatModelMissing] = useState(false);
-  const [isDownloadingChatModel, setIsDownloadingChatModel] = useState(false);
-  const [chatModelDownloadProgress, setChatModelDownloadProgress] = useState(0);
   const listRef = useRef<FlatList<ChatMessage>>(null);
   const recorder = useVoiceRecorder();
 
+  // Drives the "Preparing Xayra…" status bar / cellular-blocked callout
+  // below, and gates sending — see services/ai/modelDownloadManager.ts. Only
+  // "ready" means the chat model (and Whisper/embeddings) are actually on
+  // disk; every other state is a reason input stays disabled.
+  const modelDownload = useModelDownload();
+  const isModelReady = modelDownload.state === "ready";
+
+  // A defensive fallback, not the primary gate (isModelReady above is): if
+  // the download manager's state and the model file on disk ever disagree —
+  // e.g. a user cleared app storage without a restart — generateRAGAnswer
+  // still surfaces this exact error, and it's worth a clearer message than
+  // a raw exception.
   const isChatModelMissingError = useCallback(
     (err: unknown) => err instanceof Error && err.message.startsWith(LLAMA_MODEL_MISSING_ERROR_PREFIX),
     []
   );
 
-  const handleDownloadChatModel = useCallback(async () => {
-    setIsDownloadingChatModel(true);
-    setChatModelDownloadProgress(0);
-    try {
-      await downloadLlamaModel(setChatModelDownloadProgress);
-      setChatModelMissing(false);
-    } catch (err) {
-      Alert.alert("Download Failed", err instanceof Error ? err.message : "Failed to download the chat model.");
-    } finally {
-      setIsDownloadingChatModel(false);
-    }
+  const handleAllowCellularDownload = useCallback(() => {
+    void allowCellularDownloadAndResume().catch((err) => {
+      Alert.alert("Download Failed", err instanceof Error ? err.message : "Failed to start the download.");
+    });
   }, []);
 
   // Derived, not duplicated: recorder.isRecording is already the source of
@@ -266,9 +268,8 @@ export default function ChatScreen() {
           flushTimer = null;
         }
         if (isChatModelMissingError(err)) {
-          setChatModelMissing(true);
           updateMessage(assistantId, {
-            text: "The on-device chat model isn't downloaded yet — see the prompt below to get started.",
+            text: "The on-device chat model isn't downloaded yet — Xayra downloads it automatically over Wi-Fi.",
             isStreaming: false,
           });
           throw err;
@@ -286,7 +287,7 @@ export default function ChatScreen() {
 
   const handleSend = useCallback(async (overrideText?: string, source: "text" | "voice" = "text") => {
     const query = (overrideText ?? input).trim();
-    if (!query || isSending) {
+    if (!query || isSending || !isModelReady) {
       return;
     }
 
@@ -316,7 +317,7 @@ export default function ChatScreen() {
     } finally {
       setIsSending(false);
     }
-  }, [input, isSending, runRagExchange, playMessageSpeech, isChatModelMissingError]);
+  }, [input, isSending, isModelReady, runRagExchange, playMessageSpeech, isChatModelMissingError]);
 
   // Active/"Shower" Mode's per-utterance handler: transcribe, run the RAG
   // exchange (which already appends it to the visible chat transcript),
@@ -534,7 +535,7 @@ export default function ChatScreen() {
             </View>
           )}
 
-          {messages.length === 0 && !chatModelMissing && (
+          {messages.length === 0 && isModelReady && (
             <View style={styles.starterChipRow}>
               {STARTER_PROMPTS.map((prompt) => (
                 <Pressable
@@ -549,32 +550,39 @@ export default function ChatScreen() {
             </View>
           )}
 
-          {chatModelMissing && (
-            <View style={styles.chatModelPrompt}>
-              <Text style={styles.chatModelPromptTitle}>Chat model not downloaded</Text>
-              <Text style={styles.chatModelPromptBody}>
-                Answering questions needs the on-device Llama chat model ({LLAMA_MODEL_SIZE_LABEL}, one-time
-                download).
+          {modelDownload.state === "downloading" && (
+            <View style={styles.setupStatusBar}>
+              <View style={styles.setupStatusTrack}>
+                <View
+                  style={[styles.setupStatusFill, { width: `${Math.round(modelDownload.progress)}%` }]}
+                />
+              </View>
+              <Text style={styles.setupStatusText}>
+                Preparing Xayra… {Math.round(modelDownload.progress)}%
               </Text>
-              {isDownloadingChatModel ? (
-                <View style={styles.chatModelProgressWrap}>
-                  <View style={styles.chatModelProgressTrack}>
-                    <View
-                      style={[
-                        styles.chatModelProgressFill,
-                        { width: `${Math.round(chatModelDownloadProgress * 100)}%` },
-                      ]}
-                    />
-                  </View>
-                  <Text style={styles.chatModelProgressLabel}>
-                    {Math.round(chatModelDownloadProgress * 100)}%
-                  </Text>
-                </View>
-              ) : (
-                <Pressable onPress={() => void handleDownloadChatModel()} style={styles.chatModelDownloadButton}>
-                  <Text style={styles.chatModelDownloadButtonText}>Download Chat Model</Text>
-                </Pressable>
-              )}
+            </View>
+          )}
+
+          {modelDownload.state === "cellular_blocked" && (
+            <View style={styles.chatModelPrompt}>
+              <Text style={styles.chatModelPromptTitle}>Chat model needed</Text>
+              <Text style={styles.chatModelPromptBody}>
+                To chat with Xayra, you need to download the Xayra chat model (~
+                {modelDownload.chatModelSizeLabel}). You're not on Wi-Fi right now — Xayra waits for
+                Wi-Fi automatically, or you can use mobile data instead.
+              </Text>
+              <Pressable onPress={handleAllowCellularDownload} style={styles.chatModelDownloadButton}>
+                <Text style={styles.chatModelDownloadButtonText}>Download over Mobile Data</Text>
+              </Pressable>
+            </View>
+          )}
+
+          {modelDownload.state === "error" && (
+            <View style={styles.chatModelPrompt}>
+              <Text style={styles.chatModelPromptTitle}>Setup failed</Text>
+              <Text style={styles.chatModelPromptBody}>
+                {modelDownload.error ?? "Something went wrong downloading Xayra's on-device models."}
+              </Text>
             </View>
           )}
 
@@ -602,7 +610,7 @@ export default function ChatScreen() {
               placeholder="Ask about your notes…"
               placeholderTextColor={colors.textMuted}
               style={styles.input}
-              editable={!isSending && !isRecordingVoice && !isTranscribingVoice && !activeMode.isActive}
+              editable={!isSending && !isRecordingVoice && !isTranscribingVoice && !activeMode.isActive && isModelReady}
               contextMenuHidden={false}
               multiline
               returnKeyType="send"
@@ -610,10 +618,10 @@ export default function ChatScreen() {
             />
             <Pressable
               onPress={() => handleSend()}
-              disabled={isSending || !input.trim() || activeMode.isActive}
+              disabled={isSending || !input.trim() || activeMode.isActive || !isModelReady}
               style={({ pressed }) => [
                 styles.sendButton,
-                (isSending || !input.trim() || activeMode.isActive) && styles.sendButtonDisabled,
+                (isSending || !input.trim() || activeMode.isActive || !isModelReady) && styles.sendButtonDisabled,
                 pressed && styles.sendButtonPressed,
               ]}
             >
@@ -896,24 +904,33 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: "600",
   },
-  chatModelProgressWrap: {
-    marginBottom: spacing.xs,
+  // "Preparing Xayra…" status bar shown while models download in the
+  // background (see services/ai/modelDownloadManager.ts) — deliberately a
+  // slim inline bar rather than a modal/full-screen blocker: it's
+  // non-blocking everywhere except actually sending a chat message.
+  setupStatusBar: {
+    backgroundColor: colors.surface,
+    borderColor: colors.border,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.lg,
+    padding: spacing.sm + 2,
+    marginBottom: spacing.sm,
   },
-  chatModelProgressTrack: {
+  setupStatusTrack: {
     height: 6,
     borderRadius: 3,
     backgroundColor: colors.surfaceElevated,
     overflow: "hidden",
+    marginBottom: spacing.xs,
   },
-  chatModelProgressFill: {
+  setupStatusFill: {
     height: "100%",
     backgroundColor: colors.accent,
     borderRadius: 3,
   },
-  chatModelProgressLabel: {
+  setupStatusText: {
     color: colors.textMuted,
     ...typography.caption,
-    marginTop: spacing.xs,
-    textAlign: "right",
+    textAlign: "center",
   },
 });

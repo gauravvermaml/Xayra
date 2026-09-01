@@ -18,10 +18,13 @@ let whisperContextPromise: Promise<{ context: WhisperContext; modelId: WhisperMo
 let loadedModelId: WhisperModelId | null = null;
 
 /**
- * Models aren't bundled into the app (they're tens/hundreds of MB) — the
- * user downloads one via the first-launch onboarding screen or
- * Settings > Voice Recognition (services/ai/whisperModels.ts), which writes
- * it into the document directory and records it as the active model.
+ * Not bundled into the app (tens/hundreds of MB) — downloaded automatically
+ * in the background shortly after first launch (see
+ * services/ai/modelDownloadManager.ts) rather than through any user-facing
+ * picker. This still throws if a recording happens to be attempted before
+ * that background download finishes; on most devices the native
+ * (Tier 1) speech recognizer in asrRouter.ts covers that gap in the
+ * meantime, same as it always has.
  */
 async function resolveModelPath(): Promise<{ path: string; modelId: WhisperModelId }> {
   if (!FileSystem.documentDirectory) {
@@ -31,16 +34,18 @@ async function resolveModelPath(): Promise<{ path: string; modelId: WhisperModel
   const modelId = await getActiveWhisperModel();
   if (!modelId) {
     throw new Error(
-      "No local Whisper model downloaded. Open Settings > Voice Recognition to download a transcription engine before recording."
+      "No local Whisper model downloaded yet. Xayra downloads it automatically in the background " +
+        "over Wi-Fi shortly after first launch — try again in a moment, or connect to Wi-Fi if you " +
+        "haven't yet."
     );
   }
 
-  return { path: getWhisperModelPath(modelId), modelId };
+  return { path: getWhisperModelPath(), modelId };
 }
 
-/** Called after switching the active model in Settings so the next
- * transcription loads the newly-selected engine instead of reusing the
- * previous one's already-initialized native context. */
+/** Called once the background download completes so the next transcription
+ * picks up the newly-downloaded model instead of replaying a cached
+ * "not downloaded yet" rejection from before it existed. */
 export function resetWhisperContext(): void {
   whisperContextPromise = null;
   loadedModelId = null;

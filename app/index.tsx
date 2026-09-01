@@ -34,7 +34,6 @@ import {
   retryPendingEmbeddings,
   type Note,
 } from "../services/notes/noteManager";
-import { readPreferences } from "../services/settings/preferences";
 import {
   getSyncStatus,
   restoreFromDrive,
@@ -86,17 +85,6 @@ export default function HomeScreen() {
       setEmbeddingDownloadProgress(fraction < 1 ? fraction : null);
     });
   }, []);
-
-  // First-launch only (not on every focus): if the user hasn't completed or
-  // explicitly skipped the Whisper engine setup, send them there before
-  // they can try to record and hit the "no model" error instead.
-  useEffect(() => {
-    void readPreferences().then((prefs) => {
-      if (!prefs.onboardingComplete) {
-        router.replace("/onboarding");
-      }
-    });
-  }, [router]);
 
   const refreshNotes = useCallback(async () => {
     try {
@@ -458,10 +446,8 @@ export default function HomeScreen() {
               content={item.content}
               audioUri={item.audioUri}
               createdAt={item.createdAt}
-              transcriptionModel={item.transcriptionModel}
               onPress={() => setSelectedNoteId(item.id)}
               onDelete={() => handleDeleteNote(item.id)}
-              onSwitchEngine={() => router.push("/settings")}
             />
           )}
         />

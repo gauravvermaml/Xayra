@@ -13,23 +13,6 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { useFocusEffect, useRouter } from "expo-router";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
-import {
-  deleteLlamaModel,
-  downloadLlamaModel,
-  isLlamaModelDownloaded,
-  LLAMA_MODEL_SIZE_LABEL,
-} from "../services/ai/llamaModel";
-import { resetWhisperContext } from "../services/ai/localWhisper";
-import {
-  deleteWhisperModel,
-  downloadWhisperModel,
-  getActiveWhisperModel,
-  getDownloadedWhisperModels,
-  setActiveWhisperModel,
-  WHISPER_MODELS,
-  WHISPER_MODEL_IDS,
-  type WhisperModelId,
-} from "../services/ai/whisperModels";
 import { listNotes } from "../services/notes/noteManager";
 import {
   backupToDrive,
@@ -42,6 +25,15 @@ import {
   type SyncStatus,
 } from "../services/sync/driveSync";
 import { showToast } from "../components/Toast";
+
+/**
+ * Speech-to-text engine and AI chat model management used to live here too
+ * (a Whisper Base/Tiny picker, a Llama chat-model download card) — both are
+ * gone. Xayra now downloads Whisper Base, the embedding model, and a
+ * RAM-tiered Llama chat model automatically in the background (see
+ * services/ai/modelDownloadManager.ts) with no user-facing choice or manual
+ * download step, so there's nothing left here for either of them to manage.
+ */
 
 type BusyAction = "connect" | "backup" | "disconnect" | "restore" | null;
 
@@ -64,17 +56,6 @@ export default function SettingsScreen() {
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [notesStoredLocally, setNotesStoredLocally] = useState<number | null>(null);
 
-  const [activeModel, setActiveModelState] = useState<WhisperModelId | null>(null);
-  const [downloadedModels, setDownloadedModels] = useState<WhisperModelId[]>([]);
-  const [downloadingModel, setDownloadingModel] = useState<WhisperModelId | null>(null);
-  const [downloadProgress, setDownloadProgress] = useState(0);
-  const [isLoadingModels, setIsLoadingModels] = useState(true);
-
-  const [isChatModelDownloaded, setIsChatModelDownloaded] = useState(false);
-  const [isLoadingChatModel, setIsLoadingChatModel] = useState(true);
-  const [isDownloadingChatModel, setIsDownloadingChatModel] = useState(false);
-  const [chatModelDownloadProgress, setChatModelDownloadProgress] = useState(0);
-
   const refreshStatus = useCallback(async () => {
     try {
       const [syncStatus, autoSync, notes] = await Promise.all([
@@ -95,125 +76,10 @@ export default function SettingsScreen() {
     }
   }, []);
 
-  const refreshModels = useCallback(async () => {
-    try {
-      const [active, downloaded] = await Promise.all([
-        getActiveWhisperModel(),
-        getDownloadedWhisperModels(),
-      ]);
-      setActiveModelState(active);
-      setDownloadedModels(downloaded);
-    } catch (err) {
-      console.error("[Settings] Failed to load Whisper model state", err);
-    } finally {
-      setIsLoadingModels(false);
-    }
-  }, []);
-
-  const refreshChatModel = useCallback(async () => {
-    try {
-      setIsChatModelDownloaded(await isLlamaModelDownloaded());
-    } catch (err) {
-      console.error("[Settings] Failed to load chat model state", err);
-    } finally {
-      setIsLoadingChatModel(false);
-    }
-  }, []);
-
   useFocusEffect(
     useCallback(() => {
       void refreshStatus();
-      void refreshModels();
-      void refreshChatModel();
-    }, [refreshStatus, refreshModels, refreshChatModel])
-  );
-
-  const handleDownloadChatModel = useCallback(async () => {
-    setIsDownloadingChatModel(true);
-    setChatModelDownloadProgress(0);
-    try {
-      await downloadLlamaModel(setChatModelDownloadProgress);
-      await refreshChatModel();
-    } catch (err) {
-      Alert.alert("Download Failed", err instanceof Error ? err.message : "Failed to download the chat model.");
-    } finally {
-      setIsDownloadingChatModel(false);
-    }
-  }, [refreshChatModel]);
-
-  const handleDeleteChatModel = useCallback(() => {
-    Alert.alert(
-      "Delete Chat Model",
-      `Remove the Private On-Device Assistant (${LLAMA_MODEL_SIZE_LABEL}) from this device? You can re-download it anytime.`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: () => {
-            void deleteLlamaModel()
-              .then(refreshChatModel)
-              .catch((err) => {
-                Alert.alert("Error", err instanceof Error ? err.message : "Failed to delete chat model.");
-              });
-          },
-        },
-      ]
-    );
-  }, [refreshChatModel]);
-
-  const handleSwitchModel = useCallback(
-    async (id: WhisperModelId) => {
-      if (downloadedModels.includes(id)) {
-        await setActiveWhisperModel(id);
-        resetWhisperContext();
-        await refreshModels();
-        return;
-      }
-
-      setDownloadingModel(id);
-      setDownloadProgress(0);
-      try {
-        await downloadWhisperModel(id, setDownloadProgress);
-        resetWhisperContext();
-        await refreshModels();
-      } catch (err) {
-        Alert.alert(
-          "Download Failed",
-          err instanceof Error ? err.message : "Failed to download the transcription engine."
-        );
-      } finally {
-        setDownloadingModel(null);
-      }
-    },
-    [downloadedModels, refreshModels]
-  );
-
-  const handleDeleteModel = useCallback(
-    (id: WhisperModelId) => {
-      Alert.alert(
-        "Delete Model",
-        `Remove the ${WHISPER_MODELS[id].label} (${WHISPER_MODELS[id].sizeLabel}) from this device? You can re-download it anytime.`,
-        [
-          { text: "Cancel", style: "cancel" },
-          {
-            text: "Delete",
-            style: "destructive",
-            onPress: () => {
-              void deleteWhisperModel(id)
-                .then(() => {
-                  resetWhisperContext();
-                  return refreshModels();
-                })
-                .catch((err) => {
-                  Alert.alert("Error", err instanceof Error ? err.message : "Failed to delete model.");
-                });
-            },
-          },
-        ]
-      );
-    },
-    [refreshModels]
+    }, [refreshStatus])
   );
 
   const handleConnect = useCallback(async () => {
@@ -455,173 +321,6 @@ export default function SettingsScreen() {
             </>
           )}
         </View>
-
-        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Speech-to-Text Engine</Text>
-        <View style={styles.card}>
-          {isLoadingModels ? (
-            <ActivityIndicator color={colors.textMuted} style={styles.cardLoading} />
-          ) : (
-            WHISPER_MODEL_IDS.map((id, index) => {
-              const model = WHISPER_MODELS[id];
-              const isActive = activeModel === id;
-              const isDownloaded = downloadedModels.includes(id);
-              const isBusy = downloadingModel === id;
-
-              return (
-                <View key={id}>
-                  {index > 0 && <View style={styles.divider} />}
-                  <View style={styles.cardHeaderRow}>
-                    <View style={styles.statusDotWrap}>
-                      <View
-                        style={[
-                          styles.statusDot,
-                          isActive ? styles.statusDotConnected : styles.statusDotDisconnected,
-                        ]}
-                      />
-                    </View>
-                    <View style={styles.cardHeaderTextGroup}>
-                      <Text style={styles.cardTitle}>
-                        {model.label} ({model.sizeLabel})
-                      </Text>
-                      <Text style={styles.cardSubtitle}>
-                        {isActive
-                          ? "Active"
-                          : isDownloaded
-                            ? "Downloaded"
-                            : "Not downloaded"}
-                      </Text>
-                    </View>
-                  </View>
-
-                  <Text style={styles.cardDescription}>{model.description}</Text>
-
-                  {isBusy && (
-                    <View style={styles.progressWrap}>
-                      <View style={styles.progressTrack}>
-                        <View
-                          style={[styles.progressFill, { width: `${Math.round(downloadProgress * 100)}%` }]}
-                        />
-                      </View>
-                      <Text style={styles.progressLabel}>{Math.round(downloadProgress * 100)}%</Text>
-                    </View>
-                  )}
-
-                  <View style={styles.modelButtonRow}>
-                    <Pressable
-                      onPress={() => void handleSwitchModel(id)}
-                      disabled={isActive || downloadingModel !== null}
-                      style={({ pressed }) => [
-                        styles.primaryButton,
-                        styles.modelButtonFlex,
-                        pressed && styles.buttonPressed,
-                        (isActive || downloadingModel !== null) && styles.buttonDisabled,
-                      ]}
-                    >
-                      {isBusy ? (
-                        <ActivityIndicator color={colors.background} size="small" />
-                      ) : (
-                        <Text style={styles.primaryButtonText}>
-                          {isActive ? "Active" : isDownloaded ? `Switch to ${model.label}` : `Download & Switch (${model.sizeLabel})`}
-                        </Text>
-                      )}
-                    </Pressable>
-
-                    {isDownloaded && !isActive && (
-                      <Pressable
-                        onPress={() => handleDeleteModel(id)}
-                        disabled={downloadingModel !== null}
-                        style={({ pressed }) => [
-                          styles.dangerButton,
-                          styles.modelDeleteButton,
-                          pressed && styles.buttonPressed,
-                        ]}
-                      >
-                        <Text style={styles.dangerButtonText}>Delete</Text>
-                      </Pressable>
-                    )}
-                  </View>
-                </View>
-              );
-            })
-          )}
-        </View>
-
-        <Text style={[styles.groupLabel, styles.sectionSpacing]}>AI Chat Assistant</Text>
-        <View style={styles.card}>
-          {isLoadingChatModel ? (
-            <ActivityIndicator color={colors.textMuted} style={styles.cardLoading} />
-          ) : (
-            <>
-              <View style={styles.cardHeaderRow}>
-                <View style={styles.statusDotWrap}>
-                  <View
-                    style={[
-                      styles.statusDot,
-                      isChatModelDownloaded ? styles.statusDotConnected : styles.statusDotDisconnected,
-                    ]}
-                  />
-                </View>
-                <View style={styles.cardHeaderTextGroup}>
-                  <Text style={styles.cardTitle}>Private On-Device Assistant</Text>
-                  <Text style={styles.cardSubtitle}>
-                    {isChatModelDownloaded ? "Downloaded" : "Not downloaded"} ({LLAMA_MODEL_SIZE_LABEL})
-                  </Text>
-                </View>
-              </View>
-
-              <Text style={styles.cardDescription}>
-                Answers questions about your voice notes 100% offline and privately — nothing you
-                ask is ever sent anywhere.
-              </Text>
-
-              {isDownloadingChatModel && (
-                <View style={styles.progressWrap}>
-                  <View style={styles.progressTrack}>
-                    <View
-                      style={[styles.progressFill, { width: `${Math.round(chatModelDownloadProgress * 100)}%` }]}
-                    />
-                  </View>
-                  <Text style={styles.progressLabel}>{Math.round(chatModelDownloadProgress * 100)}%</Text>
-                </View>
-              )}
-
-              <View style={styles.modelButtonRow}>
-                <Pressable
-                  onPress={() => void handleDownloadChatModel()}
-                  disabled={isChatModelDownloaded || isDownloadingChatModel}
-                  style={({ pressed }) => [
-                    styles.primaryButton,
-                    styles.modelButtonFlex,
-                    pressed && styles.buttonPressed,
-                    (isChatModelDownloaded || isDownloadingChatModel) && styles.buttonDisabled,
-                  ]}
-                >
-                  {isDownloadingChatModel ? (
-                    <ActivityIndicator color={colors.background} size="small" />
-                  ) : (
-                    <Text style={styles.primaryButtonText}>
-                      {isChatModelDownloaded ? "Downloaded" : `Download (${LLAMA_MODEL_SIZE_LABEL})`}
-                    </Text>
-                  )}
-                </Pressable>
-
-                {isChatModelDownloaded && (
-                  <Pressable
-                    onPress={handleDeleteChatModel}
-                    disabled={isDownloadingChatModel}
-                    style={({ pressed }) => [
-                      styles.dangerButton,
-                      styles.modelDeleteButton,
-                      pressed && styles.buttonPressed,
-                    ]}
-                  >
-                    <Text style={styles.dangerButtonText}>Delete</Text>
-                  </Pressable>
-                )}
-              </View>
-            </>
-          )}
-        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -705,12 +404,6 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 13,
     marginTop: 2,
-  },
-  cardDescription: {
-    color: colors.textSecondary,
-    fontSize: 13,
-    lineHeight: 18,
-    marginTop: spacing.sm,
   },
   cardLoading: {
     marginTop: spacing.lg,
@@ -808,26 +501,6 @@ const styles = StyleSheet.create({
   sectionSpacing: {
     marginTop: spacing.xl,
   },
-  progressWrap: {
-    marginTop: spacing.md,
-  },
-  progressTrack: {
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.surfaceElevated,
-    overflow: "hidden",
-  },
-  progressFill: {
-    height: "100%",
-    backgroundColor: colors.accent,
-    borderRadius: 3,
-  },
-  progressLabel: {
-    color: colors.textMuted,
-    ...typography.caption,
-    marginTop: spacing.xs,
-    textAlign: "right",
-  },
   modelButtonRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -837,9 +510,5 @@ const styles = StyleSheet.create({
   modelButtonFlex: {
     flex: 1,
     marginTop: 0,
-  },
-  modelDeleteButton: {
-    marginTop: 0,
-    paddingHorizontal: spacing.base,
   },
 });

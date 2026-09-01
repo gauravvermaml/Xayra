@@ -11,13 +11,9 @@ export type NoteCardProps = {
   createdAt?: number;
   /** Reciprocal-rank-fusion score from hybrid search (higher = better); omitted for the plain notes list. */
   score?: number;
-  /** Which local Whisper engine ("base" | "tiny") transcribed this note, if any. */
-  transcriptionModel?: string | null;
   /** Opens the full note detail (transcript, timestamp, audio, delete) — omit to disable tap-to-open. */
   onPress?: () => void;
   onDelete: () => void;
-  /** Called when the "switch engine" nudge on a Tiny-transcribed note is tapped. */
-  onSwitchEngine?: () => void;
 };
 
 function formatTimestamp(createdAtUnixSeconds: number): string {
@@ -35,10 +31,8 @@ export function NoteCard({
   audioUri,
   createdAt,
   score,
-  transcriptionModel,
   onPress,
   onDelete,
-  onSwitchEngine,
 }: NoteCardProps) {
   return (
     <Pressable
@@ -76,15 +70,6 @@ export function NoteCard({
       )}
 
       {!!audioUri && <AudioPlayerControls audioUri={audioUri} compact style={styles.player} />}
-
-      {transcriptionModel === "tiny" && (
-        <Pressable onPress={onSwitchEngine} disabled={!onSwitchEngine} hitSlop={6} style={styles.engineChip}>
-          <Text style={styles.engineChipIcon}>⚡</Text>
-          <Text style={styles.engineChipText}>
-            Transcribed with Fast Engine • Tap to change in Settings
-          </Text>
-        </Pressable>
-      )}
 
       {/* A quiet, always-present affordance for the long-press-to-copy
           gesture above — not interactive itself (a real Pressable here would
@@ -166,25 +151,6 @@ const styles = StyleSheet.create({
   },
   deleteIcon: {
     fontSize: 15,
-  },
-  engineChip: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    alignSelf: "flex-start",
-    marginTop: spacing.md,
-    backgroundColor: colors.accentMuted,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.sm + 2,
-    paddingVertical: 5,
-  },
-  engineChipIcon: {
-    fontSize: 10,
-  },
-  engineChipText: {
-    color: colors.accent,
-    fontSize: 10,
-    fontWeight: "700",
   },
   copyHint: {
     position: "absolute",

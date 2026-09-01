@@ -1,15 +1,15 @@
 import * as FileSystem from "expo-file-system/legacy";
 
 export type Preferences = {
-  /** Filename-independent id ("base" | "tiny") of the Whisper model currently in use. */
-  activeWhisperModel: string | null;
-  /** Whether the user has completed (or explicitly skipped) first-launch model setup. */
-  onboardingComplete: boolean;
+  /** Set once the user explicitly taps "Download over Mobile Data" on the
+   * cellular-blocked callout (see services/ai/modelDownloadManager.ts) —
+   * persisted so that consent, once given, survives app restarts instead of
+   * asking again on every launch that happens to still be off Wi-Fi. */
+  allowCellularDownloads: boolean;
 };
 
 const DEFAULT_PREFERENCES: Preferences = {
-  activeWhisperModel: null,
-  onboardingComplete: false,
+  allowCellularDownloads: false,
 };
 
 function preferencesPath(): string {

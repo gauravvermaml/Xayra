@@ -3,24 +3,23 @@ import { initLlama, LlamaContext } from "llama.rn";
 
 import { logDuration, nowMs } from "./perf";
 
-/** Not bundled — hundreds of MB to ~2GB — same resolution pattern as
+/**
+ * Not bundled — hundreds of MB to ~2GB — same resolution pattern as
  * localWhisper.ts and localEmbeddings.ts: expected to already be sitting in
- * the document directory before generation is attempted. Priority order
- * mirrors localWhisper.ts's MODEL_FILENAMES pattern: the 3B model is
- * materially more capable (see the AirPods answer-consistency issue this
- * project hit at 1B) and is preferred whenever a device has it pushed;
- * falls back to the 1B model, which is smaller and still ships as the
- * baseline every device is expected to have. */
+ * the document directory before generation is attempted. These exact
+ * filenames (`-UD-Q4_K_XL.gguf`, unsloth's "Unsloth Dynamic" quantization)
+ * are what services/ai/modelDownloadManager.ts downloads from Cloudflare
+ * R2 — one of the two, chosen automatically per-device by RAM tier, never
+ * both. Priority order here still checks 3B before 1B on disk: on the rare
+ * device where both happen to be present (e.g. the 3B was manually pushed
+ * after the manager already fetched 1B), the strictly more capable model
+ * wins.
+ */
 export const LLAMA_MODEL_FILENAMES = [
-  { filename: "llama-3.2-3b-instruct-q4_k_m.gguf", label: "3B" },
-  { filename: "Llama-3.2-1B-Instruct-Q4_K_M.gguf", label: "1B" },
+  { filename: "Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf", label: "3B" },
+  { filename: "Llama-3.2-1B-Instruct-UD-Q4_K_XL.gguf", label: "1B" },
 ] as const;
 const MODEL_FILENAMES = LLAMA_MODEL_FILENAMES;
-
-/** The one variant offered through the managed download flow (Settings /
- * the chat-tab missing-model prompt) — the 3B model stays a manual-push,
- * power-user option since it's roughly 2GB. */
-export const LLAMA_MANAGED_MODEL_FILENAME = "Llama-3.2-1B-Instruct-Q4_K_M.gguf";
 
 /** Missing-model errors are matched against this exact prefix by
  * app/chat.tsx to distinguish "no model downloaded yet" (show a graceful
@@ -232,8 +231,8 @@ async function resolveModelPath(): Promise<ResolvedModel> {
   }
 
   throw new Error(
-    `${LLAMA_MODEL_MISSING_ERROR_PREFIX} Place ${MODEL_FILENAMES.map((m) => m.filename).join(" or ")} ` +
-      `in ${dir} before generating an answer, or download one from Settings > Chat Model.`
+    `${LLAMA_MODEL_MISSING_ERROR_PREFIX} Xayra downloads this automatically in the background over ` +
+      "Wi-Fi shortly after first launch — see app/chat.tsx's model-download status bar/callout."
   );
 }
 

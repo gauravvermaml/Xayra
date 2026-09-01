@@ -13,8 +13,11 @@ export type Note = {
   audioUri: string | null;
   transcript: string | null;
   status: NoteStatus;
-  /** Which local Whisper engine ("base" | "tiny") transcribed this note —
-   * null for text notes or notes transcribed by the native speech recognizer. */
+  /** "base" if the local Whisper engine transcribed this note — null for
+   * text notes or notes transcribed by the native speech recognizer. There's
+   * only ever been the one local engine since the Base/Tiny choice was
+   * retired (see services/ai/whisperModels.ts); kept as a field rather than
+   * removed since it's still meaningful, persisted note metadata. */
   transcriptionModel: string | null;
   createdAt: number;
 };
