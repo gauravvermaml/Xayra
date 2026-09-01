@@ -14,7 +14,9 @@ import { MODEL_CDN_BASE_URL } from "./modelCdn";
  */
 export type WhisperModelId = "base";
 
-const WHISPER_BASE_FILENAME = "ggml-base.en.bin";
+/** Exported so modelDownloadManager.ts can build the Worker CDN URL for its
+ * own chunked-range downloader without duplicating this literal string. */
+export const WHISPER_BASE_FILENAME = "ggml-base.en.bin";
 
 /**
  * Routed through the same Cloudflare Worker CDN proxy as the Llama chat

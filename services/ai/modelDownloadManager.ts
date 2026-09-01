@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import * as Device from "expo-device";
+import { File, FileMode } from "expo-file-system";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Network from "expo-network";
 
@@ -7,7 +8,7 @@ import { downloadEmbeddingAssets, isEmbeddingModelDownloaded } from "./embedding
 import { LLAMA_MODEL_FILENAMES } from "./localLlama";
 import { resetWhisperContext } from "./localWhisper";
 import { MODEL_CDN_BASE_URL } from "./modelCdn";
-import { downloadWhisperModel, isWhisperModelDownloaded } from "./whisperModels";
+import { getWhisperModelPath, isWhisperModelDownloaded, WHISPER_BASE_FILENAME } from "./whisperModels";
 import { readPreferences, writePreferences } from "../settings/preferences";
 
 /**
@@ -113,37 +114,116 @@ async function isChatModelDownloaded(filename: string): Promise<boolean> {
 
 type PhaseProgressCallback = (fraction: number, bytesWritten: number, bytesTotal: number) => void;
 
-/** Same atomic-download pattern used by whisperModels.ts/embeddingModel.ts:
- * download to a `.download` sibling, only move it into place on success. */
-async function downloadChatModel(filename: string, onProgress: PhaseProgressCallback): Promise<void> {
-  const dest = chatModelPath(filename);
-  const tmpDest = `${dest}.download`;
+// ---- Explicit 50MB chunked range downloader --------------------------------
+//
+// Whisper and the Llama chat model (the two large, Worker-CDN-hosted assets —
+// the embedding model stays on its existing single-stream download from
+// Hugging Face; see embeddingModel.ts) are fetched as sequential 50MB
+// `Range`-header requests rather than one long-lived streamed connection.
+// Samsung/Android's Doze mode can suspend the app's network access mid-download
+// on a multi-hundred-MB transfer; killing a single 50MB chunk costs at most
+// that chunk's retry, not the whole file. Each chunk is buffered fully in
+// memory before a single `writeBytes` call, so a crash or kill mid-chunk never
+// leaves a torn write — the partial `.download` file's on-disk size is always
+// a clean resume point, both for the in-process retry loop below and for a
+// user tapping "Resume Setup" after retries are exhausted (see chat.tsx).
 
-  const resumable = FileSystem.createDownloadResumable(
-    `${MODEL_CDN_BASE_URL}/${filename}`,
-    tmpDest,
-    {},
-    (progress) => {
-      if (progress.totalBytesExpectedToWrite > 0) {
-        onProgress(
-          progress.totalBytesWritten / progress.totalBytesExpectedToWrite,
-          progress.totalBytesWritten,
-          progress.totalBytesExpectedToWrite
-        );
+const CHUNK_SIZE_BYTES = 50 * 1024 * 1024;
+const MAX_CHUNK_RETRIES = 3;
+
+/** Fetches one Range-header chunk and appends it to `file`, retrying the
+ * *same* chunk (never skipping ahead) up to MAX_CHUNK_RETRIES times on any
+ * failure — a dropped socket ("Software caused connection abort", ECONNRESET)
+ * is exactly the transient failure this exists to absorb. Throws only after
+ * every retry for this one chunk has failed. */
+async function fetchAndAppendChunk(
+  url: string,
+  file: File,
+  startByte: number,
+  chunkSize: number
+): Promise<{ bytesWritten: number; totalBytes: number | null }> {
+  let lastError: unknown = new Error("Chunk download failed for an unknown reason.");
+  for (let attempt = 1; attempt <= MAX_CHUNK_RETRIES; attempt++) {
+    try {
+      const endByte = startByte + chunkSize - 1;
+      const response = await fetch(url, { headers: { Range: `bytes=${startByte}-${endByte}` } });
+      if (!response.ok) {
+        throw new Error(`Chunk download failed (HTTP ${response.status}).`);
       }
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      if (bytes.byteLength > 0) {
+        const handle = file.open(FileMode.Append);
+        try {
+          handle.writeBytes(bytes);
+        } finally {
+          handle.close();
+        }
+      }
+      const contentRange = response.headers.get("content-range"); // "bytes 0-52428799/834203680"
+      const parsedTotal = contentRange ? Number(contentRange.split("/")[1]) : NaN;
+      return {
+        bytesWritten: bytes.byteLength,
+        totalBytes: Number.isFinite(parsedTotal) ? parsedTotal : null,
+      };
+    } catch (err) {
+      lastError = err;
+      // Loop retries this exact chunk (same startByte/chunkSize) — nothing
+      // to clean up between attempts since a failure here never reaches the
+      // writeBytes call, or fails inside it before any bytes are appended.
     }
-  );
-
-  try {
-    const result = await resumable.downloadAsync();
-    if (!result || result.status !== 200) {
-      throw new Error(`Chat model download failed (HTTP ${result?.status ?? "unknown"}).`);
-    }
-    await FileSystem.moveAsync({ from: tmpDest, to: dest });
-  } catch (err) {
-    await FileSystem.deleteAsync(tmpDest, { idempotent: true });
-    throw err instanceof Error ? err : new Error(String(err));
   }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+/**
+ * Downloads `url` into `dest` via sequential 50MB Range requests, resuming
+ * automatically from wherever a previous attempt's `.download` sibling left
+ * off (including across app restarts — there's no separate progress sidecar
+ * file to go stale, the partial file's byte size on disk *is* the resume
+ * point). Moves the completed `.download` file into place only once every
+ * byte has landed, so `dest` never briefly exists as a truncated file.
+ */
+async function downloadFileChunked(url: string, dest: string, onProgress: PhaseProgressCallback): Promise<void> {
+  const tmpDest = `${dest}.download`;
+  const partial = new File(tmpDest);
+  if (!partial.exists) {
+    partial.create({ intermediates: true });
+  }
+
+  let writtenBytes = partial.size ?? 0;
+  let totalBytes: number | null = null;
+
+  while (totalBytes === null || writtenBytes < totalBytes) {
+    const remaining = totalBytes !== null ? totalBytes - writtenBytes : CHUNK_SIZE_BYTES;
+    const chunkSize = Math.min(CHUNK_SIZE_BYTES, remaining);
+    if (chunkSize <= 0) {
+      break;
+    }
+
+    const result = await fetchAndAppendChunk(url, partial, writtenBytes, chunkSize);
+    writtenBytes += result.bytesWritten;
+    if (result.totalBytes !== null) {
+      totalBytes = result.totalBytes;
+    }
+    onProgress(totalBytes ? writtenBytes / totalBytes : 0, writtenBytes, totalBytes ?? 0);
+
+    if (result.bytesWritten < chunkSize) {
+      // Short read: the server had fewer bytes left than we asked for, i.e.
+      // this was the last chunk — true whether or not a Content-Range total
+      // was ever parsed out.
+      totalBytes = writtenBytes;
+      break;
+    }
+  }
+
+  await FileSystem.moveAsync({ from: tmpDest, to: dest });
+}
+
+/** Same atomic-download pattern used elsewhere in this file: the chunked
+ * downloader writes into a `.download` sibling and only `downloadFileChunked`
+ * moves it into place once every chunk has landed. */
+async function downloadChatModel(filename: string, onProgress: PhaseProgressCallback): Promise<void> {
+  await downloadFileChunked(`${MODEL_CDN_BASE_URL}/${filename}`, chatModelPath(filename), onProgress);
 }
 
 type Listener = (status: ModelDownloadStatus) => void;
@@ -364,8 +444,10 @@ async function beginDownloads(tier: LlamaTier): Promise<void> {
 
   try {
     if (!whisperDone) {
-      await downloadWhisperModel((fraction, bytesWritten, bytesTotal) =>
-        onPhaseProgress("whisper", fraction, bytesWritten, bytesTotal)
+      await downloadFileChunked(
+        `${MODEL_CDN_BASE_URL}/${WHISPER_BASE_FILENAME}`,
+        getWhisperModelPath(),
+        (fraction, bytesWritten, bytesTotal) => onPhaseProgress("whisper", fraction, bytesWritten, bytesTotal)
       );
       resetWhisperContext();
       phaseCompleted.add("whisper");
@@ -396,6 +478,18 @@ async function beginDownloads(tier: LlamaTier): Promise<void> {
 export async function allowCellularDownloadAndResume(): Promise<void> {
   await writePreferences({ allowCellularDownloads: true });
   stopWatchingForWifi();
+  await beginDownloads(resolveLlamaTier());
+}
+
+/**
+ * Retries setup after a `status: "error"` (e.g. a chunk exhausted all
+ * MAX_CHUNK_RETRIES attempts). Safe to call any time — `beginDownloads`
+ * always re-checks which phases are already complete, and the chunked
+ * downloader itself resumes each still-incomplete phase from its partial
+ * `.download` file's on-disk size, so this never re-fetches bytes that
+ * already landed. Wired to the "Resume Setup" button in chat.tsx.
+ */
+export async function resumeDownloads(): Promise<void> {
   await beginDownloads(resolveLlamaTier());
 }
 

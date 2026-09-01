@@ -16,6 +16,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import * as Crypto from "expo-crypto";
+import { useKeepAwake } from "expo-keep-awake";
 
 import { ActiveModePill } from "../components/ActiveModePill";
 import { CentralMicButton } from "../components/CentralMicButton";
@@ -25,13 +26,24 @@ import { ViewToggle } from "../components/ViewToggle";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { asrRouter } from "../services/ai/asrRouter";
 import { LLAMA_MODEL_MISSING_ERROR_PREFIX } from "../services/ai/localLlama";
-import { allowCellularDownloadAndResume, useModelDownload } from "../services/ai/modelDownloadManager";
+import { allowCellularDownloadAndResume, resumeDownloads, useModelDownload } from "../services/ai/modelDownloadManager";
 import { generateRAGAnswer, type RagCitation } from "../services/ai/rag";
 import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakText, speakTextAndWait, stopSpeech } from "../services/audio/tts";
 import { isSilentTranscript } from "../services/notes/noteManager";
 import { copyTextWithFeedback } from "../utils/clipboard";
+
+/** Mounted only while `modelDownload.status === "downloading"` (see below) so
+ * the screen stays awake exactly while a chunked model download is in
+ * flight — Android's Doze mode suspending network sockets on a screen-off,
+ * idle device is the #1 cause of a multi-hundred-MB background download
+ * stalling out partway through. Unmounting (setup finishes, or the user
+ * navigates away) releases the wake lock automatically. */
+function KeepAwakeDuringModelSetup(): null {
+  useKeepAwake("xayra-model-setup");
+  return null;
+}
 
 /** Blinking "▋" cursor shown at the end of a message still streaming in
  * from local Llama — a quiet visual cue that generation is live, not stalled. */
@@ -113,6 +125,15 @@ export default function ChatScreen() {
   const handleAllowCellularDownload = useCallback(() => {
     void allowCellularDownloadAndResume().catch((err) => {
       Alert.alert("Download Failed", err instanceof Error ? err.message : "Failed to start the download.");
+    });
+  }, []);
+
+  // Resumes from wherever the failed phase's partial `.download` file left
+  // off (see modelDownloadManager.ts's chunked downloader) rather than
+  // restarting the whole multi-hundred-MB setup from zero.
+  const handleResumeSetup = useCallback(() => {
+    void resumeDownloads().catch((err) => {
+      Alert.alert("Resume Failed", err instanceof Error ? err.message : "Failed to resume the download.");
     });
   }, []);
 
@@ -550,6 +571,8 @@ export default function ChatScreen() {
             </View>
           )}
 
+          {modelDownload.status === "downloading" && <KeepAwakeDuringModelSetup />}
+
           {modelDownload.status === "downloading" && (
             <View style={styles.setupStatusBar}>
               <View style={styles.setupStatusTrack}>
@@ -587,6 +610,9 @@ export default function ChatScreen() {
               <Text style={styles.chatModelPromptBody}>
                 {modelDownload.error ?? "Something went wrong downloading Xayra's on-device models."}
               </Text>
+              <Pressable onPress={handleResumeSetup} style={styles.chatModelDownloadButton}>
+                <Text style={styles.chatModelDownloadButtonText}>Resume Setup</Text>
+              </Pressable>
             </View>
           )}
 
