@@ -128,10 +128,12 @@ export default function ChatScreen() {
     });
   }, []);
 
-  // Resumes from wherever the failed phase's partial `.download` file left
-  // off (see modelDownloadManager.ts's chunked downloader) rather than
-  // restarting the whole multi-hundred-MB setup from zero.
-  const handleResumeSetup = useCallback(() => {
+  // Resumes from wherever the failed/paused phase's partial `.download` file
+  // left off (see modelDownloadManager.ts's chunked downloader) rather than
+  // restarting the whole multi-hundred-MB setup from zero. Same handler for
+  // both "error" (manual retry) and "paused_offline" (which also resumes
+  // automatically on reconnect — this button just lets the user force it).
+  const handleResumeDownload = useCallback(() => {
     void resumeDownloads().catch((err) => {
       Alert.alert("Resume Failed", err instanceof Error ? err.message : "Failed to resume the download.");
     });
@@ -604,14 +606,16 @@ export default function ChatScreen() {
             </View>
           )}
 
-          {modelDownload.status === "error" && (
+          {(modelDownload.status === "error" || modelDownload.status === "paused_offline") && (
             <View style={styles.chatModelPrompt}>
-              <Text style={styles.chatModelPromptTitle}>Setup failed</Text>
-              <Text style={styles.chatModelPromptBody}>
-                {modelDownload.error ?? "Something went wrong downloading Xayra's on-device models."}
+              <Text style={styles.chatModelPromptTitle}>
+                {modelDownload.status === "paused_offline" ? "Download Paused" : "Setup Interrupted"}
               </Text>
-              <Pressable onPress={handleResumeSetup} style={styles.chatModelDownloadButton}>
-                <Text style={styles.chatModelDownloadButtonText}>Resume Setup</Text>
+              <Text style={styles.chatModelPromptBody}>
+                {modelDownload.downloadedMB} MB of {modelDownload.totalMB} MB saved on disk.
+              </Text>
+              <Pressable onPress={handleResumeDownload} style={styles.chatModelDownloadButton}>
+                <Text style={styles.chatModelDownloadButtonText}>Resume Download</Text>
               </Pressable>
             </View>
           )}

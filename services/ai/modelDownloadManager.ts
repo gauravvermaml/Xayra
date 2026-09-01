@@ -47,7 +47,19 @@ const LLAMA_3B_APPROX_BYTES = 2_060_886_464;
 
 const BYTES_PER_MB = 1024 * 1024;
 
-export type ModelDownloadState = "idle" | "downloading" | "ready" | "error" | "cellular_blocked";
+export type ModelDownloadState =
+  | "idle"
+  | "downloading"
+  | "ready"
+  | "error"
+  | "cellular_blocked"
+  /** A chunk failed because the device itself went offline (Airplane mode,
+   * a Wi-Fi drop) rather than a genuine download error — distinct from
+   * "error" so the UI can say "paused, we'll resume automatically" instead
+   * of implying something actually went wrong. Every completed 50MB chunk
+   * stays on disk; `watchForReconnectThenResume` below fires `resumeDownloads()`
+   * the moment connectivity returns, with no user action required. */
+  | "paused_offline";
 
 export type ModelDownloadStatus = {
   status: ModelDownloadState;
@@ -131,11 +143,27 @@ type PhaseProgressCallback = (fraction: number, bytesWritten: number, bytesTotal
 const CHUNK_SIZE_BYTES = 50 * 1024 * 1024;
 const MAX_CHUNK_RETRIES = 3;
 
+/** Thrown instead of a generic error when a chunk fails *because the device
+ * is offline* (Airplane mode, a Wi-Fi drop mid-download) — signals
+ * `beginDownloads` to pause quietly (`status: "paused_offline"`) and wait
+ * for connectivity rather than surfacing it as a download error, and to skip
+ * burning the remaining per-chunk retries against a network that isn't
+ * coming back on its own in the next few seconds. */
+class OfflineDownloadError extends Error {
+  constructor() {
+    super("Lost network connection.");
+    this.name = "OfflineDownloadError";
+  }
+}
+
 /** Fetches one Range-header chunk and appends it to `file`, retrying the
  * *same* chunk (never skipping ahead) up to MAX_CHUNK_RETRIES times on any
  * failure — a dropped socket ("Software caused connection abort", ECONNRESET)
  * is exactly the transient failure this exists to absorb. Throws only after
- * every retry for this one chunk has failed. */
+ * every retry for this one chunk has failed, EXCEPT when the device itself
+ * has gone offline: that's detected right after the first failure and thrown
+ * immediately as `OfflineDownloadError`, rather than spending the remaining
+ * retries hammering a dead connection. */
 async function fetchAndAppendChunk(
   url: string,
   file: File,
@@ -170,6 +198,10 @@ async function fetchAndAppendChunk(
       // Loop retries this exact chunk (same startByte/chunkSize) — nothing
       // to clean up between attempts since a failure here never reaches the
       // writeBytes call, or fails inside it before any bytes are appended.
+      const netState = await Network.getNetworkStateAsync();
+      if (netState.isConnected === false || netState.isInternetReachable === false) {
+        throw new OfflineDownloadError();
+      }
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -418,7 +450,33 @@ function watchForWifiThenResume(tier: LlamaTier): void {
   });
 }
 
+let reconnectSubscription: { remove: () => void } | null = null;
+
+function stopWatchingForReconnect(): void {
+  reconnectSubscription?.remove();
+  reconnectSubscription = null;
+}
+
+/** Fires while `status === "paused_offline"`: the moment the device reports
+ * both `isConnected` and `isInternetReachable` again — any network type, not
+ * just Wi-Fi, since a download that was already in flight was already
+ * running under whatever consent (Wi-Fi, or an already-approved cellular
+ * session) got it started — `resumeDownloads()` picks the still-incomplete
+ * phase back up from its last completed 50MB chunk on disk. No user action
+ * required, matching Airplane-mode-off recovering silently. */
+function watchForReconnectThenResume(tier: LlamaTier): void {
+  stopWatchingForReconnect();
+  reconnectSubscription = Network.addNetworkStateListener((event) => {
+    if (event.isConnected === true && event.isInternetReachable === true) {
+      stopWatchingForReconnect();
+      void beginDownloads(tier);
+    }
+  });
+}
+
 async function beginDownloads(tier: LlamaTier): Promise<void> {
+  stopWatchingForReconnect();
+
   const [whisperDone, embeddingDone, llamaDone] = await Promise.all([
     isWhisperModelDownloaded(),
     isEmbeddingModelDownloaded(),
@@ -471,6 +529,14 @@ async function beginDownloads(tier: LlamaTier): Promise<void> {
     updateTelemetry(totalBytes, totalBytes);
     setStatus({ status: "ready", progressPercent: 100, error: null });
   } catch (err) {
+    if (err instanceof OfflineDownloadError) {
+      // Every completed 50MB chunk is already safely on disk (see
+      // downloadFileChunked) — nothing to roll back, just wait for the
+      // network and pick up from there.
+      setStatus({ status: "paused_offline", error: null });
+      watchForReconnectThenResume(tier);
+      return;
+    }
     setStatus({ status: "error", error: err instanceof Error ? err.message : String(err) });
   }
 }
