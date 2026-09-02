@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import * as Device from "expo-device";
-import { File, FileMode } from "expo-file-system";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Network from "expo-network";
 
@@ -53,11 +52,12 @@ export type ModelDownloadState =
   | "ready"
   | "error"
   | "cellular_blocked"
-  /** A chunk failed because the device itself went offline (Airplane mode,
-   * a Wi-Fi drop) rather than a genuine download error — distinct from
-   * "error" so the UI can say "paused, we'll resume automatically" instead
-   * of implying something actually went wrong. Every completed 50MB chunk
-   * stays on disk; `watchForReconnectThenResume` below fires `resumeDownloads()`
+  /** The native download failed because the device itself went offline
+   * (Airplane mode, a Wi-Fi drop) rather than a genuine download error —
+   * distinct from "error" so the UI can say "paused, we'll resume
+   * automatically" instead of implying something actually went wrong. Every
+   * byte streamed to disk so far is preserved (native `pauseAsync()`, not a
+   * crash) and `watchForReconnectThenResume` below fires `resumeDownloads()`
    * the moment connectivity returns, with no user action required. */
   | "paused_offline";
 
@@ -126,29 +126,39 @@ async function isChatModelDownloaded(filename: string): Promise<boolean> {
 
 type PhaseProgressCallback = (fraction: number, bytesWritten: number, bytesTotal: number) => void;
 
-// ---- Explicit 50MB chunked range downloader --------------------------------
+// ---- Zero-heap native direct-to-disk streaming -----------------------------
 //
 // Whisper and the Llama chat model (the two large, Worker-CDN-hosted assets —
 // the embedding model stays on its existing single-stream download from
-// Hugging Face; see embeddingModel.ts) are fetched as sequential 50MB
-// `Range`-header requests rather than one long-lived streamed connection.
-// Samsung/Android's Doze mode can suspend the app's network access mid-download
-// on a multi-hundred-MB transfer; killing a single 50MB chunk costs at most
-// that chunk's retry, not the whole file. Each chunk is buffered fully in
-// memory before a single `writeBytes` call, so a crash or kill mid-chunk never
-// leaves a torn write — the partial `.download` file's on-disk size is always
-// a clean resume point, both for the in-process retry loop below and for a
-// user tapping "Resume Setup" after retries are exhausted (see chat.tsx).
+// Hugging Face; see embeddingModel.ts) stream straight from the network
+// socket to disk via expo-file-system's *native* `DownloadResumable` —
+// deliberately NOT hand-rolled JS-level chunking: an earlier version of this
+// file fetched 50MB `Range` requests and buffered each one as a JS
+// `Uint8Array`/`ArrayBuffer` before writing it out, which put up to 50MB of
+// raw model bytes on the JS heap at a time and was a real OOM risk on a
+// memory-constrained device (the Galaxy A50 this project targets is 4GB,
+// already shared with Llama's own multi-hundred-MB native allocation). The
+// native downloader never surfaces the bytes to JS at all — this layer only
+// ever sees the periodic `{ totalBytesWritten, totalBytesExpectedToWrite }`
+// progress callback, which is all `onPhaseProgress`/`updateTelemetry` need.
 
-const CHUNK_SIZE_BYTES = 50 * 1024 * 1024;
-const MAX_CHUNK_RETRIES = 3;
+/** Kept per in-flight phase (whisper or llama) so a network drop can be
+ * resumed with the SAME native `DownloadResumable` instance via
+ * `resumeAsync()` — true byte-exact native resume, no JS-side byte tracking —
+ * rather than restarting the phase's destination file from zero. Cleared the
+ * moment the phase either completes or fails for a reason other than being
+ * offline. */
+type PausablePhaseHandle = { resumable: FileSystem.DownloadResumable; tmpDest: string; dest: string };
+let activePhaseHandle: PausablePhaseHandle | null = null;
+let pausedPhaseHandle: PausablePhaseHandle | null = null;
 
-/** Thrown instead of a generic error when a chunk fails *because the device
- * is offline* (Airplane mode, a Wi-Fi drop mid-download) — signals
- * `beginDownloads` to pause quietly (`status: "paused_offline"`) and wait
- * for connectivity rather than surfacing it as a download error, and to skip
- * burning the remaining per-chunk retries against a network that isn't
- * coming back on its own in the next few seconds. */
+/** Thrown instead of a generic error when a native download fails *because
+ * the device is offline* (Airplane mode, a Wi-Fi drop mid-stream) — signals
+ * `beginDownloads` to pause quietly (`status: "paused_offline"`) rather than
+ * surfacing it as a download error. The in-flight `DownloadResumable` is
+ * paused (native `pauseAsync()`, so the OS-level download task itself stops
+ * cleanly) and retained in `pausedPhaseHandle` for a true native resume once
+ * connectivity returns. */
 class OfflineDownloadError extends Error {
   constructor() {
     super("Lost network connection.");
@@ -156,106 +166,65 @@ class OfflineDownloadError extends Error {
   }
 }
 
-/** Fetches one Range-header chunk and appends it to `file`, retrying the
- * *same* chunk (never skipping ahead) up to MAX_CHUNK_RETRIES times on any
- * failure — a dropped socket ("Software caused connection abort", ECONNRESET)
- * is exactly the transient failure this exists to absorb. Throws only after
- * every retry for this one chunk has failed, EXCEPT when the device itself
- * has gone offline: that's detected right after the first failure and thrown
- * immediately as `OfflineDownloadError`, rather than spending the remaining
- * retries hammering a dead connection. */
-async function fetchAndAppendChunk(
-  url: string,
-  file: File,
-  startByte: number,
-  chunkSize: number
-): Promise<{ bytesWritten: number; totalBytes: number | null }> {
-  let lastError: unknown = new Error("Chunk download failed for an unknown reason.");
-  for (let attempt = 1; attempt <= MAX_CHUNK_RETRIES; attempt++) {
-    try {
-      const endByte = startByte + chunkSize - 1;
-      const response = await fetch(url, { headers: { Range: `bytes=${startByte}-${endByte}` } });
-      if (!response.ok) {
-        throw new Error(`Chunk download failed (HTTP ${response.status}).`);
-      }
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      if (bytes.byteLength > 0) {
-        const handle = file.open(FileMode.Append);
-        try {
-          handle.writeBytes(bytes);
-        } finally {
-          handle.close();
-        }
-      }
-      const contentRange = response.headers.get("content-range"); // "bytes 0-52428799/834203680"
-      const parsedTotal = contentRange ? Number(contentRange.split("/")[1]) : NaN;
-      return {
-        bytesWritten: bytes.byteLength,
-        totalBytes: Number.isFinite(parsedTotal) ? parsedTotal : null,
-      };
-    } catch (err) {
-      lastError = err;
-      // Loop retries this exact chunk (same startByte/chunkSize) — nothing
-      // to clean up between attempts since a failure here never reaches the
-      // writeBytes call, or fails inside it before any bytes are appended.
-      const netState = await Network.getNetworkStateAsync();
-      if (netState.isConnected === false || netState.isInternetReachable === false) {
-        throw new OfflineDownloadError();
-      }
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error(String(lastError));
-}
-
 /**
- * Downloads `url` into `dest` via sequential 50MB Range requests, resuming
- * automatically from wherever a previous attempt's `.download` sibling left
- * off (including across app restarts — there's no separate progress sidecar
- * file to go stale, the partial file's byte size on disk *is* the resume
- * point). Moves the completed `.download` file into place only once every
- * byte has landed, so `dest` never briefly exists as a truncated file.
+ * Streams `url` directly to `dest` using expo-file-system's native resumable
+ * downloader — the JS layer only observes progress, never touches a byte.
+ * Resumes a phase that was previously paused for being offline (same `dest`)
+ * via native `resumeAsync()`; otherwise starts a fresh `downloadAsync()`.
+ * Moves the `.download` sibling into place only once the native download
+ * reports success, so `dest` never briefly exists as a truncated file.
  */
-async function downloadFileChunked(url: string, dest: string, onProgress: PhaseProgressCallback): Promise<void> {
+async function downloadFileNative(url: string, dest: string, onProgress: PhaseProgressCallback): Promise<void> {
   const tmpDest = `${dest}.download`;
-  const partial = new File(tmpDest);
-  if (!partial.exists) {
-    partial.create({ intermediates: true });
+
+  let resumable: FileSystem.DownloadResumable;
+  let isResuming = false;
+  if (pausedPhaseHandle && pausedPhaseHandle.dest === dest) {
+    resumable = pausedPhaseHandle.resumable;
+    isResuming = true;
+    pausedPhaseHandle = null;
+  } else {
+    resumable = FileSystem.createDownloadResumable(url, tmpDest, {}, (progress) => {
+      if (progress.totalBytesExpectedToWrite > 0) {
+        onProgress(
+          progress.totalBytesWritten / progress.totalBytesExpectedToWrite,
+          progress.totalBytesWritten,
+          progress.totalBytesExpectedToWrite
+        );
+      }
+    });
   }
 
-  let writtenBytes = partial.size ?? 0;
-  let totalBytes: number | null = null;
+  activePhaseHandle = { resumable, tmpDest, dest };
 
-  while (totalBytes === null || writtenBytes < totalBytes) {
-    const remaining = totalBytes !== null ? totalBytes - writtenBytes : CHUNK_SIZE_BYTES;
-    const chunkSize = Math.min(CHUNK_SIZE_BYTES, remaining);
-    if (chunkSize <= 0) {
-      break;
+  try {
+    const result = isResuming ? await resumable.resumeAsync() : await resumable.downloadAsync();
+    if (!result || (result.status !== 200 && result.status !== 206)) {
+      throw new Error(`Download failed (HTTP ${result?.status ?? "unknown"}).`);
     }
-
-    const result = await fetchAndAppendChunk(url, partial, writtenBytes, chunkSize);
-    writtenBytes += result.bytesWritten;
-    if (result.totalBytes !== null) {
-      totalBytes = result.totalBytes;
+    await FileSystem.moveAsync({ from: tmpDest, to: dest });
+    activePhaseHandle = null;
+  } catch (err) {
+    const netState = await Network.getNetworkStateAsync();
+    const isOffline = netState.isConnected === false || netState.isInternetReachable === false;
+    if (isOffline) {
+      // Best-effort: pauseAsync can itself throw if the native task already
+      // stopped on its own when the socket dropped — either way, the partial
+      // `.download` file and the resumable's internal resume data survive,
+      // which is all resumeAsync() on the next attempt actually needs.
+      await resumable.pauseAsync().catch(() => {});
+      pausedPhaseHandle = activePhaseHandle;
+      activePhaseHandle = null;
+      throw new OfflineDownloadError();
     }
-    onProgress(totalBytes ? writtenBytes / totalBytes : 0, writtenBytes, totalBytes ?? 0);
-
-    if (result.bytesWritten < chunkSize) {
-      // Short read: the server had fewer bytes left than we asked for, i.e.
-      // this was the last chunk — true whether or not a Content-Range total
-      // was ever parsed out.
-      totalBytes = writtenBytes;
-      break;
-    }
+    activePhaseHandle = null;
+    await FileSystem.deleteAsync(tmpDest, { idempotent: true });
+    throw err instanceof Error ? err : new Error(String(err));
   }
-
-  await FileSystem.moveAsync({ from: tmpDest, to: dest });
 }
 
-/** Same atomic-download pattern used elsewhere in this file: the chunked
- * downloader writes into a `.download` sibling and only `downloadFileChunked`
- * moves it into place once every chunk has landed. */
 async function downloadChatModel(filename: string, onProgress: PhaseProgressCallback): Promise<void> {
-  await downloadFileChunked(`${MODEL_CDN_BASE_URL}/${filename}`, chatModelPath(filename), onProgress);
+  await downloadFileNative(`${MODEL_CDN_BASE_URL}/${filename}`, chatModelPath(filename), onProgress);
 }
 
 type Listener = (status: ModelDownloadStatus) => void;
@@ -461,9 +430,10 @@ function stopWatchingForReconnect(): void {
  * both `isConnected` and `isInternetReachable` again — any network type, not
  * just Wi-Fi, since a download that was already in flight was already
  * running under whatever consent (Wi-Fi, or an already-approved cellular
- * session) got it started — `resumeDownloads()` picks the still-incomplete
- * phase back up from its last completed 50MB chunk on disk. No user action
- * required, matching Airplane-mode-off recovering silently. */
+ * session) got it started — `resumeDownloads()` re-enters `beginDownloads`,
+ * which resumes the paused phase's native `DownloadResumable` exactly where
+ * it left off (see `downloadFileNative`'s `pausedPhaseHandle` handoff). No
+ * user action required, matching Airplane-mode-off recovering silently. */
 function watchForReconnectThenResume(tier: LlamaTier): void {
   stopWatchingForReconnect();
   reconnectSubscription = Network.addNetworkStateListener((event) => {
@@ -502,7 +472,7 @@ async function beginDownloads(tier: LlamaTier): Promise<void> {
 
   try {
     if (!whisperDone) {
-      await downloadFileChunked(
+      await downloadFileNative(
         `${MODEL_CDN_BASE_URL}/${WHISPER_BASE_FILENAME}`,
         getWhisperModelPath(),
         (fraction, bytesWritten, bytesTotal) => onPhaseProgress("whisper", fraction, bytesWritten, bytesTotal)
@@ -530,8 +500,9 @@ async function beginDownloads(tier: LlamaTier): Promise<void> {
     setStatus({ status: "ready", progressPercent: 100, error: null });
   } catch (err) {
     if (err instanceof OfflineDownloadError) {
-      // Every completed 50MB chunk is already safely on disk (see
-      // downloadFileChunked) — nothing to roll back, just wait for the
+      // Every byte streamed so far is already safely on disk, and the
+      // native DownloadResumable is paused and retained (see
+      // downloadFileNative) — nothing to roll back, just wait for the
       // network and pick up from there.
       setStatus({ status: "paused_offline", error: null });
       watchForReconnectThenResume(tier);
@@ -548,12 +519,11 @@ export async function allowCellularDownloadAndResume(): Promise<void> {
 }
 
 /**
- * Retries setup after a `status: "error"` (e.g. a chunk exhausted all
- * MAX_CHUNK_RETRIES attempts). Safe to call any time — `beginDownloads`
- * always re-checks which phases are already complete, and the chunked
- * downloader itself resumes each still-incomplete phase from its partial
- * `.download` file's on-disk size, so this never re-fetches bytes that
- * already landed. Wired to the "Resume Setup" button in chat.tsx.
+ * Retries setup after a `status: "error"` or `"paused_offline"`. Safe to
+ * call any time — `beginDownloads` always re-checks which phases are already
+ * complete, and `downloadFileNative` resumes a still-paused phase natively
+ * (see `pausedPhaseHandle`) rather than re-streaming bytes that already
+ * landed. Wired to the "Resume Download" button in chat.tsx.
  */
 export async function resumeDownloads(): Promise<void> {
   await beginDownloads(resolveLlamaTier());
