@@ -5,12 +5,17 @@ import { requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio"
 import AudioRecord from "@fugood/react-native-audio-pcm-stream";
 
 import { logDuration, nowMs } from "../ai/perf";
-import { BITS_PER_SAMPLE, CHANNELS, SAMPLE_RATE, writePcmChunksAsWav } from "./wav";
+import { BITS_PER_SAMPLE, CHANNELS, SAMPLE_RATE, computeRms, writePcmChunksAsWav } from "./wav";
 
 export type VoiceRecorder = {
   isRecording: boolean;
   /** True while a start/stop transition is in flight; guards double-taps. */
   isTransitioning: boolean;
+  /** Live 0..1 RMS amplitude of the current PCM chunk, updated on every
+   * `data` event while recording (0 whenever not recording) — the real
+   * microphone-metering signal the jet-black canvas's waveform (State B)
+   * animates off of, not a canned/synthetic pulse. */
+  amplitude: number;
   requestPermissions: () => Promise<boolean>;
   startRecording: () => Promise<void>;
   stopRecording: () => Promise<string | null>;
@@ -34,6 +39,7 @@ const STOP_DRAIN_MS = 200;
 export function useVoiceRecorder(): VoiceRecorder {
   const [isRecording, setIsRecording] = useState(false);
   const [isTransitioning, setIsTransitioning] = useState(false);
+  const [amplitude, setAmplitude] = useState(0);
   // Synchronous lock: setIsTransitioning only takes effect on the next
   // render, which isn't fast enough to block a second tap fired in the
   // same event-loop turn as the first.
@@ -77,7 +83,9 @@ export function useVoiceRecorder(): VoiceRecorder {
         bitsPerSample: BITS_PER_SAMPLE,
       });
       subscriptionRef.current = AudioRecord.on("data", (base64Chunk) => {
-        chunksRef.current.push(Buffer.from(base64Chunk, "base64"));
+        const chunk = Buffer.from(base64Chunk, "base64");
+        chunksRef.current.push(chunk);
+        setAmplitude(computeRms(chunk));
       });
 
       AudioRecord.start();
@@ -104,6 +112,7 @@ export function useVoiceRecorder(): VoiceRecorder {
       subscriptionRef.current?.remove();
       subscriptionRef.current = null;
       setIsRecording(false);
+      setAmplitude(0);
 
       const finalizeStart = nowMs();
       const chunks = chunksRef.current;
@@ -141,7 +150,9 @@ export function useVoiceRecorder(): VoiceRecorder {
         bitsPerSample: BITS_PER_SAMPLE,
       });
       subscriptionRef.current = AudioRecord.on("data", (base64Chunk) => {
-        chunksRef.current.push(Buffer.from(base64Chunk, "base64"));
+        const chunk = Buffer.from(base64Chunk, "base64");
+        chunksRef.current.push(chunk);
+        setAmplitude(computeRms(chunk));
       });
       AudioRecord.start();
     } catch (err) {
@@ -156,6 +167,7 @@ export function useVoiceRecorder(): VoiceRecorder {
   return {
     isRecording,
     isTransitioning,
+    amplitude,
     requestPermissions,
     startRecording,
     stopRecording,
