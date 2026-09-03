@@ -45,14 +45,23 @@ const MIN_AUDIO_BYTES = 2000;
  * Matches Whisper's output for a genuinely silent/near-silent recording —
  * on the emulator this is typically a string of dots/ellipses ("... ... ...")
  * with no actual words, which happens when the host mic isn't routed
- * through to the AVD.
+ * through to the AVD. `*` (not `+`) so a plain empty string also counts as
+ * silent, rather than needing at least one stray punctuation character.
  */
-const SILENCE_TRANSCRIPT_PATTERN = /^[\s.,\-]+$/;
+const SILENCE_TRANSCRIPT_PATTERN = /^[\s.,\-]*$/;
 
-/** Shared with app/chat.tsx's voice-query flow so both surfaces agree on
- * what counts as "Whisper heard nothing" instead of drifting independently. */
+/** whisper.cpp's own literal marker for "nothing here" on a blank/near-silent
+ * clip — distinct from the punctuation-noise case above, and worth matching
+ * explicitly rather than relying on it happening to fall through the
+ * punctuation-only pattern (it doesn't; "[BLANK_AUDIO]" contains letters). */
+const BLANK_AUDIO_MARKER_PATTERN = /^\[?\s*(?:blank_audio|silence)\s*\]?$/i;
+
+/** Shared with app/index.tsx's voice-query flow (both Notes and Chat modes)
+ * so every surface agrees on what counts as "nothing was actually said"
+ * instead of drifting independently. */
 export function isSilentTranscript(text: string): boolean {
-  return SILENCE_TRANSCRIPT_PATTERN.test(text.trim());
+  const trimmed = text.trim();
+  return SILENCE_TRANSCRIPT_PATTERN.test(trimmed) || BLANK_AUDIO_MARKER_PATTERN.test(trimmed);
 }
 
 function nowUnix(): number {

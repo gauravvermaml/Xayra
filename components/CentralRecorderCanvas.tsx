@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { Dimensions, Image, Pressable, StyleSheet, View } from "react-native";
+import { Dimensions, Pressable, StyleSheet, View } from "react-native";
 import Animated, {
   Easing,
   interpolate,
@@ -133,24 +133,28 @@ export function CentralRecorderCanvas({
               disabled && styles.buttonDisabled,
               pressed && styles.buttonPressed,
             ]}
-          >
-            {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
-            <Image source={require("../assets/icon.png")} style={styles.emblem} resizeMode="contain" />
-          </Pressable>
+          />
         </Animated.View>
       </View>
 
-      <View style={styles.waveform} pointerEvents="none">
-        {Array.from({ length: BAR_COUNT }).map((_, index) => (
-          <WaveformBar key={index} index={index} state={state} amplitude={amplitudeShared} pulsePhase={pulsePhase} />
-        ))}
-      </View>
+      {/* States A (idle) and D (complete) are both just "not currently doing
+          anything" from this component's point of view — the waveform row
+          isn't rendered at all for either, not merely flattened, so the
+          canvas shows only the button when there's nothing live to show. */}
+      {state !== "idle" && (
+        <View style={styles.waveform} pointerEvents="none">
+          {Array.from({ length: BAR_COUNT }).map((_, index) => (
+            <WaveformBar key={index} index={index} state={state} amplitude={amplitudeShared} pulsePhase={pulsePhase} />
+          ))}
+        </View>
+      )}
     </View>
   );
 }
 
-const RIM_SIZE = 96;
-const BUTTON_SIZE = 80;
+// 1.3x over the button's previous ~70dp core.
+const BUTTON_SIZE = 90;
+const RIM_SIZE = Math.round(BUTTON_SIZE * 1.2);
 
 const styles = StyleSheet.create({
   wrapper: {
@@ -193,10 +197,6 @@ const styles = StyleSheet.create({
   },
   buttonPressed: {
     opacity: 0.9,
-  },
-  emblem: {
-    width: 40,
-    height: 40,
   },
   waveform: {
     width: WAVEFORM_WIDTH,

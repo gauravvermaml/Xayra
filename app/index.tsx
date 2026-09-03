@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, StyleSheet, Text, View } from "react-native";
+import { Alert, Image, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import BottomSheet from "@gorhom/bottom-sheet";
@@ -7,32 +7,35 @@ import { useSharedValue } from "react-native-reanimated";
 
 import { CentralRecorderCanvas, type RecorderCanvasState } from "../components/CentralRecorderCanvas";
 import { ChatSheetContent, type ChatSheetContentHandle } from "../components/ChatSheetContent";
-import { HistorySheet, SHEET_PEEK_HEIGHT } from "../components/HistorySheet";
+import { getSheetPeekHeight, HistorySheet } from "../components/HistorySheet";
 import { ModeSwitcherPill, type SheetMode } from "../components/ModeSwitcherPill";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { NotesSheetContent, type DisplayNote } from "../components/NotesSheetContent";
 import { asrRouter } from "../services/ai/asrRouter";
 import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
+import { isAudioTooShort } from "../services/audio/wav";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakTextAndWait } from "../services/audio/tts";
 import {
+  createTextNote,
   createVoiceNote,
   deleteNote,
+  EmptyRecordingError,
   isSilentTranscript,
   listNotes,
   purgeAllNotes,
   retryPendingEmbeddings,
+  SilentRecordingError,
   type Note,
 } from "../services/notes/noteManager";
 import { getSyncStatus, restoreFromDrive, signInWithGoogle, type SyncStatus } from "../services/sync/driveSync";
 
 /**
- * Unified Apple-Maps-style home screen. Replaces the previous two-route
- * (Notes tab / Chat tab) navigation entirely — Notes and Chat are now two
- * *modes* of the same jet-black canvas + sticky search sheet, switched via
- * the floating [Notes | Chat] pill rather than a router push. There is
- * deliberately only ONE recording pipeline (below) shared by both modes,
- * gated by whichever mode is active at the moment recording stops.
+ * Unified Apple-Maps-style home screen. Notes and Chat are two *modes* of
+ * the same jet-black canvas + sticky search sheet, switched via the floating
+ * [Notes | Chat] pill. There is deliberately only ONE recording pipeline
+ * (below) and ONE text-entry surface (the sheet's header compose bar —
+ * see HistorySheet) shared by both modes.
  */
 export default function HomeScreen() {
   const router = useRouter();
@@ -43,7 +46,7 @@ export default function HomeScreen() {
   const modeRef = useRef(mode);
   modeRef.current = mode;
 
-  const [searchQuery, setSearchQuery] = useState("");
+  const [inputText, setInputText] = useState("");
   const [allNotes, setAllNotes] = useState<Note[]>([]);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [processingState, setProcessingState] = useState<"idle" | "processing">("idle");
@@ -112,29 +115,49 @@ export default function HomeScreen() {
   // loop (long-press to engage — see the note on that below) funnel through
   // the exact same two branches: "finished an utterance in Notes mode" save
   // it as a note; "finished an utterance in Chat mode" ask it as a question.
-  // Neither path is special-cased relative to the other.
+  // Neither path is special-cased relative to the other. Both also share the
+  // same BLANK AUDIO & SILENCE GUARD: a too-short recording, or a transcript
+  // Whisper itself flags as blank/silent, is discarded before it ever
+  // reaches a note row or a chat bubble — nothing is created, nothing is
+  // sent to Llama, and the UI just resets to idle as if nothing happened.
 
   const finishNotesUtterance = useCallback(
     async (audioUri: string) => {
+      if (await isAudioTooShort(audioUri)) {
+        return;
+      }
       const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
       if (isSilentTranscript(transcript)) {
         return;
       }
-      const note = await createVoiceNote(audioUri, transcript, whisperModelId ?? null);
-      await refreshNotes();
-      if (note.status !== "embedded") {
-        setError(null);
+      try {
+        const note = await createVoiceNote(audioUri, transcript, whisperModelId ?? null);
+        await refreshNotes();
+        if (note.status !== "embedded") {
+          setError(null);
+        }
+      } catch (err) {
+        // createVoiceNote's own near-empty-file guard (EmptyRecordingError)
+        // and its post-transcribe silence check (SilentRecordingError) are
+        // both "there was nothing here," not a real failure — same silent
+        // discard as the checks above, not an alert.
+        if (!(err instanceof EmptyRecordingError) && !(err instanceof SilentRecordingError)) {
+          throw err;
+        }
       }
     },
     [refreshNotes]
   );
 
   const finishChatUtterance = useCallback(async (audioUri: string) => {
+    if (await isAudioTooShort(audioUri)) {
+      return;
+    }
     const { transcript } = await asrRouter.transcribe(audioUri);
     if (isSilentTranscript(transcript)) {
       return;
     }
-    await chatContentRef.current?.submitVoiceQuery(transcript.trim());
+    await chatContentRef.current?.submitQuery(transcript.trim(), "voice");
   }, []);
 
   const handleRecordPress = useCallback(async () => {
@@ -259,20 +282,19 @@ export default function HomeScreen() {
       purgeAllNotes().then(() => setAllNotes([]));
   }, []);
 
-  const isSearchActive = searchQuery.trim().length > 0;
-  const displayedNotes: DisplayNote[] = useMemo(() => {
-    const query = searchQuery.trim().toLowerCase();
-    const source = query
-      ? allNotes.filter((note) => (note.content || note.transcript || "").toLowerCase().includes(query))
-      : allNotes;
-    return source.map((note) => ({
-      id: note.id,
-      content: note.content,
-      audioUri: note.audioUri,
-      transcriptionModel: note.transcriptionModel,
-      createdAt: note.createdAt,
-    }));
-  }, [allNotes, searchQuery]);
+  // The header compose bar is now a submit-only surface (see HistorySheet) —
+  // typing no longer live-filters this list, so every note is shown.
+  const displayedNotes: DisplayNote[] = useMemo(
+    () =>
+      allNotes.map((note) => ({
+        id: note.id,
+        content: note.content,
+        audioUri: note.audioUri,
+        transcriptionModel: note.transcriptionModel,
+        createdAt: note.createdAt,
+      })),
+    [allNotes]
+  );
 
   const canvasState: RecorderCanvasState = recorder.isRecording
     ? "recording"
@@ -293,11 +315,44 @@ export default function HomeScreen() {
   const handleSelectNote = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
   const handleShowCitation = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
   const handleSettingsPress = useCallback(() => router.push("/settings"), [router]);
-  const handleSearchFocus = useCallback(() => sheetRef.current?.snapToIndex(1), []);
+  const handleInputFocus = useCallback(() => sheetRef.current?.snapToIndex(1), []);
+
+  // The header compose bar's up-arrow submit — Notes mode saves a text note
+  // directly (no recording involved), Chat mode asks it as a question, same
+  // as a voice query would. Either way this is the ONLY text-entry surface
+  // left in the app; the old per-mode input bars are gone.
+  const handleSubmitText = useCallback(
+    (text: string) => {
+      setInputText("");
+      if (modeRef.current === "notes") {
+        void createTextNote(text)
+          .then(() => refreshNotes())
+          .catch((err) => {
+            const message = err instanceof Error ? err.message : "Failed to save note.";
+            setError(message);
+            Alert.alert("Save Failed", message);
+          });
+      } else {
+        void chatContentRef.current?.submitQuery(text, "text");
+      }
+    },
+    [refreshNotes]
+  );
 
   return (
     <View style={styles.canvas}>
-      <View style={[styles.centerArea, { paddingTop: insets.top + 24 }]}>
+      <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
+        <View style={styles.brandRow}>
+          {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
+          <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
+          <Text style={styles.brandTitle}>Xayra</Text>
+        </View>
+        <Text style={styles.brandSubtitle}>
+          Tap to record your thoughts, later bring back your memories by tapping Xayra....
+        </Text>
+      </View>
+
+      <View style={[styles.centerArea, { paddingBottom: getSheetPeekHeight(insets.bottom) + 24 }]}>
         <CentralRecorderCanvas
           state={canvasState}
           amplitude={recorder.amplitude}
@@ -314,22 +369,24 @@ export default function HomeScreen() {
         mode={mode}
         onChange={setMode}
         sheetAnimatedIndex={sheetAnimatedIndex}
-        bottomOffset={SHEET_PEEK_HEIGHT + insets.bottom + 12}
+        bottomOffset={getSheetPeekHeight(insets.bottom) + 12}
       />
 
       <HistorySheet
         ref={sheetRef}
         mode={mode}
-        searchQuery={searchQuery}
-        onSearchChange={setSearchQuery}
-        onSearchFocus={handleSearchFocus}
+        inputText={inputText}
+        onInputChange={setInputText}
+        onInputFocus={handleInputFocus}
+        onSubmit={handleSubmitText}
         onSettingsPress={handleSettingsPress}
         animatedIndex={sheetAnimatedIndex}
+        bottomInset={insets.bottom}
       >
         {mode === "notes" ? (
           <NotesSheetContent
             notes={displayedNotes}
-            isSearchActive={isSearchActive}
+            isSearchActive={false}
             onSelectNote={handleSelectNote}
             onDeleteNote={handleDeleteNote}
             isRestoring={isRestoring}
@@ -356,12 +413,37 @@ const styles = StyleSheet.create({
     // True jet black — see the redesign's explicit CANVAS requirement.
     backgroundColor: "#000000",
   },
+  header: {
+    paddingHorizontal: 24,
+    paddingBottom: 4,
+  },
+  brandRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  brandLogo: {
+    width: 26,
+    height: 26,
+    borderRadius: 6,
+  },
+  brandTitle: {
+    color: "#FFFFFF",
+    fontSize: 22,
+    fontWeight: "700",
+    letterSpacing: -0.3,
+  },
+  brandSubtitle: {
+    color: "rgba(235,235,245,0.55)",
+    fontSize: 13,
+    marginTop: 4,
+    lineHeight: 18,
+  },
   centerArea: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
     gap: 12,
-    paddingBottom: SHEET_PEEK_HEIGHT + 24,
   },
   statusText: {
     color: "rgba(255,255,255,0.7)",

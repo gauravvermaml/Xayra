@@ -38,6 +38,24 @@ export function buildWavHeader(dataSize: number): Uint8Array {
   return new Uint8Array(header);
 }
 
+/** Below this, a WAV recording is treated as a blank/misfire tap rather than
+ * genuine speech — see the BLANK AUDIO & SILENCE GUARD requirement shared by
+ * both the Notes and Chat voice pipelines (app/index.tsx). 0.5s of 16kHz
+ * mono 16-bit PCM, plus the 44-byte header this app always writes. */
+const MIN_SPEECH_DURATION_SECONDS = 0.5;
+const BYTES_PER_SECOND = (SAMPLE_RATE * CHANNELS * BITS_PER_SAMPLE) / 8;
+const WAV_HEADER_BYTES = 44;
+export const MIN_SPEECH_AUDIO_BYTES =
+  WAV_HEADER_BYTES + Math.ceil(BYTES_PER_SECOND * MIN_SPEECH_DURATION_SECONDS);
+
+/** Cheap duration check straight from the file's byte size — no need to
+ * parse/decode the WAV to know whether it's under the ~0.5s "that was
+ * basically silence/a stray tap" threshold. */
+export async function isAudioTooShort(uri: string): Promise<boolean> {
+  const info = await FileSystem.getInfoAsync(uri);
+  return !info.exists || (info.size ?? 0) < MIN_SPEECH_AUDIO_BYTES;
+}
+
 export async function ensureRecordingsDirExists(): Promise<void> {
   const info = await FileSystem.getInfoAsync(RECORDINGS_DIR);
   if (!info.exists) {

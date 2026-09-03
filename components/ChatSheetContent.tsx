@@ -1,5 +1,5 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Animated, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, Animated, Pressable, StyleSheet, Text, View } from "react-native";
 import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
 import * as Crypto from "expo-crypto";
 
@@ -48,12 +48,14 @@ const STREAM_FLUSH_INTERVAL_MS = 80;
 const STARTER_PROMPTS = ["Summarize my latest notes", "What did I record about work?", "List my recent tasks"] as const;
 
 export type ChatSheetContentHandle = {
-  /** Feeds a voice-transcribed question through the same send pipeline as
-   * typing + tapping Send — called by the shell (app/index.tsx) after the
-   * shared center-button recording pipeline transcribes a query while Chat
-   * mode is active. Also speaks the answer back, since a spoken question
-   * getting a silent text-only answer would be a broken hands-free loop. */
-  submitVoiceQuery: (transcript: string) => Promise<void>;
+  /** Runs a question through the RAG pipeline exactly as if it had been
+   * typed into the (now sole, header-level — see HistorySheet) compose bar
+   * and submitted. Called by the shell (app/index.tsx) for both a typed
+   * submission from the header and a voice-transcribed one from the shared
+   * center-button recording pipeline — `source: "voice"` additionally
+   * speaks the answer back, since a spoken question getting a silent
+   * text-only answer would be a broken hands-free loop. */
+  submitQuery: (text: string, source?: "text" | "voice") => Promise<void>;
 };
 
 export type ChatSheetContentProps = {
@@ -70,7 +72,6 @@ export const ChatSheetContent = forwardRef<ChatSheetContentHandle, ChatSheetCont
   ref
 ) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const listRef = useRef<React.ElementRef<typeof BottomSheetFlatList<ChatMessage>>>(null);
@@ -176,18 +177,14 @@ export const ChatSheetContent = forwardRef<ChatSheetContentHandle, ChatSheetCont
   );
 
   const handleSend = useCallback(
-    async (overrideText?: string, source: "text" | "voice" = "text") => {
-      const query = (overrideText ?? input).trim();
+    async (rawText: string, source: "text" | "voice" = "text") => {
+      const query = rawText.trim();
       if (!query || isSending || !isModelReady) {
         return;
       }
 
       void stopSpeech();
       setSpeakingMessageId(null);
-
-      if (overrideText === undefined) {
-        setInput("");
-      }
       setIsSending(true);
 
       try {
@@ -203,11 +200,11 @@ export const ChatSheetContent = forwardRef<ChatSheetContentHandle, ChatSheetCont
         setIsSending(false);
       }
     },
-    [input, isSending, isModelReady, runRagExchange, playMessageSpeech, isChatModelMissingError]
+    [isSending, isModelReady, runRagExchange, playMessageSpeech, isChatModelMissingError]
   );
 
   useImperativeHandle(ref, () => ({
-    submitVoiceQuery: (transcript: string) => handleSend(transcript, "voice"),
+    submitQuery: (text: string, source: "text" | "voice" = "text") => handleSend(text, source),
   }));
 
   return (
@@ -262,7 +259,7 @@ export const ChatSheetContent = forwardRef<ChatSheetContentHandle, ChatSheetCont
           {STARTER_PROMPTS.map((prompt) => (
             <Pressable
               key={prompt}
-              onPress={() => void handleSend(prompt)}
+              onPress={() => void handleSend(prompt, "text")}
               disabled={isSending}
               style={({ pressed }) => [styles.starterChip, pressed && styles.starterChipPressed]}
             >
@@ -311,32 +308,6 @@ export const ChatSheetContent = forwardRef<ChatSheetContentHandle, ChatSheetCont
           </Pressable>
         </View>
       )}
-
-      <View style={styles.inputBar}>
-        <TextInput
-          value={input}
-          onChangeText={setInput}
-          placeholder="Ask about your notes…"
-          placeholderTextColor={colors.textMuted}
-          style={styles.input}
-          editable={!isSending && isModelReady}
-          contextMenuHidden={false}
-          multiline
-          returnKeyType="send"
-          onSubmitEditing={() => handleSend()}
-        />
-        <Pressable
-          onPress={() => handleSend()}
-          disabled={isSending || !input.trim() || !isModelReady}
-          style={({ pressed }) => [
-            styles.sendButton,
-            (isSending || !input.trim() || !isModelReady) && styles.sendButtonDisabled,
-            pressed && styles.sendButtonPressed,
-          ]}
-        >
-          {isSending ? <ActivityIndicator color={colors.textPrimary} size="small" /> : <Text style={styles.sendButtonText}>Send</Text>}
-        </Pressable>
-      </View>
     </View>
   );
 });
@@ -420,41 +391,6 @@ const styles = StyleSheet.create({
   citationChipText: {
     color: colors.textSecondary,
     fontSize: 12,
-    fontWeight: "600",
-  },
-  inputBar: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: spacing.sm + 2,
-    paddingVertical: spacing.md,
-  },
-  input: {
-    flex: 1,
-    backgroundColor: "#1C1C1E",
-    borderRadius: radius.lg,
-    paddingHorizontal: spacing.base - 2,
-    paddingVertical: spacing.sm + 2,
-    color: colors.textPrimary,
-    fontSize: 15,
-    maxHeight: 120,
-  },
-  sendButton: {
-    backgroundColor: colors.accent,
-    borderRadius: radius.lg,
-    paddingHorizontal: spacing.lg - 2,
-    paddingVertical: spacing.md,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  sendButtonDisabled: {
-    opacity: 0.5,
-  },
-  sendButtonPressed: {
-    opacity: 0.85,
-  },
-  sendButtonText: {
-    color: colors.onAccent,
-    fontSize: 14,
     fontWeight: "600",
   },
   chatModelPrompt: {
