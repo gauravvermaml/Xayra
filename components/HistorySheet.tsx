@@ -41,6 +41,18 @@ export type HistorySheetProps = {
   qaContent: React.ReactNode;
   onIndexChange?: BottomSheetProps["onChange"];
   animatedIndex: SharedValue<number>;
+  /** Current snap index, tracked in JS state (app/index.tsx) alongside
+   * `animatedIndex` — needed here to actually NOT RENDER the segment pill
+   * and history content at index 0 (IDLE PEEK ISOLATION), rather than just
+   * relying on the sheet's own height clipping them out of view. A value
+   * that's merely invisible-by-clipping can still be measured, still steal
+   * a stray touch, and still show up in the accessibility tree — actually
+   * not mounting it at index 0 avoids all three. */
+  sheetIndex: number;
+  /** Device's safe-area bottom inset — added as trailing padding on the
+   * scrollable history content so the last note/chat item can scroll clear
+   * of the solid Android nav bar instead of being clipped behind it. */
+  bottomInset: number;
 };
 
 /**
@@ -55,7 +67,7 @@ export type HistorySheetProps = {
  * switching segments never loses anything, only which is visible.
  */
 export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function HistorySheet(
-  { historyTab, onHistoryTabChange, notesContent, qaContent, onIndexChange, animatedIndex },
+  { historyTab, onHistoryTabChange, notesContent, qaContent, onIndexChange, animatedIndex, sheetIndex, bottomInset },
   ref
 ) {
   // Stable across every render regardless of any other state in the app —
@@ -84,20 +96,30 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       backgroundStyle={styles.background}
       handleComponent={renderHandle}
     >
-      <View style={styles.segmentRow}>
-        {(["notes", "qa"] as const).map((tab) => (
-          <Pressable
-            key={tab}
-            onPress={() => onHistoryTabChange(tab)}
-            style={[styles.segmentOption, historyTab === tab && styles.segmentOptionActive]}
-          >
-            <Text style={[styles.segmentText, historyTab === tab && styles.segmentTextActive]}>
-              {tab === "notes" ? "Notes" : "QA History"}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-      {historyTab === "notes" ? notesContent : qaContent}
+      {/* IDLE PEEK ISOLATION: at index 0 (20%), the sheet body below the
+          drag handle renders nothing at all — not the segment pill, not
+          either history list — so the resting peek is strictly the drag
+          handle (inside the sheet) plus ComposeBar (outside it, floating
+          above). Both the segment pill and the history content only mount
+          once the sheet is at 50% or 90%. */}
+      {sheetIndex > 0 && (
+        <View style={[styles.body, { paddingBottom: bottomInset }]}>
+          <View style={styles.segmentRow}>
+            {(["notes", "qa"] as const).map((tab) => (
+              <Pressable
+                key={tab}
+                onPress={() => onHistoryTabChange(tab)}
+                style={[styles.segmentOption, historyTab === tab && styles.segmentOptionActive]}
+              >
+                <Text style={[styles.segmentText, historyTab === tab && styles.segmentTextActive]}>
+                  {tab === "notes" ? "Notes" : "QA History"}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+          {historyTab === "notes" ? notesContent : qaContent}
+        </View>
+      )}
     </BottomSheet>
   );
 });
@@ -122,6 +144,9 @@ const styles = StyleSheet.create({
     height: 4,
     borderRadius: 2,
     backgroundColor: "rgba(255,255,255,0.3)",
+  },
+  body: {
+    flex: 1,
   },
   segmentRow: {
     flexDirection: "row",

@@ -1,7 +1,14 @@
 import { memo } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
 
 import { colors, radius, spacing } from "../constants/theme";
+
+/** Keeps this bar reliably painted above the bottom sheet's own (Reanimated-
+ * transformed) surface on Android, where sibling paint order alone can be
+ * unreliable once transforms are involved — belt-and-suspenders alongside
+ * being the later sibling in app/index.tsx's JSX (see PREVENT CONTENT BLEED). */
+const COMPOSE_BAR_Z_INDEX = 20;
 
 export type ComposeBarProps = {
   inputText: string;
@@ -51,8 +58,20 @@ export const ComposeBar = memo(function ComposeBar({
     }
   };
 
+  // Keeps this bar pinned directly above the soft keyboard: as the keyboard
+  // rises, `keyboard.height` tracks its live height (0 when closed), and
+  // this row rides up by exactly that much on top of its resting `bottom`
+  // position — independent of whatever snap index the sheet itself is at.
+  const keyboard = useAnimatedKeyboard();
+  const keyboardFollowStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: -keyboard.height.value }],
+  }));
+
   return (
-    <View style={[styles.container, { bottom }]} pointerEvents="box-none">
+    <Animated.View
+      style={[styles.container, { bottom }, keyboardFollowStyle]}
+      pointerEvents="box-none"
+    >
       <View style={styles.row}>
         <View style={styles.searchBar}>
           <Text style={styles.searchIcon}>⌕</Text>
@@ -82,7 +101,7 @@ export const ComposeBar = memo(function ComposeBar({
           <Text style={styles.settingsIcon}>⚙️</Text>
         </Pressable>
       </View>
-    </View>
+    </Animated.View>
   );
 });
 
@@ -92,6 +111,8 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     paddingHorizontal: spacing.base,
+    zIndex: COMPOSE_BAR_Z_INDEX,
+    elevation: COMPOSE_BAR_Z_INDEX,
   },
   row: {
     flexDirection: "row",

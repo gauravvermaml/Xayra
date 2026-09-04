@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Dimensions, Image, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, Dimensions, Image, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import BottomSheet from "@gorhom/bottom-sheet";
@@ -93,6 +93,23 @@ export default function HomeScreen() {
 
   const sheetRef = useRef<BottomSheet>(null);
   const sheetAnimatedIndex = useSharedValue(0);
+  // Mirrors sheetAnimatedIndex into plain JS state — HistorySheet needs this
+  // (not just the Reanimated shared value) to actually skip rendering its
+  // body at index 0 (see STRICT LAYOUT HIERARCHY), which has to be a real
+  // React conditional, not something achievable from a UI-thread value alone.
+  const [sheetIndex, setSheetIndex] = useState(0);
+  const handleSheetIndexChange = useCallback((index: number) => setSheetIndex(index), []);
+
+  // BACKDROP TAP TO DISMISS: tapping anywhere on the canvas outside the
+  // sheet/compose bar/center button (all of which are Pressables of their
+  // own, and so claim a tap before it ever reaches this one) drops the
+  // keyboard and returns the sheet to its resting peek. Both calls are
+  // harmless no-ops when already dismissed/collapsed, so this doesn't need
+  // to first check whether either is actually open.
+  const handleBackdropPress = useCallback(() => {
+    Keyboard.dismiss();
+    sheetRef.current?.snapToIndex(0);
+  }, []);
 
   const refreshNotes = useCallback(async () => {
     try {
@@ -158,6 +175,7 @@ export default function HomeScreen() {
           : await createTextNote(text);
         await refreshNotes();
         showToast("Saved thought to memory");
+        setHistoryTab("notes");
         sheetRef.current?.snapToIndex(0);
         if (note.status !== "embedded") {
           setError(null);
@@ -195,6 +213,12 @@ export default function HomeScreen() {
         if (intent === "RECORD") {
           await routeRecord(text, audioUri, whisperModelId);
         } else {
+          // Requirement 2: ASK flips the active tab to QA History so the
+          // streaming answer is what's actually visible once the sheet
+          // reaches its 50% auto-peek, rather than leaving Notes selected
+          // underneath it.
+          setHistoryTab("qa");
+          sheetRef.current?.snapToIndex(1);
           await chatSession.submitQuery(text, audioUri ? "voice" : "text");
         }
         return { intent };
@@ -432,7 +456,7 @@ export default function HomeScreen() {
   }
 
   return (
-    <View style={styles.canvas}>
+    <Pressable style={styles.canvas} onPress={handleBackdropPress}>
       <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
         <View style={styles.brandRow}>
           {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
@@ -470,6 +494,9 @@ export default function HomeScreen() {
         historyTab={historyTab}
         onHistoryTabChange={setHistoryTab}
         animatedIndex={sheetAnimatedIndex}
+        sheetIndex={sheetIndex}
+        bottomInset={insets.bottom}
+        onIndexChange={handleSheetIndexChange}
         notesContent={
           <NotesSheetContent
             notes={displayedNotes}
@@ -509,7 +536,7 @@ export default function HomeScreen() {
         onClose={() => setSelectedNoteId(null)}
         onDeleted={(noteId) => setAllNotes((prev) => prev.filter((note) => note.id !== noteId))}
       />
-    </View>
+    </Pressable>
   );
 }
 

@@ -20,7 +20,9 @@
         "backgroundColor": "#0E0F12"
       },
       "predictiveBackGestureEnabled": false,
-      "versionCode": 18,
+      "versionCode": 19,
+      "navigationBarColor": "#1C1C1E",
+      "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.USE_BIOMETRIC",
         "android.permission.USE_FINGERPRINT",
