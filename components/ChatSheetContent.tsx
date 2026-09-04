@@ -1,14 +1,11 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { ActivityIndicator, Alert, Animated, Pressable, StyleSheet, Text, View } from "react-native";
+import { useEffect, useRef } from "react";
+import { ActivityIndicator, Animated, Pressable, StyleSheet, Text, View } from "react-native";
 import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
-import * as Crypto from "expo-crypto";
 
 import { MarkdownText } from "./MarkdownText";
 import { colors, radius, spacing, typography } from "../constants/theme";
-import { LLAMA_MODEL_MISSING_ERROR_PREFIX } from "../services/ai/localLlama";
-import { allowCellularDownloadAndResume, resumeDownloads, useModelDownload } from "../services/ai/modelDownloadManager";
-import { generateRAGAnswer, type RagCitation } from "../services/ai/rag";
-import { speakText, stopSpeech } from "../services/audio/tts";
+import { allowCellularDownloadAndResume, resumeDownloads, type ModelDownloadStatus } from "../services/ai/modelDownloadManager";
+import type { ChatMessage } from "../services/ai/useChatSession";
 import { copyTextWithFeedback } from "../utils/clipboard";
 
 /** Blinking "▋" cursor shown at the end of a message still streaming in
@@ -30,182 +27,45 @@ function StreamingCursor({ color }: { color: string }) {
   return <Animated.Text style={{ color, opacity }}>{"▋"}</Animated.Text>;
 }
 
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  citations?: RagCitation[];
-  isStreaming?: boolean;
-};
-
-/** How often buffered streaming tokens are flushed into visible state — 80ms
- * is frequent enough that the text still reads as a smooth live stream, but
- * coalesces what would otherwise be many dozens of per-token re-renders per
- * second into ~12 batched ones. */
-const STREAM_FLUSH_INTERVAL_MS = 80;
-
-/** Shown above the input box only before the first message of a session. */
+/** Shown only before the first message of a session. Tapping one submits it
+ * exactly like typing it into the compose bar. */
 const STARTER_PROMPTS = ["Summarize my latest notes", "What did I record about work?", "List my recent tasks"] as const;
 
-export type ChatSheetContentHandle = {
-  /** Runs a question through the RAG pipeline exactly as if it had been
-   * typed into the (now sole, header-level — see HistorySheet) compose bar
-   * and submitted. Called by the shell (app/index.tsx) for both a typed
-   * submission from the header and a voice-transcribed one from the shared
-   * center-button recording pipeline — `source: "voice"` additionally
-   * speaks the answer back, since a spoken question getting a silent
-   * text-only answer would be a broken hands-free loop. */
-  submitQuery: (text: string, source?: "text" | "voice") => Promise<void>;
-};
-
 export type ChatSheetContentProps = {
+  messages: ChatMessage[];
+  isSending: boolean;
+  speakingMessageId: string | null;
+  modelDownload: ModelDownloadStatus;
+  isModelReady: boolean;
+  onSubmitStarterPrompt: (text: string) => void;
+  onToggleSpeech: (message: ChatMessage) => void;
   onShowCitation: (noteId: string) => void;
-  /** Whether the model-setup status card / starter chips should treat a
-   * question as sendable right now — surfaced so the shell can also gate
-   * the center button (no point starting a voice question the model isn't
-   * ready to answer). */
-  onModelReadyChange?: (isReady: boolean) => void;
 };
 
-export const ChatSheetContent = forwardRef<ChatSheetContentHandle, ChatSheetContentProps>(function ChatSheetContent(
-  { onShowCitation, onModelReadyChange },
-  ref
-) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [isSending, setIsSending] = useState(false);
-  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+/**
+ * The sheet's "QA History" segment content — purely presentational (see
+ * services/ai/useChatSession.ts for the actual conversation state/logic,
+ * which lives in app/index.tsx so it survives this component being
+ * unmounted whenever the segment control switches to "Notes").
+ */
+export function ChatSheetContent({
+  messages,
+  isSending,
+  speakingMessageId,
+  modelDownload,
+  isModelReady,
+  onSubmitStarterPrompt,
+  onToggleSpeech,
+  onShowCitation,
+}: ChatSheetContentProps) {
   const listRef = useRef<React.ElementRef<typeof BottomSheetFlatList<ChatMessage>>>(null);
 
-  const modelDownload = useModelDownload();
-  const isModelReady = modelDownload.status === "ready";
-
-  useEffect(() => {
-    onModelReadyChange?.(isModelReady);
-  }, [isModelReady, onModelReadyChange]);
-
-  const isChatModelMissingError = useCallback(
-    (err: unknown) => err instanceof Error && err.message.startsWith(LLAMA_MODEL_MISSING_ERROR_PREFIX),
-    []
-  );
-
-  const handleAllowCellularDownload = useCallback(() => {
-    void allowCellularDownloadAndResume().catch((err) => {
-      Alert.alert("Download Failed", err instanceof Error ? err.message : "Failed to start the download.");
-    });
-  }, []);
-
-  const handleResumeDownload = useCallback(() => {
-    void resumeDownloads().catch((err) => {
-      Alert.alert("Resume Failed", err instanceof Error ? err.message : "Failed to resume the download.");
-    });
-  }, []);
-
-  const updateMessage = useCallback((id: string, patch: Partial<ChatMessage>) => {
-    setMessages((prev) => prev.map((message) => (message.id === id ? { ...message, ...patch } : message)));
-  }, []);
-
-  const playMessageSpeech = useCallback((message: Pick<ChatMessage, "id" | "text">) => {
-    setSpeakingMessageId(message.id);
-    const clearIfCurrent = () => setSpeakingMessageId((current) => (current === message.id ? null : current));
-    void speakText(message.text, { onDone: clearIfCurrent, onStopped: clearIfCurrent, onError: clearIfCurrent });
-  }, []);
-
-  const handleToggleSpeech = useCallback(
-    (message: ChatMessage) => {
-      if (speakingMessageId === message.id) {
-        void stopSpeech();
-        setSpeakingMessageId(null);
-      } else {
-        playMessageSpeech(message);
-      }
-    },
-    [speakingMessageId, playMessageSpeech]
-  );
-
-  const runRagExchange = useCallback(
-    async (query: string): Promise<{ assistantId: string; text: string }> => {
-      const userMessage: ChatMessage = { id: Crypto.randomUUID(), role: "user", text: query };
-      const assistantId = Crypto.randomUUID();
-      const assistantMessage: ChatMessage = { id: assistantId, role: "assistant", text: "", isStreaming: true };
-      setMessages((prev) => [...prev, userMessage, assistantMessage]);
-
-      let pendingText = "";
-      let flushTimer: ReturnType<typeof setTimeout> | null = null;
-      const flushPendingText = () => {
-        flushTimer = null;
-        if (!pendingText) {
-          return;
-        }
-        const textToAppend = pendingText;
-        pendingText = "";
-        setMessages((prev) =>
-          prev.map((message) => (message.id === assistantId ? { ...message, text: message.text + textToAppend } : message))
-        );
-      };
-
-      try {
-        const answer = await generateRAGAnswer(query, (chunk) => {
-          pendingText += chunk;
-          if (!flushTimer) {
-            flushTimer = setTimeout(flushPendingText, STREAM_FLUSH_INTERVAL_MS);
-          }
-        });
-        if (flushTimer) {
-          clearTimeout(flushTimer);
-          flushTimer = null;
-        }
-        updateMessage(assistantId, { text: answer.text, citations: answer.citations, isStreaming: false });
-        return { assistantId, text: answer.text };
-      } catch (err) {
-        if (flushTimer) {
-          clearTimeout(flushTimer);
-          flushTimer = null;
-        }
-        if (isChatModelMissingError(err)) {
-          updateMessage(assistantId, {
-            text: "The on-device chat model isn't downloaded yet — Xayra downloads it automatically over Wi-Fi.",
-            isStreaming: false,
-          });
-          throw err;
-        }
-        const message = err instanceof Error ? err.message : "Failed to get a response.";
-        updateMessage(assistantId, { text: `Sorry, something went wrong: ${message}`, isStreaming: false });
-        throw err;
-      }
-    },
-    [updateMessage, isChatModelMissingError]
-  );
-
-  const handleSend = useCallback(
-    async (rawText: string, source: "text" | "voice" = "text") => {
-      const query = rawText.trim();
-      if (!query || isSending || !isModelReady) {
-        return;
-      }
-
-      void stopSpeech();
-      setSpeakingMessageId(null);
-      setIsSending(true);
-
-      try {
-        const { assistantId, text } = await runRagExchange(query);
-        if (source === "voice") {
-          playMessageSpeech({ id: assistantId, text });
-        }
-      } catch (err) {
-        if (!isChatModelMissingError(err)) {
-          Alert.alert("Chat Error", err instanceof Error ? err.message : "Failed to get a response.");
-        }
-      } finally {
-        setIsSending(false);
-      }
-    },
-    [isSending, isModelReady, runRagExchange, playMessageSpeech, isChatModelMissingError]
-  );
-
-  useImperativeHandle(ref, () => ({
-    submitQuery: (text: string, source: "text" | "voice" = "text") => handleSend(text, source),
-  }));
+  const handleAllowCellularDownload = () => {
+    void allowCellularDownloadAndResume();
+  };
+  const handleResumeDownload = () => {
+    void resumeDownloads();
+  };
 
   return (
     <View style={styles.container}>
@@ -237,7 +97,7 @@ export const ChatSheetContent = forwardRef<ChatSheetContentHandle, ChatSheetCont
               </View>
             )}
             {item.role === "assistant" && !item.isStreaming && item.text.length > 0 && (
-              <Pressable onPress={() => handleToggleSpeech(item)} style={styles.speakerButton}>
+              <Pressable onPress={() => onToggleSpeech(item)} style={styles.speakerButton}>
                 <Text style={styles.speakerButtonText}>{speakingMessageId === item.id ? "⏹ Stop" : "🔊 Listen"}</Text>
               </Pressable>
             )}
@@ -259,7 +119,7 @@ export const ChatSheetContent = forwardRef<ChatSheetContentHandle, ChatSheetCont
           {STARTER_PROMPTS.map((prompt) => (
             <Pressable
               key={prompt}
-              onPress={() => void handleSend(prompt, "text")}
+              onPress={() => onSubmitStarterPrompt(prompt)}
               disabled={isSending}
               style={({ pressed }) => [styles.starterChip, pressed && styles.starterChipPressed]}
             >
@@ -310,7 +170,7 @@ export const ChatSheetContent = forwardRef<ChatSheetContentHandle, ChatSheetCont
       )}
     </View>
   );
-});
+}
 
 const styles = StyleSheet.create({
   container: {

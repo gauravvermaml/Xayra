@@ -335,6 +335,64 @@ export async function generateLocalRAGAnswer(
   return result.text.trim();
 }
 
+export type Intent = "RECORD" | "ASK";
+
+/** Deterministic (temperature 0) and short (n_predict 16) — this is a
+ * routing decision, not a creative generation, so there's no reason to pay
+ * for either sampling variety or a long completion. */
+const INTENT_CLASSIFICATION_TEMPERATURE = 0;
+const INTENT_MAX_TOKENS = 16;
+
+function buildIntentClassificationPrompt(text: string): string {
+  return (
+    "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" +
+    "Classify the user's message as RECORD (they are storing a new fact, thought, or memory) " +
+    'or ASK (they are asking a question, searching, or requesting information). ' +
+    'Reply with ONLY compact JSON, nothing else: {"intent": "RECORD"} or {"intent": "ASK"}.' +
+    `${EOT_TOKEN}` +
+    "<|start_header_id|>user<|end_header_id|>\n\n" +
+    `${text}${EOT_TOKEN}` +
+    "<|start_header_id|>assistant<|end_header_id|>\n\n"
+  );
+}
+
+/**
+ * Stage 2 of the unified intent router (see services/ai/intentRouter.ts) —
+ * only reached for inputs Stage 1's fast keyword heuristics couldn't
+ * confidently classify. Parses defensively: the model is asked for strict
+ * JSON but a small instruct model asked to emit exactly two possible words
+ * will sometimes wrap it in a sentence anyway, so this just looks for
+ * whichever of the two words appears, rather than requiring valid JSON.
+ */
+export async function classifyIntentWithLlama(text: string): Promise<Intent> {
+  const context = await getContext();
+  const result = await context.completion({
+    prompt: buildIntentClassificationPrompt(text),
+    n_predict: INTENT_MAX_TOKENS,
+    temperature: INTENT_CLASSIFICATION_TEMPERATURE,
+    stop: [EOT_TOKEN, "<|end_of_text|>", "\n"],
+  });
+  const match = result.text.match(/RECORD|ASK/i);
+  return match?.[0].toUpperCase() === "RECORD" ? "RECORD" : "ASK";
+}
+
+/**
+ * Fire-and-forget: loads the GGUF model into native memory ahead of the
+ * first real generation/classification call, so that call doesn't pay the
+ * multi-second cold-start cost (see services/ai/enginePrewarmer.ts, called
+ * once from app/index.tsx on launch). Swallows its own error — a model not
+ * downloaded yet, or a corrupt file, is exactly what the real call will
+ * surface properly when it's actually needed; prewarming has nobody to
+ * report a failure to.
+ */
+export async function prewarmLocalLlama(): Promise<void> {
+  try {
+    await getContext();
+  } catch (err) {
+    console.warn("[Llama] Prewarm skipped:", err instanceof Error ? err.message : err);
+  }
+}
+
 /**
  * Releases the native llama context and its underlying memory (KV cache,
  * loaded weights). Call on unmount of whatever screen owns the RAG flow —

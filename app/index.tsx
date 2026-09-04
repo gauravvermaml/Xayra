@@ -1,21 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Image, StyleSheet, Text, View } from "react-native";
+import { Alert, Dimensions, Image, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import BottomSheet from "@gorhom/bottom-sheet";
 import { useSharedValue } from "react-native-reanimated";
 
 import { CentralRecorderCanvas, type RecorderCanvasState } from "../components/CentralRecorderCanvas";
-import { ChatSheetContent, type ChatSheetContentHandle } from "../components/ChatSheetContent";
-import { getSheetPeekHeight, HistorySheet } from "../components/HistorySheet";
-import { ModeSwitcherPill, type SheetMode } from "../components/ModeSwitcherPill";
+import { ChatSheetContent } from "../components/ChatSheetContent";
+import { ComposeBar } from "../components/ComposeBar";
+import { HistorySheet, SHEET_SNAP_POINTS, type HistoryTab } from "../components/HistorySheet";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { NotesSheetContent, type DisplayNote } from "../components/NotesSheetContent";
+import { showToast } from "../components/Toast";
 import { asrRouter } from "../services/ai/asrRouter";
+import { prewarmEngines } from "../services/ai/enginePrewarmer";
+import { classifyIntent } from "../services/ai/intentRouter";
+import { useChatSession } from "../services/ai/useChatSession";
 import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
-import { isAudioTooShort } from "../services/audio/wav";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakTextAndWait } from "../services/audio/tts";
+import { isAudioTooShort } from "../services/audio/wav";
 import {
   createTextNote,
   createVoiceNote,
@@ -30,33 +34,64 @@ import {
 } from "../services/notes/noteManager";
 import { getSyncStatus, restoreFromDrive, signInWithGoogle, type SyncStatus } from "../services/sync/driveSync";
 
+/** Screen goes idle-with-mic-open for this long with zero detected speech
+ * before Handsfree auto-disengages — a safety/battery guard, not a UX
+ * nicety: an accidental activation left running in a pocket would otherwise
+ * keep the mic (and the screen, via ActiveModeManager's own keep-awake) on
+ * indefinitely. */
+const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Percentage snap points (SHEET_SNAP_POINTS = ['20%', '50%', '90%']) are the
+// bottom sheet's own geometry; ComposeBar is a sibling rendered outside it
+// (see that component's doc comment), so it needs an approximate pixel
+// equivalent of the 20% resting point to float just below the sheet's drag
+// handle rather than at an unrelated fixed offset. Approximate is fine —
+// this only affects where an overlay sits relative to a sheet edge, not any
+// data or gesture logic.
+const SHEET_REST_HEIGHT_PX = Dimensions.get("window").height * 0.2;
+/** ComposeBar's own row height + the drag-handle stub's hit area above it. */
+const COMPOSE_BAR_TOP_OFFSET = 76;
+
 /**
- * Unified Apple-Maps-style home screen. Notes and Chat are two *modes* of
- * the same jet-black canvas + sticky search sheet, switched via the floating
- * [Notes | Chat] pill. There is deliberately only ONE recording pipeline
- * (below) and ONE text-entry surface (the sheet's header compose bar —
- * see HistorySheet) shared by both modes.
+ * Unified, zero-friction Xayra canvas. There is no manual Record/Ask mode
+ * toggle anymore — every submission (typed or spoken) is classified as
+ * RECORD or ASK by services/ai/intentRouter.ts and routed automatically.
+ * There is exactly one text-entry surface (ComposeBar, deliberately
+ * rendered outside the bottom sheet — see its own doc comment for why) and
+ * exactly one recording pipeline, shared by manual taps and Handsfree Mode.
  */
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const recorder = useVoiceRecorder();
+  const chatSession = useChatSession();
 
-  const [mode, setMode] = useState<SheetMode>("notes");
-  const modeRef = useRef(mode);
-  modeRef.current = mode;
+  // Cold-start layout guard (Requirement 3): the header/compose bar/sheet
+  // all depend on `insets` for correct placement — rendering them before
+  // insets are actually measured is what causes a visible jump/shift a
+  // frame or two after first paint. Nothing meaningful is lost by waiting
+  // one tick: the canvas (pure black, no inset-dependent layout) is already
+  // on screen immediately.
+  const [isReady, setIsReady] = useState(false);
+  useEffect(() => {
+    setIsReady(true);
+  }, []);
 
+  useEffect(() => {
+    prewarmEngines();
+  }, []);
+
+  const [historyTab, setHistoryTab] = useState<HistoryTab>("notes");
   const [inputText, setInputText] = useState("");
   const [allNotes, setAllNotes] = useState<Note[]>([]);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [processingState, setProcessingState] = useState<"idle" | "processing">("idle");
-  const [isTranscribingChatVoice, setIsTranscribingChatVoice] = useState(false);
+  const [processingLabel, setProcessingLabel] = useState<"note" | "query" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({ isConnected: false });
   const [isRestoring, setIsRestoring] = useState(false);
 
   const sheetRef = useRef<BottomSheet>(null);
-  const chatContentRef = useRef<ChatSheetContentHandle>(null);
   const sheetAnimatedIndex = useSharedValue(0);
 
   const refreshNotes = useCallback(async () => {
@@ -109,38 +144,28 @@ export default function HomeScreen() {
     })();
   }, [syncStatus.isConnected, refreshNotes, refreshSyncStatus]);
 
-  // ---- The single shared recording pipeline ---------------------------
+  // ---- Unified intent routing --------------------------------------------
   //
-  // Both a manual tap on the center button AND Active Mode's hands-free
-  // loop (long-press to engage — see the note on that below) funnel through
-  // the exact same two branches: "finished an utterance in Notes mode" save
-  // it as a note; "finished an utterance in Chat mode" ask it as a question.
-  // Neither path is special-cased relative to the other. Both also share the
-  // same BLANK AUDIO & SILENCE GUARD: a too-short recording, or a transcript
-  // Whisper itself flags as blank/silent, is discarded before it ever
-  // reaches a note row or a chat bubble — nothing is created, nothing is
-  // sent to Llama, and the UI just resets to idle as if nothing happened.
+  // Every submission — typed into ComposeBar, or spoken (manual tap or
+  // Handsfree) — funnels through here. Nothing upstream decides RECORD vs
+  // ASK anymore; classifyIntent() does, on the actual text, every time.
 
-  const finishNotesUtterance = useCallback(
-    async (audioUri: string) => {
-      if (await isAudioTooShort(audioUri)) {
-        return;
-      }
-      const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
-      if (isSilentTranscript(transcript)) {
-        return;
-      }
+  const routeRecord = useCallback(
+    async (text: string, audioUri: string | null, whisperModelId: string | null) => {
       try {
-        const note = await createVoiceNote(audioUri, transcript, whisperModelId ?? null);
+        const note = audioUri
+          ? await createVoiceNote(audioUri, text, whisperModelId)
+          : await createTextNote(text);
         await refreshNotes();
+        showToast("Saved thought to memory");
+        sheetRef.current?.snapToIndex(0);
         if (note.status !== "embedded") {
           setError(null);
         }
       } catch (err) {
-        // createVoiceNote's own near-empty-file guard (EmptyRecordingError)
-        // and its post-transcribe silence check (SilentRecordingError) are
-        // both "there was nothing here," not a real failure — same silent
-        // discard as the checks above, not an alert.
+        // "There was nothing here" (near-empty audio, Whisper flagged it
+        // silent after the fact) is a silent discard, not a failure —
+        // see the BLANK AUDIO & SILENCE GUARD requirement.
         if (!(err instanceof EmptyRecordingError) && !(err instanceof SilentRecordingError)) {
           throw err;
         }
@@ -149,16 +174,76 @@ export default function HomeScreen() {
     [refreshNotes]
   );
 
-  const finishChatUtterance = useCallback(async (audioUri: string) => {
-    if (await isAudioTooShort(audioUri)) {
-      return;
-    }
-    const { transcript } = await asrRouter.transcribe(audioUri);
-    if (isSilentTranscript(transcript)) {
-      return;
-    }
-    await chatContentRef.current?.submitQuery(transcript.trim(), "voice");
-  }, []);
+  /** Shared by ComposeBar's typed submit and both voice paths. `audioUri`
+   * is null for a typed submission (nothing to attach if it turns out to be
+   * a RECORD). Returns once fully handled — including, for ASK, once the
+   * RAG answer has finished streaming in (not once speech has finished
+   * playing; see `ask`/`submitQuery`'s own distinction for that). */
+  const routeFreeformInput = useCallback(
+    async (text: string, audioUri: string | null, whisperModelId: string | null): Promise<{ intent: "RECORD" | "ASK" }> => {
+      setProcessingState("processing");
+      // Requirement 1: ASK auto-peeks to 50% to show the answer card;
+      // RECORD snaps back to the resting peek once saved (see routeRecord).
+      // Snapping to the halfway point immediately, before classification
+      // even resolves, means the sheet is already moving instead of
+      // sitting frozen during the (usually sub-second, but not free)
+      // classification step.
+      sheetRef.current?.snapToIndex(1);
+      try {
+        const intent = await classifyIntent(text);
+        setProcessingLabel(intent === "RECORD" ? "note" : "query");
+        if (intent === "RECORD") {
+          await routeRecord(text, audioUri, whisperModelId);
+        } else {
+          await chatSession.submitQuery(text, audioUri ? "voice" : "text");
+        }
+        return { intent };
+      } finally {
+        setProcessingState("idle");
+        setProcessingLabel(null);
+      }
+    },
+    [routeRecord, chatSession]
+  );
+
+  // ---- The single shared recording pipeline ------------------------------
+  //
+  // Both a manual tap on the center button AND Handsfree Mode's continuous
+  // loop funnel through this exact function — see its own note on the
+  // "Hey Xayra" gap below.
+
+  const finishUtterance = useCallback(
+    async (audioUri: string, reportState?: (state: "processing" | "speaking") => void) => {
+      if (await isAudioTooShort(audioUri)) {
+        return;
+      }
+      const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
+      if (isSilentTranscript(transcript)) {
+        return;
+      }
+
+      reportState?.("processing");
+      const { intent } = await routeFreeformInput(transcript.trim(), audioUri, whisperModelId ?? null);
+
+      reportState?.("speaking");
+      if (intent === "RECORD") {
+        await speakTextAndWait("Saved.");
+      } else {
+        // Deliberately NOT chatSession's own (fire-and-forget) speech —
+        // Handsfree Mode needs to actually wait for playback to finish
+        // before ActiveModeManager re-arms the mic, or it would transcribe
+        // the assistant's own voice as the next "question" (no echo
+        // cancellation exists here). `ask()` runs the same RAG exchange
+        // with no speech side effect of its own, so this is the only
+        // speech that happens.
+        const { text } = await chatSession.ask(transcript.trim());
+        if (text) {
+          await speakTextAndWait(text);
+        }
+      }
+    },
+    [routeFreeformInput, chatSession]
+  );
 
   const handleRecordPress = useCallback(async () => {
     if (recorder.isTransitioning) {
@@ -171,26 +256,16 @@ export default function HomeScreen() {
         if (!audioUri) {
           return;
         }
-        setProcessingState("processing");
         try {
-          if (modeRef.current === "notes") {
-            await finishNotesUtterance(audioUri);
-          } else {
-            setIsTranscribingChatVoice(true);
-            await finishChatUtterance(audioUri);
-          }
+          await finishUtterance(audioUri);
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           setError(message);
           Alert.alert("Recording Error", message);
-        } finally {
-          setProcessingState("idle");
-          setIsTranscribingChatVoice(false);
         }
       } else {
-        // Requirement 5: tapping to start recording collapses the sheet to
-        // its peek height immediately, putting full attention on the
-        // waveform rather than whatever was scrolled/expanded a moment ago.
+        // Requirement 5 (carried over): tapping to start recording
+        // collapses the sheet to its resting peek immediately.
         sheetRef.current?.snapToIndex(0);
         asrRouter.startListening();
         await recorder.startRecording();
@@ -198,40 +273,39 @@ export default function HomeScreen() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Recording failed.");
     }
-  }, [recorder, finishNotesUtterance, finishChatUtterance]);
+  }, [recorder, finishUtterance]);
 
-  // Active/hands-free Mode: a long-press on the center button (see
-  // CentralRecorderCanvas's onLongPress below) engages the SAME continuous
-  // listen-until-silence loop already built for this app (services/audio/
-  // activeMode.ts), rather than a dedicated "Handsfree Mode" toggle button —
-  // there is deliberately no such button rendered anywhere on this screen.
+  // ---- Handsfree Mode -----------------------------------------------------
   //
-  // Worth being explicit about a real gap: this is NOT wake-word ("Hey
-  // Xayra") activation. No keyword-spotting engine (e.g. Porcupine, a
-  // trained wake-word model) exists in this codebase, and building one is a
-  // separate, materially larger undertaking than everything else in this
-  // redesign combined — it has NOT been implemented here. What IS wired end
-  // to end: once engaged (by long-press), the mic stays open, auto-segments
-  // on silence (VAD), and each finished utterance drives the exact same
-  // finishNotesUtterance/finishChatUtterance pipeline as a manual tap —
-  // satisfying the "manual tap and hands-free trigger the same pipeline"
-  // half of the requirement without the wake-word half.
+  // A REAL GAP, stated plainly: there is no "Hey Xayra" wake-word engine in
+  // this codebase. Keyword-spotting (e.g. Porcupine, or a trained wake-word
+  // model) is a separate, materially larger undertaking — a model asset, an
+  // always-on low-power audio pipeline distinct from the full recorder —
+  // that has NOT been built here. What Handsfree Mode actually is: the
+  // 🎧 toggle below engages the existing continuous listen-until-silence
+  // loop (services/audio/activeMode.ts) manually; once engaged, every
+  // utterance it detects drives the exact same finishUtterance pipeline as
+  // a manual tap, satisfying "the same pipeline for both triggers" without
+  // the wake-word half.
+  // Set below, once armHandsfreeTimeout exists — read through a ref here to
+  // avoid a circular dependency (armHandsfreeTimeout needs `activeMode`,
+  // which is only created by passing handleActiveModeUtterance into
+  // useActiveMode below).
+  const armHandsfreeTimeoutRef = useRef<() => void>(() => {});
+
   const handleActiveModeUtterance: ActiveModeUtteranceHandler = useCallback(
     async (audioUri, reportState) => {
+      // Every call here means ActiveModeManager actually detected speech
+      // (see its own hadSpeech guard) — re-arm the no-speech safety timeout
+      // so an actively-used session never times out mid-conversation.
+      armHandsfreeTimeoutRef.current();
       try {
-        if (modeRef.current === "notes") {
-          await finishNotesUtterance(audioUri);
-          reportState("speaking");
-          await speakTextAndWait("Saved.");
-        } else {
-          await finishChatUtterance(audioUri);
-          reportState("speaking");
-        }
+        await finishUtterance(audioUri, reportState);
       } catch (err) {
-        console.error("[ActiveMode] Failed to handle utterance", err);
+        console.error("[Handsfree] Failed to handle utterance", err);
       }
     },
-    [finishNotesUtterance, finishChatUtterance]
+    [finishUtterance]
   );
   const activeMode = useActiveMode(handleActiveModeUtterance);
 
@@ -245,12 +319,43 @@ export default function HomeScreen() {
     }, [])
   );
 
-  const handleLongPressCenterButton = useCallback(() => {
-    sheetRef.current?.snapToIndex(0);
+  // 10-minute no-speech safety timeout (Requirement 5) — armed the moment
+  // Handsfree engages, and re-armed on every utterance ActiveModeManager
+  // actually detects speech for (every call into handleActiveModeUtterance
+  // above only happens when it heard something), so an actively-used
+  // session never times out mid-conversation.
+  const handsfreeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clearHandsfreeTimeout = useCallback(() => {
+    if (handsfreeTimeoutRef.current) {
+      clearTimeout(handsfreeTimeoutRef.current);
+      handsfreeTimeoutRef.current = null;
+    }
+  }, []);
+  const armHandsfreeTimeout = useCallback(() => {
+    clearHandsfreeTimeout();
+    handsfreeTimeoutRef.current = setTimeout(() => {
+      void activeMode.stop();
+      showToast("Handsfree turned off after 10 minutes of silence.");
+    }, HANDSFREE_IDLE_TIMEOUT_MS);
+  }, [clearHandsfreeTimeout, activeMode]);
+  armHandsfreeTimeoutRef.current = armHandsfreeTimeout;
+
+  useEffect(() => {
+    if (activeMode.isActive) {
+      armHandsfreeTimeout();
+    } else {
+      clearHandsfreeTimeout();
+    }
+    return clearHandsfreeTimeout;
+  }, [activeMode.isActive, armHandsfreeTimeout, clearHandsfreeTimeout]);
+
+  const handleToggleHandsfree = useCallback(() => {
     void activeMode.toggle().catch((err) => {
-      Alert.alert("Hands-free Error", err instanceof Error ? err.message : String(err));
+      Alert.alert("Handsfree Error", err instanceof Error ? err.message : String(err));
     });
   }, [activeMode]);
+
+  const handleLongPressCenterButton = handleToggleHandsfree;
 
   const handleDeleteNote = useCallback((noteId: string) => {
     Alert.alert("Delete Note", "Are you sure you want to permanently delete this note?", [
@@ -275,15 +380,10 @@ export default function HomeScreen() {
     if (!__DEV__) {
       return;
     }
-    // Dev-only convenience, not user-facing UI on this screen anymore —
-    // exposed as a global so it's still reachable from the debugger console
-    // during development without a permanent button cluttering the canvas.
     (globalThis as { __purgeAllNotes?: () => Promise<void> }).__purgeAllNotes = () =>
       purgeAllNotes().then(() => setAllNotes([]));
   }, []);
 
-  // The header compose bar is now a submit-only surface (see HistorySheet) —
-  // typing no longer live-filters this list, so every note is shown.
   const displayedNotes: DisplayNote[] = useMemo(
     () =>
       allNotes.map((note) => ({
@@ -298,18 +398,16 @@ export default function HomeScreen() {
 
   const canvasState: RecorderCanvasState = recorder.isRecording
     ? "recording"
-    : processingState === "processing" || isTranscribingChatVoice
+    : processingState === "processing"
       ? "transcribing"
       : "idle";
 
   const recordingStatusText = recorder.isRecording
-    ? mode === "notes"
-      ? "Recording… tap to stop"
-      : "Listening for your question…"
+    ? "Recording… tap to stop"
     : canvasState === "transcribing"
-      ? mode === "notes"
-        ? "Saving voice note…"
-        : "Transcribing your question…"
+      ? processingLabel === "note"
+        ? "Transcribing your thought..."
+        : "Searching your thoughts..."
       : null;
 
   const handleSelectNote = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
@@ -317,27 +415,21 @@ export default function HomeScreen() {
   const handleSettingsPress = useCallback(() => router.push("/settings"), [router]);
   const handleInputFocus = useCallback(() => sheetRef.current?.snapToIndex(1), []);
 
-  // The header compose bar's up-arrow submit — Notes mode saves a text note
-  // directly (no recording involved), Chat mode asks it as a question, same
-  // as a voice query would. Either way this is the ONLY text-entry surface
-  // left in the app; the old per-mode input bars are gone.
   const handleSubmitText = useCallback(
     (text: string) => {
       setInputText("");
-      if (modeRef.current === "notes") {
-        void createTextNote(text)
-          .then(() => refreshNotes())
-          .catch((err) => {
-            const message = err instanceof Error ? err.message : "Failed to save note.";
-            setError(message);
-            Alert.alert("Save Failed", message);
-          });
-      } else {
-        void chatContentRef.current?.submitQuery(text, "text");
-      }
+      void routeFreeformInput(text, null, null).catch((err) => {
+        const message = err instanceof Error ? err.message : "Something went wrong.";
+        setError(message);
+        Alert.alert("Failed", message);
+      });
     },
-    [refreshNotes]
+    [routeFreeformInput]
   );
+
+  if (!isReady) {
+    return <View style={styles.canvas} />;
+  }
 
   return (
     <View style={styles.canvas}>
@@ -346,13 +438,22 @@ export default function HomeScreen() {
           {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
           <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
           <Text style={styles.brandTitle}>Xayra</Text>
+          <View style={styles.headerSpacer} />
+          <Pressable
+            onPress={handleToggleHandsfree}
+            style={[styles.handsfreeButton, activeMode.isActive && styles.handsfreeButtonActive]}
+          >
+            <Text style={styles.handsfreeButtonText}>
+              🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
+            </Text>
+          </Pressable>
         </View>
         <Text style={styles.brandSubtitle}>
           Tap to record your thoughts, later bring back your memories by tapping Xayra....
         </Text>
       </View>
 
-      <View style={[styles.centerArea, { paddingBottom: getSheetPeekHeight(insets.bottom) + 24 }]}>
+      <View style={[styles.centerArea, { paddingBottom: 220 }]}>
         <CentralRecorderCanvas
           state={canvasState}
           amplitude={recorder.amplitude}
@@ -361,29 +462,15 @@ export default function HomeScreen() {
           disabled={processingState === "processing" || recorder.isTransitioning}
         />
         {recordingStatusText && <Text style={styles.statusText}>{recordingStatusText}</Text>}
-        {activeMode.isActive && <Text style={styles.activeModeText}>Hands-free · {activeMode.state}</Text>}
         {error && <Text style={styles.errorText}>{error}</Text>}
       </View>
 
-      <ModeSwitcherPill
-        mode={mode}
-        onChange={setMode}
-        sheetAnimatedIndex={sheetAnimatedIndex}
-        bottomOffset={getSheetPeekHeight(insets.bottom) + 12}
-      />
-
       <HistorySheet
         ref={sheetRef}
-        mode={mode}
-        inputText={inputText}
-        onInputChange={setInputText}
-        onInputFocus={handleInputFocus}
-        onSubmit={handleSubmitText}
-        onSettingsPress={handleSettingsPress}
+        historyTab={historyTab}
+        onHistoryTabChange={setHistoryTab}
         animatedIndex={sheetAnimatedIndex}
-        bottomInset={insets.bottom}
-      >
-        {mode === "notes" ? (
+        notesContent={
           <NotesSheetContent
             notes={displayedNotes}
             isSearchActive={false}
@@ -392,10 +479,29 @@ export default function HomeScreen() {
             isRestoring={isRestoring}
             onRestoreFromDrive={handleRestoreFromDrive}
           />
-        ) : (
-          <ChatSheetContent ref={chatContentRef} onShowCitation={handleShowCitation} />
-        )}
-      </HistorySheet>
+        }
+        qaContent={
+          <ChatSheetContent
+            messages={chatSession.messages}
+            isSending={chatSession.isSending}
+            speakingMessageId={chatSession.speakingMessageId}
+            modelDownload={chatSession.modelDownload}
+            isModelReady={chatSession.isModelReady}
+            onSubmitStarterPrompt={(prompt) => void chatSession.submitQuery(prompt, "text")}
+            onToggleSpeech={chatSession.toggleSpeech}
+            onShowCitation={handleShowCitation}
+          />
+        }
+      />
+
+      <ComposeBar
+        inputText={inputText}
+        onInputChange={setInputText}
+        onInputFocus={handleInputFocus}
+        onSubmit={handleSubmitText}
+        onSettingsPress={handleSettingsPress}
+        bottom={Math.max(insets.bottom + 8, SHEET_REST_HEIGHT_PX - COMPOSE_BAR_TOP_OFFSET)}
+      />
 
       <NoteDetailModal
         noteId={selectedNoteId}
@@ -422,6 +528,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
   },
+  headerSpacer: {
+    flex: 1,
+  },
   brandLogo: {
     width: 26,
     height: 26,
@@ -439,6 +548,23 @@ const styles = StyleSheet.create({
     marginTop: 4,
     lineHeight: 18,
   },
+  handsfreeButton: {
+    backgroundColor: "rgba(28,28,30,0.7)",
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: "rgba(255,255,255,0.14)",
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+  },
+  handsfreeButtonActive: {
+    backgroundColor: "rgba(99,102,241,0.35)",
+    borderColor: "#6366F1",
+  },
+  handsfreeButtonText: {
+    color: "#FFFFFF",
+    fontSize: 12,
+    fontWeight: "600",
+  },
   centerArea: {
     flex: 1,
     alignItems: "center",
@@ -448,11 +574,6 @@ const styles = StyleSheet.create({
   statusText: {
     color: "rgba(255,255,255,0.7)",
     fontSize: 13,
-    fontWeight: "600",
-  },
-  activeModeText: {
-    color: "rgba(99,102,241,0.9)",
-    fontSize: 12,
     fontWeight: "600",
   },
   errorText: {
