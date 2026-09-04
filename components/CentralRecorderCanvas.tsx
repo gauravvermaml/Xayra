@@ -130,7 +130,15 @@ export function CentralRecorderCanvas({
             style={({ pressed }) => [
               styles.button,
               state === "recording" && styles.buttonRecording,
-              disabled && styles.buttonDisabled,
+              // Build 20: `disabled` is also true while transcribing/
+              // classifying (see app/index.tsx's `processingState`), but the
+              // button should keep its full-strength 3D white tactile look
+              // through that state rather than dimming — the waveform's own
+              // traveling pulse (CentralRecorderCanvas's "transcribing"
+              // branch) is what communicates "working" here, not opacity.
+              // The opacity dim is reserved for other disabled reasons
+              // (recorder.isTransitioning while otherwise idle).
+              disabled && state !== "transcribing" && styles.buttonDisabled,
               pressed && styles.buttonPressed,
             ]}
           />

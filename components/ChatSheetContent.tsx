@@ -40,6 +40,11 @@ export type ChatSheetContentProps = {
   onSubmitStarterPrompt: (text: string) => void;
   onToggleSpeech: (message: ChatMessage) => void;
   onShowCitation: (noteId: string) => void;
+  /** Device's safe-area bottom inset — Build 20 SCROLL CONTENT CLEARANCE:
+   * added as extra trailing padding (on top of an 80px margin) so the last
+   * message can scroll clear of the solid Android nav bar instead of ending
+   * up clipped behind it. */
+  bottomInset: number;
 };
 
 /**
@@ -57,6 +62,7 @@ export function ChatSheetContent({
   onSubmitStarterPrompt,
   onToggleSpeech,
   onShowCitation,
+  bottomInset,
 }: ChatSheetContentProps) {
   const listRef = useRef<React.ElementRef<typeof BottomSheetFlatList<ChatMessage>>>(null);
 
@@ -72,6 +78,7 @@ export function ChatSheetContent({
       <BottomSheetFlatList
         ref={listRef}
         style={styles.messageList}
+        contentContainerStyle={{ paddingBottom: bottomInset + 80 }}
         data={messages}
         keyExtractor={(item) => item.id}
         onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}

@@ -49,10 +49,6 @@ export type HistorySheetProps = {
    * a stray touch, and still show up in the accessibility tree — actually
    * not mounting it at index 0 avoids all three. */
   sheetIndex: number;
-  /** Device's safe-area bottom inset — added as trailing padding on the
-   * scrollable history content so the last note/chat item can scroll clear
-   * of the solid Android nav bar instead of being clipped behind it. */
-  bottomInset: number;
 };
 
 /**
@@ -67,7 +63,7 @@ export type HistorySheetProps = {
  * switching segments never loses anything, only which is visible.
  */
 export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function HistorySheet(
-  { historyTab, onHistoryTabChange, notesContent, qaContent, onIndexChange, animatedIndex, sheetIndex, bottomInset },
+  { historyTab, onHistoryTabChange, notesContent, qaContent, onIndexChange, animatedIndex, sheetIndex },
   ref
 ) {
   // Stable across every render regardless of any other state in the app —
@@ -103,7 +99,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           above). Both the segment pill and the history content only mount
           once the sheet is at 50% or 90%. */}
       {sheetIndex > 0 && (
-        <View style={[styles.body, { paddingBottom: bottomInset }]}>
+        <View style={styles.body}>
           <View style={styles.segmentRow}>
             {(["notes", "qa"] as const).map((tab) => (
               <Pressable

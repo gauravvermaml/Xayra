@@ -3,7 +3,7 @@ import { Alert, Dimensions, Image, Keyboard, Pressable, StyleSheet, Text, View }
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import BottomSheet from "@gorhom/bottom-sheet";
-import { useSharedValue } from "react-native-reanimated";
+import Animated, { interpolate, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 
 import { CentralRecorderCanvas, type RecorderCanvasState } from "../components/CentralRecorderCanvas";
 import { ChatSheetContent } from "../components/ChatSheetContent";
@@ -42,15 +42,21 @@ import { getSyncStatus, restoreFromDrive, signInWithGoogle, type SyncStatus } fr
 const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 // Percentage snap points (SHEET_SNAP_POINTS = ['20%', '50%', '90%']) are the
-// bottom sheet's own geometry; ComposeBar is a sibling rendered outside it
-// (see that component's doc comment), so it needs an approximate pixel
-// equivalent of the 20% resting point to float just below the sheet's drag
-// handle rather than at an unrelated fixed offset. Approximate is fine —
-// this only affects where an overlay sits relative to a sheet edge, not any
-// data or gesture logic.
-const SHEET_REST_HEIGHT_PX = Dimensions.get("window").height * 0.2;
-/** ComposeBar's own row height + the drag-handle stub's hit area above it. */
-const COMPOSE_BAR_TOP_OFFSET = 76;
+// bottom sheet's own geometry, expressed as strings for @gorhom/bottom-sheet.
+// Both ComposeBar (PINNED DRAWER HEADER — Build 20) and the center canvas's
+// own bottom clearance (BUTTON CLEARANCE — Build 20) need the same values as
+// plain pixel numbers to interpolate against the sheet's live animated
+// index, so they're derived here once, from SHEET_SNAP_POINTS itself, rather
+// than each hardcoding the 20/50/90 split independently.
+const SCREEN_HEIGHT = Dimensions.get("window").height;
+const SHEET_HEIGHTS_PX = SHEET_SNAP_POINTS.map(
+  (point) => (parseFloat(point) / 100) * SCREEN_HEIGHT
+) as [number, number, number];
+/** Clean breathing room kept between the record button and the sheet's top
+ * edge, on top of the sheet's own current height — Build 20 BUTTON
+ * CLEARANCE, most visible when the sheet auto-peeks to Index 1 (50%) while
+ * an ASK request is in flight. */
+const CENTER_AREA_BREATHING_ROOM_PX = 40;
 
 /**
  * Unified, zero-friction Xayra canvas. There is no manual Record/Ask mode
@@ -99,6 +105,20 @@ export default function HomeScreen() {
   // React conditional, not something achievable from a UI-thread value alone.
   const [sheetIndex, setSheetIndex] = useState(0);
   const handleSheetIndexChange = useCallback((index: number) => setSheetIndex(index), []);
+
+  // Build 20 BUTTON CLEARANCE: the center canvas's own bottom padding tracks
+  // the sheet's live height (same interpolation approach as ComposeBar's
+  // PINNED DRAWER HEADER below) plus a fixed breathing-room margin, so the
+  // record button never ends up crowded against — or covered by — the sheet
+  // once it auto-peeks to 50% during an ASK request.
+  const centerAreaAnimatedStyle = useAnimatedStyle(() => ({
+    paddingBottom: interpolate(
+      sheetAnimatedIndex.value,
+      [0, 1, 2],
+      SHEET_HEIGHTS_PX.map((heightPx) => heightPx + CENTER_AREA_BREATHING_ROOM_PX),
+      "clamp"
+    ),
+  }));
 
   // BACKDROP TAP TO DISMISS: tapping anywhere on the canvas outside the
   // sheet/compose bar/center button (all of which are Pressables of their
@@ -477,7 +497,7 @@ export default function HomeScreen() {
         </Text>
       </View>
 
-      <View style={[styles.centerArea, { paddingBottom: 220 }]}>
+      <Animated.View style={[styles.centerArea, centerAreaAnimatedStyle]}>
         <CentralRecorderCanvas
           state={canvasState}
           amplitude={recorder.amplitude}
@@ -487,7 +507,7 @@ export default function HomeScreen() {
         />
         {recordingStatusText && <Text style={styles.statusText}>{recordingStatusText}</Text>}
         {error && <Text style={styles.errorText}>{error}</Text>}
-      </View>
+      </Animated.View>
 
       <HistorySheet
         ref={sheetRef}
@@ -495,7 +515,6 @@ export default function HomeScreen() {
         onHistoryTabChange={setHistoryTab}
         animatedIndex={sheetAnimatedIndex}
         sheetIndex={sheetIndex}
-        bottomInset={insets.bottom}
         onIndexChange={handleSheetIndexChange}
         notesContent={
           <NotesSheetContent
@@ -505,6 +524,7 @@ export default function HomeScreen() {
             onDeleteNote={handleDeleteNote}
             isRestoring={isRestoring}
             onRestoreFromDrive={handleRestoreFromDrive}
+            bottomInset={insets.bottom}
           />
         }
         qaContent={
@@ -517,6 +537,7 @@ export default function HomeScreen() {
             onSubmitStarterPrompt={(prompt) => void chatSession.submitQuery(prompt, "text")}
             onToggleSpeech={chatSession.toggleSpeech}
             onShowCitation={handleShowCitation}
+            bottomInset={insets.bottom}
           />
         }
       />
@@ -527,8 +548,21 @@ export default function HomeScreen() {
         onInputFocus={handleInputFocus}
         onSubmit={handleSubmitText}
         onSettingsPress={handleSettingsPress}
-        bottom={Math.max(insets.bottom + 8, SHEET_REST_HEIGHT_PX - COMPOSE_BAR_TOP_OFFSET)}
+        restBottom={insets.bottom + 8}
+        sheetAnimatedIndex={sheetAnimatedIndex}
+        sheetHeightsPx={SHEET_HEIGHTS_PX}
       />
+
+      {/* Build 20 HARDENED NAV BAR SURFACE: app.json's
+          android.navigationBarColor already sets #1C1C1E at the OS level,
+          but Android 15+ increasingly ignores app-set nav-bar colors under
+          enforced edge-to-edge (an OS behavior no config value can override
+          — see PROJECT_STATE_HANDOFF.md's Build 19 section). This in-app
+          View is the second line of defense: a solid #1C1C1E block docked to
+          the actual bottom safe-area inset, painted above everything else on
+          the canvas, so the surface behind the system nav buttons reads
+          correctly even on a device where the OS-level color is ignored. */}
+      <View pointerEvents="none" style={[styles.navBarInset, { height: insets.bottom }]} />
 
       <NoteDetailModal
         noteId={selectedNoteId}
@@ -608,5 +642,17 @@ const styles = StyleSheet.create({
     fontSize: 12,
     textAlign: "center",
     paddingHorizontal: 32,
+  },
+  navBarInset: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: "#1C1C1E",
+    // Above ComposeBar's own zIndex/elevation (20, see that component) —
+    // this strip must win the bottom edge even when the compose bar's
+    // sheet-tracked position brings it this low on screen.
+    zIndex: 30,
+    elevation: 30,
   },
 });

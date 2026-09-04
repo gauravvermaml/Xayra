@@ -1,6 +1,11 @@
 import { memo } from "react";
 import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import Animated, { useAnimatedKeyboard, useAnimatedStyle } from "react-native-reanimated";
+import Animated, {
+  interpolate,
+  useAnimatedKeyboard,
+  useAnimatedStyle,
+  type SharedValue,
+} from "react-native-reanimated";
 
 import { colors, radius, spacing } from "../constants/theme";
 
@@ -10,16 +15,31 @@ import { colors, radius, spacing } from "../constants/theme";
  * being the later sibling in app/index.tsx's JSX (see PREVENT CONTENT BLEED). */
 const COMPOSE_BAR_Z_INDEX = 20;
 
+/** ComposeBar's own row height + the drag-handle stub's hit area above it —
+ * subtracted from the sheet's current top edge so the bar's search row (not
+ * its top padding) is what actually sits flush with the handle. */
+const COMPOSE_BAR_TOP_OFFSET = 76;
+
 export type ComposeBarProps = {
   inputText: string;
   onInputChange: (text: string) => void;
   onInputFocus: () => void;
   onSubmit: (text: string) => void;
   onSettingsPress: () => void;
-  /** Distance from the bottom of the screen — computed by the caller from
-   * the sheet's own peek height, so this floats visually just below the
-   * sheet's drag handle rather than at an unrelated fixed offset. */
-  bottom: number;
+  /** Floor for the bar's resting distance from the bottom of the screen —
+   * the device's safe-area inset plus a small margin, used so the bar never
+   * sits closer to the screen edge than that even if a sheet-height
+   * computation ever produced something smaller. */
+  restBottom: number;
+  /** The bottom sheet's own animated snap index (0/1/2, fractional while
+   * dragging) — read directly so this bar's position tracks the sheet's
+   * actual current height every frame, not just at rest. */
+  sheetAnimatedIndex: SharedValue<number>;
+  /** Pixel height (distance from the bottom of the screen to the sheet's
+   * top edge) at each of the sheet's three snap indices, in index order —
+   * see HistorySheet's SHEET_SNAP_POINTS, the single source of truth these
+   * are derived from in app/index.tsx. */
+  sheetHeightsPx: readonly [number, number, number];
 };
 
 /**
@@ -42,6 +62,16 @@ export type ComposeBarProps = {
  * tied to the bottom sheet's internal render cycle at all. Wrapped in
  * `memo` so a value-only prop change elsewhere in app/index.tsx (unrelated
  * state) can't re-render this either.
+ *
+ * Build 20 — PINNED DRAWER HEADER: this bar's *position* now tracks the
+ * sheet's live height (via `sheetAnimatedIndex`/`sheetHeightsPx`), so it
+ * stays visually pinned to the top of the sheet — right above the drag
+ * handle, i.e. where the segment control/history content start once the
+ * sheet expands — at every snap index, not just the 20% resting peek it was
+ * hardcoded to before. Its *identity* is completely unaffected by this: it's
+ * still an ordinary sibling of <HistorySheet>, never part of that
+ * component's own render tree, so none of the above keyboard-focus
+ * reasoning changes.
  */
 export const ComposeBar = memo(function ComposeBar({
   inputText,
@@ -49,7 +79,9 @@ export const ComposeBar = memo(function ComposeBar({
   onInputFocus,
   onSubmit,
   onSettingsPress,
-  bottom,
+  restBottom,
+  sheetAnimatedIndex,
+  sheetHeightsPx,
 }: ComposeBarProps) {
   const canSubmit = inputText.trim().length > 0;
   const handleSubmit = () => {
@@ -60,16 +92,28 @@ export const ComposeBar = memo(function ComposeBar({
 
   // Keeps this bar pinned directly above the soft keyboard: as the keyboard
   // rises, `keyboard.height` tracks its live height (0 when closed), and
-  // this row rides up by exactly that much on top of its resting `bottom`
-  // position — independent of whatever snap index the sheet itself is at.
+  // this row rides up by exactly that much on top of whatever its current
+  // sheet-tracking position is.
   const keyboard = useAnimatedKeyboard();
   const keyboardFollowStyle = useAnimatedStyle(() => ({
     transform: [{ translateY: -keyboard.height.value }],
   }));
 
+  // Tracks the sheet's own current height every frame (including mid-drag,
+  // since sheetAnimatedIndex is a live shared value, not just the settled
+  // index) so the bar's top edge always sits just above the sheet's actual
+  // top edge — clamped to never go below `restBottom` even if the
+  // interpolation would otherwise put it closer to the screen edge.
+  const sheetTrackingStyle = useAnimatedStyle(() => {
+    const sheetTopPx = interpolate(sheetAnimatedIndex.value, [0, 1, 2], sheetHeightsPx, "clamp");
+    return {
+      bottom: Math.max(restBottom, sheetTopPx - COMPOSE_BAR_TOP_OFFSET),
+    };
+  });
+
   return (
     <Animated.View
-      style={[styles.container, { bottom }, keyboardFollowStyle]}
+      style={[styles.container, sheetTrackingStyle, keyboardFollowStyle]}
       pointerEvents="box-none"
     >
       <View style={styles.row}>

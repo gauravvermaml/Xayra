@@ -19,6 +19,11 @@ export type NotesSheetContentProps = {
   onDeleteNote: (noteId: string) => void;
   isRestoring: boolean;
   onRestoreFromDrive: () => void;
+  /** Device's safe-area bottom inset — Build 20 SCROLL CONTENT CLEARANCE:
+   * added as extra trailing padding (on top of an 80px margin) so the last
+   * card can scroll clear of the solid Android nav bar instead of ending up
+   * clipped behind it. */
+  bottomInset: number;
 };
 
 /** The sheet's Notes-mode scrollable content — a `BottomSheetFlatList`, not a
@@ -32,11 +37,16 @@ export function NotesSheetContent({
   onDeleteNote,
   isRestoring,
   onRestoreFromDrive,
+  bottomInset,
 }: NotesSheetContentProps) {
   return (
     <BottomSheetFlatList
       style={styles.list}
-      contentContainerStyle={[styles.listContent, notes.length === 0 && styles.listContentEmpty]}
+      contentContainerStyle={[
+        styles.listContent,
+        notes.length === 0 && styles.listContentEmpty,
+        { paddingBottom: bottomInset + 80 },
+      ]}
       data={notes}
       keyExtractor={(item) => item.id}
       ListEmptyComponent={
