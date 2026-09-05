@@ -5,12 +5,27 @@ import type { SharedValue } from "react-native-reanimated";
 
 import { colors, radius, spacing } from "../constants/theme";
 
-/** Three explicit stages rather than the previous two: resting peek (just
- * the compose bar), a "halfway" stage the app snaps to programmatically
- * while an AI request is in flight (enough room to see the answer start
- * streaming in without fully covering the canvas), and a full expansion for
- * browsing history. */
-export const SHEET_SNAP_POINTS = ["20%", "50%", "90%"];
+/**
+ * Build 24 STRICTLY CAP BOTTOM SHEET AT 50% MAX HEIGHT: the old third stage
+ * ("90%", full expansion for browsing history) is gone — not just unused,
+ * removed from this array entirely. `@gorhom/bottom-sheet` lets a user's own
+ * drag/swipe gesture pull the sheet open to any configured snap point
+ * regardless of what index the app last set programmatically — the app only
+ * ever called `snapToIndex(0)`/`snapToIndex(1)` itself, but a manual drag
+ * could still reach the 90% point that was sitting in this array, and once
+ * there, the sticky header (ComposeBar) and the floating pill cluster above
+ * the drawer (app/index.tsx) both ended up crowded into or past the status
+ * bar — confirmed from an on-device screenshot, not assumed. Removing the
+ * snap point outright is what makes 50% a real ceiling: there is physically
+ * nothing left to drag to above it, for a gesture or for any future
+ * programmatic snap.
+ *
+ * Two stages now: resting peek (just the compose bar) and a single
+ * expanded stage — both the "AI request in flight" auto-peek and full
+ * history browsing share this one 50% stage rather than having their own
+ * separate heights.
+ */
+export const SHEET_SNAP_POINTS = ["20%", "50%"];
 
 export type HistoryTab = "notes" | "qa";
 
@@ -116,14 +131,18 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       // window level. Those are two different settings the library checks
       // independently; app.json's controls the window, this one controls
       // whether THIS library's internal keyboard math runs at all. Without
-      // it, `highestDetentPosition` (a small number — the 90% snap point
-      // starts near the top of the screen) minus the keyboard's height
-      // (larger) went negative and clamped to 0 — literally pinning the
-      // sheet's top edge to the top of the screen. Setting this to match
-      // app.json's own window mode makes the library stand down and leaves
-      // our explicit `snapToIndex(1)` (ComposeBar's onFocus, via
-      // app/index.tsx's handleInputFocus) as the only thing controlling the
-      // sheet's position on focus.
+      // it, `highestDetentPosition` (a small number back when 90% was the
+      // top snap point — it starts near the top of the screen) minus the
+      // keyboard's height (larger) went negative and clamped to 0 —
+      // literally pinning the sheet's top edge to the top of the screen.
+      // Setting this to match app.json's own window mode makes the library
+      // stand down and leaves our explicit `snapToIndex(1)` (ComposeBar's
+      // onFocus, via app/index.tsx's handleInputFocus) as the only thing
+      // controlling the sheet's position on focus. Still needed after Build
+      // 24 removed the 90% snap point (50% is now `highestDetentPosition`
+      // instead) — this prop is what stops the library's own keyboard math
+      // from running AT ALL, independent of which value that math would
+      // have produced.
       android_keyboardInputMode="adjustResize"
       backgroundStyle={styles.background}
       handleComponent={renderHandle}
@@ -151,8 +170,9 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
 
       {/* IDLE PEEK ISOLATION (cont.): at index 0 (20%), everything below the
           sticky header renders nothing at all — not the segment pill, not
-          either history list. Both only mount once the sheet is at 50% or
-          90%. PADDING & CLEARANCE: `body`'s `marginTop` (16dp, below) is a
+          either history list. Both only mount once the sheet reaches its
+          (now sole, Build 24) expanded 50% stage. PADDING & CLEARANCE:
+          `body`'s `marginTop` (16dp, below) is a
           real flex margin, not a clipping trick — the segment pills/list can
           structurally never render behind the sticky header above them
           (there's no absolute positioning or negative margin anywhere in

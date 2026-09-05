@@ -53,8 +53,15 @@ const SILENCE_TRANSCRIPT_PATTERN = /^[\s.,\-]*$/;
 /** whisper.cpp's own literal marker for "nothing here" on a blank/near-silent
  * clip — distinct from the punctuation-noise case above, and worth matching
  * explicitly rather than relying on it happening to fall through the
- * punctuation-only pattern (it doesn't; "[BLANK_AUDIO]" contains letters). */
-const BLANK_AUDIO_MARKER_PATTERN = /^\[?\s*(?:blank_audio|silence)\s*\]?$/i;
+ * punctuation-only pattern (it doesn't; "[BLANK_AUDIO]" contains letters).
+ *
+ * Build 24 bug fix: this only matched square-bracket wrapping (`[silence]`),
+ * but the on-device model observed here hallucinates it in PARENTHESES —
+ * `(silence)` — which fell straight through both this and the
+ * punctuation-only pattern above and got saved as a real note (confirmed via
+ * an on-device screenshot: a "#Voice" card whose entire content was literally
+ * "(silence)"). `[([]?`/`[)\]]?` now accept either bracket style, or none. */
+const BLANK_AUDIO_MARKER_PATTERN = /^[([]?\s*(?:blank_audio|silence)\s*[)\]]?$/i;
 
 /** Shared with app/index.tsx's voice-query flow (both Notes and Chat modes)
  * so every surface agrees on what counts as "nothing was actually said"

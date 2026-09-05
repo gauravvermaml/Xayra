@@ -16,7 +16,7 @@ import { colors } from "../constants/theme";
 import { asrRouter } from "../services/ai/asrRouter";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
 import { useChatSession } from "../services/ai/useChatSession";
-import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
+import { isLikelyAmbientNoise, useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakTextAndWait } from "../services/audio/tts";
 import { isAudioTooShort } from "../services/audio/wav";
@@ -41,17 +41,18 @@ import { getSyncStatus, restoreFromDrive, signInWithGoogle, type SyncStatus } fr
  * indefinitely. */
 const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
-// Percentage snap points (SHEET_SNAP_POINTS = ['20%', '50%', '90%']) are the
-// bottom sheet's own geometry, expressed as strings for @gorhom/bottom-sheet.
-// Both ComposeBar (PINNED DRAWER HEADER — Build 20) and the center canvas's
-// own bottom clearance (BUTTON CLEARANCE — Build 20) need the same values as
-// plain pixel numbers to interpolate against the sheet's live animated
-// index, so they're derived here once, from SHEET_SNAP_POINTS itself, rather
-// than each hardcoding the 20/50/90 split independently.
+// Percentage snap points (SHEET_SNAP_POINTS = ['20%', '50%'] as of Build 24 —
+// see HistorySheet.tsx) are the bottom sheet's own geometry, expressed as
+// strings for @gorhom/bottom-sheet. The center canvas's own bottom clearance
+// (BUTTON CLEARANCE — Build 20) and the floating pill cluster above the
+// drawer (Build 23) both need the same values as plain pixel numbers to
+// interpolate against the sheet's live animated index, so they're derived
+// here once, from SHEET_SNAP_POINTS itself, rather than each hardcoding the
+// split independently.
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 const SHEET_HEIGHTS_PX = SHEET_SNAP_POINTS.map(
   (point) => (parseFloat(point) / 100) * SCREEN_HEIGHT
-) as [number, number, number];
+) as [number, number];
 /** Clean breathing room kept between the record button and the sheet's top
  * edge, on top of the sheet's own current height — Build 20 BUTTON
  * CLEARANCE, most visible when the sheet auto-peeks to Index 1 (50%) while
@@ -132,7 +133,7 @@ export default function HomeScreen() {
   const centerAreaAnimatedStyle = useAnimatedStyle(() => ({
     paddingBottom: interpolate(
       sheetAnimatedIndex.value,
-      [0, 1, 2],
+      [0, 1],
       SHEET_HEIGHTS_PX.map((heightPx) => heightPx + CENTER_AREA_BREATHING_ROOM_PX),
       "clamp"
     ),
@@ -141,8 +142,8 @@ export default function HomeScreen() {
   // Build 23 POSITION FLOATING PILLS (live-tracked): found by testing on a
   // physical device — a fixed `bottom: SHEET_HEIGHTS_PX[0] + margin` (the
   // sheet's RESTING height only) put the Handsfree/Record-Ask cluster
-  // exactly where intended at the 20% peek, but once the sheet expanded to
-  // 50%/90% the cluster stayed put and ended up floating on top of note/chat
+  // exactly where intended at the 20% peek, but once the sheet expanded
+  // further the cluster stayed put and ended up floating on top of note/chat
   // cards instead of above the drawer. Same fix as BUTTON CLEARANCE just
   // above: track the sheet's actual live height via the same
   // `sheetAnimatedIndex`/`SHEET_HEIGHTS_PX` interpolation, not just its rest
@@ -150,7 +151,7 @@ export default function HomeScreen() {
   // there's no text input or keyboard interaction in this stack at all, just
   // a plain shared-value interpolation against the sheet's own index.
   const drawerFloatingStackAnimatedStyle = useAnimatedStyle(() => ({
-    bottom: interpolate(sheetAnimatedIndex.value, [0, 1, 2], SHEET_HEIGHTS_PX, "clamp") + 16,
+    bottom: interpolate(sheetAnimatedIndex.value, [0, 1], SHEET_HEIGHTS_PX, "clamp") + 16,
   }));
 
   // BACKDROP TAP TO DISMISS: tapping anywhere on the canvas outside the
@@ -291,12 +292,24 @@ export default function HomeScreen() {
   // "Hey Xayra" gap below.
 
   const finishUtterance = useCallback(
-    async (audioUri: string, reportState?: (state: "processing" | "speaking") => void) => {
+    async (
+      audioUri: string,
+      reportState?: (state: "processing" | "speaking") => void,
+      options?: { isHandsfree?: boolean }
+    ) => {
       if (await isAudioTooShort(audioUri)) {
         return;
       }
       const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
       if (isSilentTranscript(transcript)) {
+        return;
+      }
+      // Build 24 SILENCE DISCARD: scoped to Handsfree only — see
+      // isLikelyAmbientNoise's own doc comment (services/audio/activeMode.ts)
+      // for why manual recordings are exempt (a short manual note is a
+      // deliberate choice, not noise). Discarded here, before routing/
+      // saving/speaking ever happens — no note, no card, no TTS.
+      if (options?.isHandsfree && isLikelyAmbientNoise(transcript)) {
         return;
       }
 
@@ -364,6 +377,14 @@ export default function HomeScreen() {
   // see activeMode.ts), so an actively-used session never times out
   // mid-conversation. Nothing needed fixing there.
   //
+  // Build 24: `finishUtterance` below is now called with
+  // `{ isHandsfree: true }` from handleActiveModeUtterance specifically so it
+  // can run the (still non-acoustic — see activeMode.ts's own long comment)
+  // post-transcription ambient-noise filter that the RMS-threshold VAD above
+  // can't do on its own: a short, wake-word-free transcript from this path
+  // gets discarded before it's ever routed or saved, which is what actually
+  // stops room noise from turning into "(silence)" notes.
+  //
   // Set below, once armHandsfreeTimeout exists — read through a ref here to
   // avoid a circular dependency (armHandsfreeTimeout needs `activeMode`,
   // which is only created by passing handleActiveModeUtterance into
@@ -377,7 +398,7 @@ export default function HomeScreen() {
       // so an actively-used session never times out mid-conversation.
       armHandsfreeTimeoutRef.current();
       try {
-        await finishUtterance(audioUri, reportState);
+        await finishUtterance(audioUri, reportState, { isHandsfree: true });
       } catch (err) {
         console.error("[Handsfree] Failed to handle utterance", err);
       }
