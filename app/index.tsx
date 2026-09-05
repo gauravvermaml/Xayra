@@ -138,6 +138,21 @@ export default function HomeScreen() {
     ),
   }));
 
+  // Build 23 POSITION FLOATING PILLS (live-tracked): found by testing on a
+  // physical device — a fixed `bottom: SHEET_HEIGHTS_PX[0] + margin` (the
+  // sheet's RESTING height only) put the Handsfree/Record-Ask cluster
+  // exactly where intended at the 20% peek, but once the sheet expanded to
+  // 50%/90% the cluster stayed put and ended up floating on top of note/chat
+  // cards instead of above the drawer. Same fix as BUTTON CLEARANCE just
+  // above: track the sheet's actual live height via the same
+  // `sheetAnimatedIndex`/`SHEET_HEIGHTS_PX` interpolation, not just its rest
+  // value. This has none of Build 20 ComposeBar's keyboard-tracking risk —
+  // there's no text input or keyboard interaction in this stack at all, just
+  // a plain shared-value interpolation against the sheet's own index.
+  const drawerFloatingStackAnimatedStyle = useAnimatedStyle(() => ({
+    bottom: interpolate(sheetAnimatedIndex.value, [0, 1, 2], SHEET_HEIGHTS_PX, "clamp") + 16,
+  }));
+
   // BACKDROP TAP TO DISMISS: tapping anywhere on the canvas outside the
   // sheet/compose bar/center button (all of which are Pressables of their
   // own, and so claim a tap before it ever reaches this one) drops the
@@ -519,6 +534,19 @@ export default function HomeScreen() {
   const handleSettingsPress = useCallback(() => router.push("/settings"), [router]);
   const handleInputFocus = useCallback(() => sheetRef.current?.snapToIndex(1), []);
 
+  // Build 23 SYNCHRONIZE MODE PILLS WITH DRAWER TABS: tapping a mode pill
+  // sets both the deterministic routing mode AND which drawer segment is
+  // showing, in one action — Record -> "Recorded notes", Ask -> "Searched
+  // notes". These were two independent state variables before (inputMode
+  // drove routing, historyTab drove the drawer, only ever linked indirectly
+  // through routeFreeformInput's own post-submission tab flip); this handler
+  // is the single place that keeps them in lockstep the moment the pill
+  // itself is tapped, before any submission happens at all.
+  const handleSelectMode = useCallback((mode: "record" | "ask") => {
+    setInputMode(mode);
+    setHistoryTab(mode === "record" ? "notes" : "qa");
+  }, []);
+
   const handleSubmitText = useCallback(
     (text: string) => {
       setInputText("");
@@ -537,59 +565,16 @@ export default function HomeScreen() {
 
   return (
     <Pressable style={styles.canvas} onPress={handleBackdropPress}>
+      {/* Build 23 CLEAN TOP BRAND HEADER: back to just the logo/title (plus
+          its subtitle) — no pills, no cogwheel. Both moved out: the cogwheel
+          returned to ComposeBar's row (see that component), and Handsfree +
+          the Record/Ask pill now float above the drawer instead (below). */}
       <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
-        {/* Build 22.1 — RESPONSIVE FLEX CONTROL STACK: the Handsfree/Record-
-            Ask/Settings column used to be a sibling of this header,
-            `position: "absolute"` at a hand-computed `{ top: insets.top + 12,
-            right: 24 }` guess. On a narrower screen, or once the subtitle
-            below wrapped to a different number of lines, that guess didn't
-            actually line up with anything — it just floated wherever the
-            fixed numbers put it, independent of where the header's own
-            content actually ended up, which is what read as "scattered."
-            Making this row (`headerTopRow`) an ordinary
-            `flexDirection: "row", justifyContent: "space-between"` container
-            fixes that structurally, not by recalculating better numbers:
-            the control stack is now a normal flex sibling of the brand
-            block, vertically aligned to it by flexbox itself, at every
-            density/screen size, with zero absolute positioning or
-            hardcoded offsets anywhere in it. */}
-        <View style={styles.headerTopRow}>
-          <View style={styles.brandRow}>
-            {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
-            <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
-            <Text style={styles.brandTitle}>Xayra</Text>
-          </View>
-
-          <View style={styles.controlStack}>
-            <Pressable
-              onPress={handleToggleHandsfree}
-              style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
-            >
-              <Text style={[styles.handsfreePillText, activeMode.isActive && styles.handsfreePillTextActive]}>
-                🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
-              </Text>
-            </Pressable>
-
-            <View style={styles.modePill}>
-              {(["record", "ask"] as const).map((mode) => (
-                <Pressable
-                  key={mode}
-                  onPress={() => setInputMode(mode)}
-                  style={[styles.modePillOption, inputMode === mode && styles.modePillOptionActive]}
-                >
-                  <Text style={[styles.modePillText, inputMode === mode && styles.modePillTextActive]}>
-                    {mode === "record" ? "Record" : "Ask"}
-                  </Text>
-                </Pressable>
-              ))}
-            </View>
-
-            <Pressable onPress={handleSettingsPress} hitSlop={12} style={styles.cogwheelButton}>
-              <Text style={styles.cogwheelIcon}>⚙️</Text>
-            </Pressable>
-          </View>
+        <View style={styles.brandRow}>
+          {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
+          <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
+          <Text style={styles.brandTitle}>Xayra</Text>
         </View>
-
         <Text style={styles.brandSubtitle}>
           Tap to record your thoughts, later bring back your memories by tapping Xayra....
         </Text>
@@ -615,6 +600,39 @@ export default function HomeScreen() {
         {error && <Text style={styles.errorText}>{error}</Text>}
       </Animated.View>
 
+      {/* Build 23 POSITION FLOATING PILLS: Handsfree + the Record/Ask mode
+          pill float in a single right-aligned cluster directly above the
+          bottom sheet drawer, tracking the sheet's live height (see
+          drawerFloatingStackAnimatedStyle above) so it stays above the
+          drawer at every snap index instead of only at the 20% rest peek. */}
+      <Animated.View
+        pointerEvents="box-none"
+        style={[styles.drawerFloatingStack, { right: 24 }, drawerFloatingStackAnimatedStyle]}
+      >
+        <Pressable
+          onPress={handleToggleHandsfree}
+          style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
+        >
+          <Text style={[styles.handsfreePillText, activeMode.isActive && styles.handsfreePillTextActive]}>
+            🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
+          </Text>
+        </Pressable>
+
+        <View style={styles.modePill}>
+          {(["record", "ask"] as const).map((mode) => (
+            <Pressable
+              key={mode}
+              onPress={() => handleSelectMode(mode)}
+              style={[styles.modePillOption, inputMode === mode && styles.modePillOptionActive]}
+            >
+              <Text style={[styles.modePillText, inputMode === mode && styles.modePillTextActive]}>
+                {mode === "record" ? "Record" : "Ask"}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+      </Animated.View>
+
       <HistorySheet
         ref={sheetRef}
         historyTab={historyTab}
@@ -629,6 +647,7 @@ export default function HomeScreen() {
             onInputFocus={handleInputFocus}
             onSubmit={handleSubmitText}
             placeholder={inputMode === "record" ? "Type your thoughts..." : "Search your thoughts..."}
+            onSettingsPress={handleSettingsPress}
           />
         }
         notesContent={
@@ -713,20 +732,21 @@ const styles = StyleSheet.create({
     marginTop: 4,
     lineHeight: 18,
   },
-  // Build 22.1 RESPONSIVE FLEX CONTROL STACK: `headerTopRow` puts the brand
-  // block and this control column as ordinary flex siblings — no absolute
-  // positioning, no hardcoded top/right offsets, so it aligns correctly at
-  // any screen density/size by construction rather than by a guessed number.
-  headerTopRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-  },
-  // Order here is visual top-to-bottom: Handsfree, then the Record/Ask pill,
-  // then the Settings cogwheel.
-  controlStack: {
+  // Build 23 POSITION FLOATING PILLS: Handsfree + the Record/Ask pill,
+  // right-aligned, floating above the drawer — `bottom` is animated (see
+  // drawerFloatingStackAnimatedStyle) to track the sheet's live height so
+  // this stays above the drawer at every snap index, not just its resting
+  // peek. No text input lives in here (that's ComposeBar's job, inside the
+  // sheet), so unlike Build 20's ComposeBar this has no keyboard-avoidance
+  // of its own to fight with anything — just a plain shared-value
+  // interpolation against the sheet's own index.
+  drawerFloatingStack: {
+    position: "absolute",
     alignItems: "flex-end",
+    zIndex: 25,
+    elevation: 25,
   },
+  // Order here is visual top-to-bottom: Handsfree, then the Record/Ask pill.
   handsfreePill: {
     marginBottom: 10, // gap above the Record/Ask pill
     borderRadius: 999,
@@ -751,7 +771,6 @@ const styles = StyleSheet.create({
     color: "#FFFFFF",
   },
   modePill: {
-    marginBottom: 12, // gap above the Settings cogwheel
     flexDirection: "row",
     backgroundColor: "#1C1C1E",
     borderRadius: 999,
@@ -772,17 +791,6 @@ const styles = StyleSheet.create({
   },
   modePillTextActive: {
     color: colors.onAccent,
-  },
-  cogwheelButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "#1C1C1E",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  cogwheelIcon: {
-    fontSize: 18,
   },
   centerArea: {
     flex: 1,

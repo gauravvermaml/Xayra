@@ -15,6 +15,10 @@ export type ComposeBarProps = {
    * opinion of its own on which mode is active; it just renders whatever
    * string it's given. */
   placeholder: string;
+  /** Build 23: the settings cogwheel is back in this row (it left briefly in
+   * Build 22 for the floating control stack) — see this component's own doc
+   * comment for why it moved back. */
+  onSettingsPress: () => void;
 };
 
 /**
@@ -69,10 +73,11 @@ export type ComposeBarProps = {
  * prop change elsewhere in app/index.tsx (unrelated state) can't re-render
  * this either.
  *
- * Build 22: the settings gear that used to live at the end of this row has
- * moved out — it's now part of the floating Handsfree/Record-Ask/Settings
- * stack in app/index.tsx (see FLOATING CONTROL STACK), so this component no
- * longer takes an `onSettingsPress` prop at all.
+ * Build 22 moved the settings gear out of this row into a floating
+ * Handsfree/Record-Ask/Settings stack in app/index.tsx; Build 23 moved it
+ * back here, restoring `[ 🔍 Search or type... | ↑ ] [ ⚙️ ]` as the row's
+ * layout — the floating stack above the drawer is now Handsfree + the
+ * Record/Ask mode pill only.
  */
 export const ComposeBar = memo(function ComposeBar({
   inputText,
@@ -80,6 +85,7 @@ export const ComposeBar = memo(function ComposeBar({
   onInputFocus,
   onSubmit,
   placeholder,
+  onSettingsPress,
 }: ComposeBarProps) {
   const canSubmit = inputText.trim().length > 0;
 
@@ -134,6 +140,9 @@ export const ComposeBar = memo(function ComposeBar({
             <Text style={styles.submitIcon}>↑</Text>
           </Pressable>
         </View>
+        <Pressable onPress={onSettingsPress} hitSlop={12} style={styles.settingsButton}>
+          <Text style={styles.settingsIcon}>⚙️</Text>
+        </Pressable>
       </View>
     </View>
   );
@@ -188,5 +197,16 @@ const styles = StyleSheet.create({
     color: colors.onAccent,
     fontSize: 16,
     fontWeight: "700",
+  },
+  settingsButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "#1C1C1E",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  settingsIcon: {
+    fontSize: 18,
   },
 });
