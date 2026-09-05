@@ -69,48 +69,76 @@ async function ensurePermission(): Promise<boolean> {
   return requested?.granted ?? false;
 }
 
-async function showOrUpdate(status: ModelDownloadStatus): Promise<void> {
-  await ensureChannel();
-  const granted = await ensurePermission();
-  if (!granted) {
-    return;
-  }
-  const percent = Math.round(status.progressPercent);
-  await Notifications.scheduleNotificationAsync({
-    identifier: NOTIFICATION_ID,
-    content: {
-      title: "Setting up Xayra",
-      body: `Downloading in progress... ${percent}% of 100%`,
-      sticky: true,
-      autoDismiss: false,
-      ...(Platform.OS === "android" ? { channelId: CHANNEL_ID } : {}),
-    },
-    trigger: null,
-  });
-  lastShownPercent = percent;
-}
+/**
+ * Real bug, found on-device: the notification shade got stuck showing a
+ * stale "82% of 100%" long after the in-app card had already disappeared
+ * (download finished, status "ready"). Root cause — `ensurePermission()`
+ * makes a real native async call (`getPermissionsAsync`/
+ * `requestPermissionsAsync`) on every single invocation, and this used to
+ * be kicked off independently, unawaited, on every ~250ms progress tick
+ * (see modelDownloadManager's MIN_SAMPLE_INTERVAL_MS). Native calls that
+ * start close together have NO guarantee of finishing in the order they
+ * started: an earlier call queued while showing 82% could still be
+ * in-flight when the download completed and `dismiss()` ran, then finish
+ * LATER and silently re-create the notification with 82% again, after the
+ * dismiss.
+ *
+ * Fixed with a monotonically increasing `latestSeq` — every call captures
+ * its own sequence number, and checks it's still the newest one BOTH before
+ * starting any native call and again after every `await`. A call that's
+ * been superseded by a newer one (arrived while it was still queued behind
+ * a permission check, or a channel setup) aborts without touching the
+ * notification at all, so only the truly-latest status can ever actually
+ * reach the native APIs — no out-of-order overwrite is possible.
+ */
+let latestSeq = 0;
 
-async function dismiss(): Promise<void> {
-  await Notifications.dismissNotificationAsync(NOTIFICATION_ID).catch(() => {});
-  lastShownPercent = -1;
-}
-
-/** Call with the latest `ModelDownloadStatus` on every status change —
- * safe to call as often as `setStatus` itself fires; internally throttled
- * and never throws. */
-export function syncDownloadNotification(status: ModelDownloadStatus): void {
+async function applyStatus(status: ModelDownloadStatus, seq: number): Promise<void> {
   if (status.status === "downloading") {
     const percent = Math.round(status.progressPercent);
     if (percent === lastShownPercent) {
       return;
     }
-    void showOrUpdate(status);
+    await ensureChannel();
+    if (seq !== latestSeq) {
+      return;
+    }
+    const granted = await ensurePermission();
+    if (seq !== latestSeq || !granted) {
+      return;
+    }
+    await Notifications.scheduleNotificationAsync({
+      identifier: NOTIFICATION_ID,
+      content: {
+        title: "Setting up Xayra",
+        body: `Downloading in progress... ${percent}% of 100%`,
+        sticky: true,
+        autoDismiss: false,
+        ...(Platform.OS === "android" ? { channelId: CHANNEL_ID } : {}),
+      },
+      trigger: null,
+    });
+    if (seq === latestSeq) {
+      lastShownPercent = percent;
+    }
     return;
   }
   // Every other state (ready, error, idle, cellular_blocked, paused_offline)
   // clears the shade entry — "ready" because setup is done, the rest because
   // a stalled/blocked download showing "in progress" forever would be a lie.
-  if (lastShownPercent !== -1) {
-    void dismiss();
+  if (lastShownPercent === -1) {
+    return;
   }
+  await Notifications.dismissNotificationAsync(NOTIFICATION_ID).catch(() => {});
+  if (seq === latestSeq) {
+    lastShownPercent = -1;
+  }
+}
+
+/** Call with the latest `ModelDownloadStatus` on every status change —
+ * safe to call as often as `setStatus` itself fires; internally sequenced
+ * (see the long comment above) and never throws. */
+export function syncDownloadNotification(status: ModelDownloadStatus): void {
+  const seq = ++latestSeq;
+  void applyStatus(status, seq);
 }
