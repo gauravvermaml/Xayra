@@ -18,11 +18,12 @@ export type HistoryTab = "notes" | "qa";
  * A trivial, permanently-stable component — no props that change on every
  * keystroke or every render ever reach it — passed directly as
  * `handleComponent`. This is intentionally the ONLY thing living in the
- * bottom sheet's `handleComponent` slot; the actual compose bar lives
- * outside the sheet entirely now (see components/ComposeBar.tsx) precisely
- * because `handleComponent` re-creates its subtree whenever its function
- * reference changes, which typing into a TextInput living there would do on
- * every character.
+ * bottom sheet's `handleComponent` slot. As of Build 21, ComposeBar DOES
+ * live inside the sheet (see `composeBarSlot` below) — but it's rendered as
+ * an ordinary child/prop, never through `handleComponent`, precisely
+ * because that render-prop slot re-creates its subtree whenever its
+ * function reference changes, which typing into a TextInput living there
+ * would do on every character (see ComposeBar.tsx's own doc comment).
  */
 const SheetDragHandle = forwardRef<View, { onPress: () => void }>(function SheetDragHandle({ onPress }, ref) {
   return (
@@ -37,6 +38,16 @@ const SheetDragHandle = forwardRef<View, { onPress: () => void }>(function Sheet
 export type HistorySheetProps = {
   historyTab: HistoryTab;
   onHistoryTabChange: (tab: HistoryTab) => void;
+  /** Build 21 — STICKY DRAWER HEADER: a pre-built `<ComposeBar />` element,
+   * rendered here as an ordinary child inside `<BottomSheet>`, directly below
+   * the drag handle and above the segment pills/history content. Passed as a
+   * `ReactNode` rather than constructed in this file for the same reason
+   * `notesContent`/`qaContent` already are — app/index.tsx owns all of its
+   * state and callbacks, this file only decides where it's positioned. See
+   * ComposeBar.tsx's own doc comment for why rendering it this way (a plain
+   * prop/child, never `handleComponent`) doesn't reintroduce the Build 18
+   * keyboard-focus-drop bug. */
+  composeBarSlot: React.ReactNode;
   notesContent: React.ReactNode;
   qaContent: React.ReactNode;
   onIndexChange?: BottomSheetProps["onChange"];
@@ -47,7 +58,8 @@ export type HistorySheetProps = {
    * relying on the sheet's own height clipping them out of view. A value
    * that's merely invisible-by-clipping can still be measured, still steal
    * a stray touch, and still show up in the accessibility tree — actually
-   * not mounting it at index 0 avoids all three. */
+   * not mounting it at index 0 avoids all three. `composeBarSlot` is exempt
+   * from this — it's the one thing that IS visible at index 0 (see below). */
   sheetIndex: number;
 };
 
@@ -63,7 +75,7 @@ export type HistorySheetProps = {
  * switching segments never loses anything, only which is visible.
  */
 export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function HistorySheet(
-  { historyTab, onHistoryTabChange, notesContent, qaContent, onIndexChange, animatedIndex, sheetIndex },
+  { historyTab, onHistoryTabChange, composeBarSlot, notesContent, qaContent, onIndexChange, animatedIndex, sheetIndex },
   ref
 ) {
   // Stable across every render regardless of any other state in the app —
@@ -92,12 +104,23 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       backgroundStyle={styles.background}
       handleComponent={renderHandle}
     >
-      {/* IDLE PEEK ISOLATION: at index 0 (20%), the sheet body below the
-          drag handle renders nothing at all — not the segment pill, not
-          either history list — so the resting peek is strictly the drag
-          handle (inside the sheet) plus ComposeBar (outside it, floating
-          above). Both the segment pill and the history content only mount
-          once the sheet is at 50% or 90%. */}
+      {/* Build 21 STICKY DRAWER HEADER: always rendered, at every snap
+          index — this, plus the drag handle above (handleComponent), is
+          deliberately the ONLY thing visible at the 20% resting peek (IDLE
+          PEEK ISOLATION). It's a normal flex child now, in-flow above the
+          segment pills/history content below, which is what actually
+          guarantees PREVENT OVERLAP: cards can't render under or behind the
+          search input if the search input owns real, non-absolute layout
+          space above them rather than floating over an independently-scrolled
+          list. */}
+      <View style={styles.header}>{composeBarSlot}</View>
+
+      {/* IDLE PEEK ISOLATION (cont.): at index 0 (20%), everything below the
+          sticky header renders nothing at all — not the segment pill, not
+          either history list. Both only mount once the sheet is at 50% or
+          90%. PADDING & CLEARANCE: `body`'s `marginTop` is the 16dp gap
+          between the search bar and the segment pills/list content below
+          it, matching the Apple Maps reference. */}
       {sheetIndex > 0 && (
         <View style={styles.body}>
           <View style={styles.segmentRow}>
@@ -141,8 +164,18 @@ const styles = StyleSheet.create({
     borderRadius: 2,
     backgroundColor: "rgba(255,255,255,0.3)",
   },
+  // No vertical padding of its own — ComposeBar's row already has a fixed
+  // 40dp height, and the drag handle above (handleComponent) already
+  // carries its own top/bottom hit-area padding. This wrapper exists so
+  // `composeBarSlot` has a stable, named place in the sheet's flex flow.
+  header: {},
   body: {
     flex: 1,
+    // PADDING & CLEARANCE: 16dp gap between the sticky header (search bar)
+    // above and the segment pills/list content that starts here — matches
+    // the Apple Maps reference screenshot's spacing between its search bar
+    // and its "Find Nearby" result grid.
+    marginTop: 16,
   },
   segmentRow: {
     flexDirection: "row",

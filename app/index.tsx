@@ -516,6 +516,15 @@ export default function HomeScreen() {
         animatedIndex={sheetAnimatedIndex}
         sheetIndex={sheetIndex}
         onIndexChange={handleSheetIndexChange}
+        composeBarSlot={
+          <ComposeBar
+            inputText={inputText}
+            onInputChange={setInputText}
+            onInputFocus={handleInputFocus}
+            onSubmit={handleSubmitText}
+            onSettingsPress={handleSettingsPress}
+          />
+        }
         notesContent={
           <NotesSheetContent
             notes={displayedNotes}
@@ -542,17 +551,6 @@ export default function HomeScreen() {
         }
       />
 
-      <ComposeBar
-        inputText={inputText}
-        onInputChange={setInputText}
-        onInputFocus={handleInputFocus}
-        onSubmit={handleSubmitText}
-        onSettingsPress={handleSettingsPress}
-        restBottom={insets.bottom + 8}
-        sheetAnimatedIndex={sheetAnimatedIndex}
-        sheetHeightsPx={SHEET_HEIGHTS_PX}
-      />
-
       {/* Build 20 HARDENED NAV BAR SURFACE: app.json's
           android.navigationBarColor already sets #1C1C1E at the OS level,
           but Android 15+ increasingly ignores app-set nav-bar colors under
@@ -560,8 +558,11 @@ export default function HomeScreen() {
           — see PROJECT_STATE_HANDOFF.md's Build 19 section). This in-app
           View is the second line of defense: a solid #1C1C1E block docked to
           the actual bottom safe-area inset, painted above everything else on
-          the canvas, so the surface behind the system nav buttons reads
-          correctly even on a device where the OS-level color is ignored. */}
+          the canvas (it's the last sibling here, and the bottom sheet itself
+          — now the sole owner of ComposeBar's position, see Build 21 — has
+          no reason to paint above it), so the surface behind the system nav
+          buttons reads correctly even on a device where the OS-level color
+          is ignored. */}
       <View pointerEvents="none" style={[styles.navBarInset, { height: insets.bottom }]} />
 
       <NoteDetailModal

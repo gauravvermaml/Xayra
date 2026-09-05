@@ -1,24 +1,8 @@
 import { memo } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
-import Animated, {
-  interpolate,
-  useAnimatedKeyboard,
-  useAnimatedStyle,
-  type SharedValue,
-} from "react-native-reanimated";
+import { Pressable, StyleSheet, Text, View } from "react-native";
+import { BottomSheetTextInput } from "@gorhom/bottom-sheet";
 
 import { colors, radius, spacing } from "../constants/theme";
-
-/** Keeps this bar reliably painted above the bottom sheet's own (Reanimated-
- * transformed) surface on Android, where sibling paint order alone can be
- * unreliable once transforms are involved — belt-and-suspenders alongside
- * being the later sibling in app/index.tsx's JSX (see PREVENT CONTENT BLEED). */
-const COMPOSE_BAR_Z_INDEX = 20;
-
-/** ComposeBar's own row height + the drag-handle stub's hit area above it —
- * subtracted from the sheet's current top edge so the bar's search row (not
- * its top padding) is what actually sits flush with the handle. */
-const COMPOSE_BAR_TOP_OFFSET = 76;
 
 export type ComposeBarProps = {
   inputText: string;
@@ -26,52 +10,59 @@ export type ComposeBarProps = {
   onInputFocus: () => void;
   onSubmit: (text: string) => void;
   onSettingsPress: () => void;
-  /** Floor for the bar's resting distance from the bottom of the screen —
-   * the device's safe-area inset plus a small margin, used so the bar never
-   * sits closer to the screen edge than that even if a sheet-height
-   * computation ever produced something smaller. */
-  restBottom: number;
-  /** The bottom sheet's own animated snap index (0/1/2, fractional while
-   * dragging) — read directly so this bar's position tracks the sheet's
-   * actual current height every frame, not just at rest. */
-  sheetAnimatedIndex: SharedValue<number>;
-  /** Pixel height (distance from the bottom of the screen to the sheet's
-   * top edge) at each of the sheet's three snap indices, in index order —
-   * see HistorySheet's SHEET_SNAP_POINTS, the single source of truth these
-   * are derived from in app/index.tsx. */
-  sheetHeightsPx: readonly [number, number, number];
 };
 
 /**
  * The app's ONE text-entry surface (see Requirement 3 — "unify input bar").
- * Rendered as a plain sibling of `<HistorySheet>` in app/index.tsx, OUTSIDE
- * the bottom sheet's own `handleComponent` render prop entirely — that's a
- * deliberate fix, not a style choice.
  *
- * `handleComponent` is a render *function* the bottom sheet library calls
- * internally; passing it an inline arrow (as the previous pass did) creates
- * a new function identity on every parent re-render, and every parent
- * re-render includes the one caused by `inputText` changing on each
- * keystroke. React treats "a different function used as a JSX element
- * type" as a different component, so the whole subtree — including this
- * TextInput — was unmounted and remounted on every character typed, which
- * is what silently dropped keyboard focus after one letter. Because
- * `ComposeBar` is instead an ordinary named component referenced as
- * `<ComposeBar />` in a stable parent tree, React keeps the same underlying
- * TextInput instance across every keystroke — its identity is no longer
- * tied to the bottom sheet's internal render cycle at all. Wrapped in
- * `memo` so a value-only prop change elsewhere in app/index.tsx (unrelated
- * state) can't re-render this either.
+ * Build 21 — UNIFY DRAWER HEADER: this now lives INSIDE `<BottomSheet>`,
+ * rendered by HistorySheet as a sticky header row above the segment
+ * pill/history content (see that file), not as a floating sibling
+ * positioned with manual bottom/transform math against the sheet's height —
+ * that Build 20 approach and Build 19's `useAnimatedKeyboard()` follow logic
+ * before it are both gone. The bug that motivated them (see below) is fixed
+ * at its actual root now instead of being chased with more positioning math.
  *
- * Build 20 — PINNED DRAWER HEADER: this bar's *position* now tracks the
- * sheet's live height (via `sheetAnimatedIndex`/`sheetHeightsPx`), so it
- * stays visually pinned to the top of the sheet — right above the drag
- * handle, i.e. where the segment control/history content start once the
- * sheet expands — at every snap index, not just the 20% resting peek it was
- * hardcoded to before. Its *identity* is completely unaffected by this: it's
- * still an ordinary sibling of <HistorySheet>, never part of that
- * component's own render tree, so none of the above keyboard-focus
- * reasoning changes.
+ * Root cause of the Build 20 "search bar shoots to the top of the screen on
+ * focus" bug: THREE separate mechanisms were all compensating for the same
+ * keyboard at once — Android's `windowSoftInputMode="resize"` (already
+ * shrinks the whole window), `@gorhom/bottom-sheet`'s own
+ * `keyboardBehavior="interactive"` (already translates the sheet), and this
+ * component's own `useAnimatedKeyboard()`-driven `translateY` on top of
+ * both. Stacking three keyboard offsets on one element is what sent it flying
+ * off-screen. The fix is to let ONE thing own keyboard avoidance: the sheet
+ * itself. Because this component is now a normal child inside `<BottomSheet>`
+ * — not positioned independently at all — it moves as part of the sheet's
+ * own single, unified upward translation, with no separate compensation of
+ * its own left to conflict with it.
+ *
+ * That does mean solving the ORIGINAL keyboard-focus-drop bug (Build
+ * 18 — typing more than one character silently blurred the input) a
+ * different way than "keep this component fully outside the sheet," since
+ * that's no longer true. The original diagnosis was specific to
+ * `handleComponent`: it's a render *function* the bottom-sheet library
+ * invokes directly, and passing it a reference that changes identity across
+ * renders (an inline arrow recreated by a parent re-render, e.g. on every
+ * keystroke) makes the library treat it as a different component and
+ * remount the whole subtree underneath it. This component is deliberately
+ * NOT passed through `handleComponent` — HistorySheet renders it as an
+ * ordinary `ReactNode` prop (`composeBarSlot`), the exact same mechanism
+ * `notesContent`/`qaContent` already use safely in that file. A JSX element
+ * passed as a normal prop/child is diffed by React's ordinary
+ * reconciliation (same element type in the same tree position keeps its
+ * instance, full stop) — it never goes through whatever special handling
+ * `handleComponent` gets internally, so recreating the `<ComposeBar />`
+ * element on every keystroke (which app/index.tsx still does, same as it
+ * always has) is exactly as safe here as `notesContent` already was.
+ *
+ * The other half of the real fix: `TextInput` from "react-native" is
+ * swapped for `@gorhom/bottom-sheet`'s own `BottomSheetTextInput`, a
+ * near-drop-in wrapper that reports focus/blur into the sheet's internal
+ * keyboard-tracking state. Without it, the sheet has no reliable way to know
+ * an input *inside* it is focused, which undermines `keyboardBehavior`
+ * needing to compensate at all correctly. Wrapped in `memo` so a value-only
+ * prop change elsewhere in app/index.tsx (unrelated state) can't re-render
+ * this either.
  */
 export const ComposeBar = memo(function ComposeBar({
   inputText,
@@ -79,9 +70,6 @@ export const ComposeBar = memo(function ComposeBar({
   onInputFocus,
   onSubmit,
   onSettingsPress,
-  restBottom,
-  sheetAnimatedIndex,
-  sheetHeightsPx,
 }: ComposeBarProps) {
   const canSubmit = inputText.trim().length > 0;
   const handleSubmit = () => {
@@ -90,36 +78,12 @@ export const ComposeBar = memo(function ComposeBar({
     }
   };
 
-  // Keeps this bar pinned directly above the soft keyboard: as the keyboard
-  // rises, `keyboard.height` tracks its live height (0 when closed), and
-  // this row rides up by exactly that much on top of whatever its current
-  // sheet-tracking position is.
-  const keyboard = useAnimatedKeyboard();
-  const keyboardFollowStyle = useAnimatedStyle(() => ({
-    transform: [{ translateY: -keyboard.height.value }],
-  }));
-
-  // Tracks the sheet's own current height every frame (including mid-drag,
-  // since sheetAnimatedIndex is a live shared value, not just the settled
-  // index) so the bar's top edge always sits just above the sheet's actual
-  // top edge — clamped to never go below `restBottom` even if the
-  // interpolation would otherwise put it closer to the screen edge.
-  const sheetTrackingStyle = useAnimatedStyle(() => {
-    const sheetTopPx = interpolate(sheetAnimatedIndex.value, [0, 1, 2], sheetHeightsPx, "clamp");
-    return {
-      bottom: Math.max(restBottom, sheetTopPx - COMPOSE_BAR_TOP_OFFSET),
-    };
-  });
-
   return (
-    <Animated.View
-      style={[styles.container, sheetTrackingStyle, keyboardFollowStyle]}
-      pointerEvents="box-none"
-    >
+    <View style={styles.container}>
       <View style={styles.row}>
         <View style={styles.searchBar}>
           <Text style={styles.searchIcon}>⌕</Text>
-          <TextInput
+          <BottomSheetTextInput
             value={inputText}
             onChangeText={onInputChange}
             onFocus={onInputFocus}
@@ -145,18 +109,17 @@ export const ComposeBar = memo(function ComposeBar({
           <Text style={styles.settingsIcon}>⚙️</Text>
         </Pressable>
       </View>
-    </Animated.View>
+    </View>
   );
 });
 
 const styles = StyleSheet.create({
+  // No more position:absolute/zIndex/elevation — this is now an ordinary
+  // flex child inside HistorySheet's sticky header, in normal document flow
+  // above the segment pills/history content, so there's nothing left for it
+  // to visually collide with (see HISTORYSHEET's own PREVENT OVERLAP note).
   container: {
-    position: "absolute",
-    left: 0,
-    right: 0,
     paddingHorizontal: spacing.base,
-    zIndex: COMPOSE_BAR_Z_INDEX,
-    elevation: COMPOSE_BAR_Z_INDEX,
   },
   row: {
     flexDirection: "row",
