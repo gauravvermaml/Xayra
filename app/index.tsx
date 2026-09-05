@@ -12,9 +12,9 @@ import { HistorySheet, SHEET_SNAP_POINTS, type HistoryTab } from "../components/
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { NotesSheetContent, type DisplayNote } from "../components/NotesSheetContent";
 import { showToast } from "../components/Toast";
+import { colors } from "../constants/theme";
 import { asrRouter } from "../services/ai/asrRouter";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
-import { classifyIntent } from "../services/ai/intentRouter";
 import { useChatSession } from "../services/ai/useChatSession";
 import { useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
 import { useVoiceRecorder } from "../services/audio/recorder";
@@ -59,12 +59,25 @@ const SHEET_HEIGHTS_PX = SHEET_SNAP_POINTS.map(
 const CENTER_AREA_BREATHING_ROOM_PX = 40;
 
 /**
- * Unified, zero-friction Xayra canvas. There is no manual Record/Ask mode
- * toggle anymore — every submission (typed or spoken) is classified as
- * RECORD or ASK by services/ai/intentRouter.ts and routed automatically.
- * There is exactly one text-entry surface (ComposeBar, deliberately
- * rendered outside the bottom sheet — see its own doc comment for why) and
- * exactly one recording pipeline, shared by manual taps and Handsfree Mode.
+ * Build 22 — REVERT TO EXPLICIT MODE SWITCHING: the automatic RECORD/ASK
+ * classification introduced in Build 18 (a regex + Llama micro-prompt
+ * router, `services/ai/intentRouter.ts`) is gone — deleted, not just
+ * unused, along with its Llama-side `classifyIntentWithLlama` half in
+ * localLlama.ts. Routing is now 100% deterministic, driven entirely by the
+ * explicit `[ Record | Ask ]` pill in the floating control stack (see
+ * `inputMode` state below): every submission, typed or spoken, does exactly
+ * what the active pill says and nothing else — no classification step, no
+ * model call, no ambiguity to get wrong. This was a deliberate reversal of
+ * Build 18's premise, not a bug fix to it; both are legitimate product
+ * directions; automatic classification occasionally guessed wrong on
+ * ambiguous input (e.g. "do laundry" vs "did I do laundry"), and this trades
+ * that occasional-miss convenience for the predictability of the user always
+ * knowing exactly what a submission will do before they make it.
+ *
+ * There is exactly one text-entry surface (ComposeBar, rendered inside the
+ * bottom sheet as its sticky header — see that component's own doc comment)
+ * and exactly one recording pipeline, shared by manual taps and Handsfree
+ * Mode.
  */
 export default function HomeScreen() {
   const router = useRouter();
@@ -88,6 +101,11 @@ export default function HomeScreen() {
   }, []);
 
   const [historyTab, setHistoryTab] = useState<HistoryTab>("notes");
+  // Build 22 EXPLICIT MODE SWITCHING: the single source of truth for what a
+  // submission does — no classification, just this. Defaults to "record"
+  // (the more common action — most sessions are jotting a thought, not
+  // asking a question of past ones).
+  const [inputMode, setInputMode] = useState<"record" | "ask">("record");
   const [inputText, setInputText] = useState("");
   const [allNotes, setAllNotes] = useState<Note[]>([]);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
@@ -181,11 +199,14 @@ export default function HomeScreen() {
     })();
   }, [syncStatus.isConnected, refreshNotes, refreshSyncStatus]);
 
-  // ---- Unified intent routing --------------------------------------------
+  // ---- Explicit mode routing ----------------------------------------------
   //
   // Every submission — typed into ComposeBar, or spoken (manual tap or
-  // Handsfree) — funnels through here. Nothing upstream decides RECORD vs
-  // ASK anymore; classifyIntent() does, on the actual text, every time.
+  // Handsfree) — funnels through here. There is no classification step:
+  // `inputMode` (set only by the user tapping the Record/Ask pill) decides
+  // RECORD vs ASK outright, every time, with zero exceptions in either
+  // direction (RECORD never calls the RAG/Llama pipeline; ASK never writes
+  // a note).
 
   const routeRecord = useCallback(
     async (text: string, audioUri: string | null, whisperModelId: string | null) => {
@@ -220,23 +241,21 @@ export default function HomeScreen() {
   const routeFreeformInput = useCallback(
     async (text: string, audioUri: string | null, whisperModelId: string | null): Promise<{ intent: "RECORD" | "ASK" }> => {
       setProcessingState("processing");
-      // Requirement 1: ASK auto-peeks to 50% to show the answer card;
-      // RECORD snaps back to the resting peek once saved (see routeRecord).
-      // Snapping to the halfway point immediately, before classification
-      // even resolves, means the sheet is already moving instead of
-      // sitting frozen during the (usually sub-second, but not free)
-      // classification step.
+      // ASK auto-peeks to 50% to show the answer card; RECORD snaps back to
+      // the resting peek once saved (see routeRecord). Snapped immediately —
+      // there's no classification step to wait on anymore, but the sheet
+      // still moves right away rather than only after the note/answer
+      // pipeline finishes.
       sheetRef.current?.snapToIndex(1);
+      const intent: "RECORD" | "ASK" = inputMode === "record" ? "RECORD" : "ASK";
       try {
-        const intent = await classifyIntent(text);
         setProcessingLabel(intent === "RECORD" ? "note" : "query");
         if (intent === "RECORD") {
           await routeRecord(text, audioUri, whisperModelId);
         } else {
-          // Requirement 2: ASK flips the active tab to QA History so the
-          // streaming answer is what's actually visible once the sheet
-          // reaches its 50% auto-peek, rather than leaving Notes selected
-          // underneath it.
+          // ASK flips the active tab to QA History so the streaming answer
+          // is what's actually visible once the sheet reaches its 50%
+          // auto-peek, rather than leaving Notes selected underneath it.
           setHistoryTab("qa");
           sheetRef.current?.snapToIndex(1);
           await chatSession.submitQuery(text, audioUri ? "voice" : "text");
@@ -247,7 +266,7 @@ export default function HomeScreen() {
         setProcessingLabel(null);
       }
     },
-    [routeRecord, chatSession]
+    [inputMode, routeRecord, chatSession]
   );
 
   // ---- The single shared recording pipeline ------------------------------
@@ -289,48 +308,47 @@ export default function HomeScreen() {
     [routeFreeformInput, chatSession]
   );
 
-  const handleRecordPress = useCallback(async () => {
-    if (recorder.isTransitioning) {
-      return;
-    }
-    setError(null);
-    try {
-      if (recorder.isRecording) {
-        const audioUri = await recorder.stopRecording();
-        if (!audioUri) {
-          return;
-        }
-        try {
-          await finishUtterance(audioUri);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          setError(message);
-          Alert.alert("Recording Error", message);
-        }
-      } else {
-        // Requirement 5 (carried over): tapping to start recording
-        // collapses the sheet to its resting peek immediately.
-        sheetRef.current?.snapToIndex(0);
-        asrRouter.startListening();
-        await recorder.startRecording();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Recording failed.");
-    }
-  }, [recorder, finishUtterance]);
-
   // ---- Handsfree Mode -----------------------------------------------------
   //
   // A REAL GAP, stated plainly: there is no "Hey Xayra" wake-word engine in
-  // this codebase. Keyword-spotting (e.g. Porcupine, or a trained wake-word
-  // model) is a separate, materially larger undertaking — a model asset, an
-  // always-on low-power audio pipeline distinct from the full recorder —
-  // that has NOT been built here. What Handsfree Mode actually is: the
-  // 🎧 toggle below engages the existing continuous listen-until-silence
-  // loop (services/audio/activeMode.ts) manually; once engaged, every
-  // utterance it detects drives the exact same finishUtterance pipeline as
-  // a manual tap, satisfying "the same pipeline for both triggers" without
-  // the wake-word half.
+  // this codebase, still. Keyword-spotting (e.g. Porcupine, or a trained
+  // wake-word model) is a separate, materially larger undertaking — a model
+  // asset, an always-on low-power audio pipeline distinct from the full
+  // recorder — that has NOT been built here, in Build 22 or any build before
+  // it. What Handsfree Mode actually is, and remains: the 🎧 toggle below
+  // engages the existing continuous listen-until-silence loop
+  // (services/audio/activeMode.ts) manually, no spoken phrase required to
+  // start it — once engaged, it's ALREADY listening continuously and
+  // ALREADY auto-detects when an utterance starts and ends via RMS-threshold
+  // VAD (see ActiveModeManager), with no manual tap needed per utterance.
+  // That part was never broken; there was never a wake-word gate for it to
+  // pass through in the first place.
+  //
+  // What WAS genuinely broken, and is fixed below: @fugood/react-native-
+  // audio-pcm-stream (see the native module comment in
+  // services/audio/activeMode.ts and its patch in patches/) supports exactly
+  // ONE capture session at a time — a hard native constraint, not a
+  // configurable limit. Nothing before Build 22 stopped the manual record
+  // button and Handsfree's continuous session from both trying to own that
+  // one native session at once: tapping the center button while Handsfree
+  // was engaged would start a second, competing `AudioRecord.init()`/
+  // `.start()` on top of the one ActiveModeManager already had open,
+  // corrupting or silently killing whichever session lost that race — from
+  // the outside, this looks exactly like "Handsfree stopped listening" or
+  // "the continuous mic loop doesn't actually work." `handleRecordPress`
+  // below now refuses to start a manual recording while Handsfree is
+  // active, and `handleToggleHandsfree` refuses to engage Handsfree while a
+  // manual recording is in flight — the one native session is now always
+  // exclusively owned by whichever pipeline is actually running.
+  //
+  // The 10-minute no-speech auto-timeout (see armHandsfreeTimeout below) was
+  // independently re-checked and is correct as-is: armed the instant
+  // Handsfree engages, and re-armed on every utterance ActiveModeManager
+  // actually detects speech for (every call into handleActiveModeUtterance
+  // only happens when `finalizeUtterance()`'s own `hadSpeech` guard passed —
+  // see activeMode.ts), so an actively-used session never times out
+  // mid-conversation. Nothing needed fixing there.
+  //
   // Set below, once armHandsfreeTimeout exists — read through a ref here to
   // avoid a circular dependency (armHandsfreeTimeout needs `activeMode`,
   // which is only created by passing handleActiveModeUtterance into
@@ -363,6 +381,40 @@ export default function HomeScreen() {
     }, [])
   );
 
+  // ---- The single shared recording pipeline (manual tap) -----------------
+  //
+  // Declared here, after `activeMode` exists, specifically so it can guard
+  // against the single-native-session collision described above.
+  const handleRecordPress = useCallback(async () => {
+    if (recorder.isTransitioning || activeMode.isActive) {
+      return;
+    }
+    setError(null);
+    try {
+      if (recorder.isRecording) {
+        const audioUri = await recorder.stopRecording();
+        if (!audioUri) {
+          return;
+        }
+        try {
+          await finishUtterance(audioUri);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          setError(message);
+          Alert.alert("Recording Error", message);
+        }
+      } else {
+        // Tapping to start recording collapses the sheet to its resting
+        // peek immediately.
+        sheetRef.current?.snapToIndex(0);
+        asrRouter.startListening();
+        await recorder.startRecording();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Recording failed.");
+    }
+  }, [recorder, activeMode.isActive, finishUtterance]);
+
   // 10-minute no-speech safety timeout (Requirement 5) — armed the moment
   // Handsfree engages, and re-armed on every utterance ActiveModeManager
   // actually detects speech for (every call into handleActiveModeUtterance
@@ -394,10 +446,18 @@ export default function HomeScreen() {
   }, [activeMode.isActive, armHandsfreeTimeout, clearHandsfreeTimeout]);
 
   const handleToggleHandsfree = useCallback(() => {
+    // The other half of the mutual-exclusion fix above: refuse to engage
+    // Handsfree (and steal the one native capture session) while a manual
+    // recording is already using it. Only guards the *engage* direction —
+    // disengaging Handsfree is always allowed, same as it always was.
+    if (!activeMode.isActive && (recorder.isRecording || recorder.isTransitioning)) {
+      showToast("Finish your current recording first.");
+      return;
+    }
     void activeMode.toggle().catch((err) => {
       Alert.alert("Handsfree Error", err instanceof Error ? err.message : String(err));
     });
-  }, [activeMode]);
+  }, [activeMode, recorder.isRecording, recorder.isTransitioning]);
 
   const handleLongPressCenterButton = handleToggleHandsfree;
 
@@ -482,19 +542,45 @@ export default function HomeScreen() {
           {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
           <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
           <Text style={styles.brandTitle}>Xayra</Text>
-          <View style={styles.headerSpacer} />
-          <Pressable
-            onPress={handleToggleHandsfree}
-            style={[styles.handsfreeButton, activeMode.isActive && styles.handsfreeButtonActive]}
-          >
-            <Text style={styles.handsfreeButtonText}>
-              🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
-            </Text>
-          </Pressable>
         </View>
         <Text style={styles.brandSubtitle}>
           Tap to record your thoughts, later bring back your memories by tapping Xayra....
         </Text>
+      </View>
+
+      {/* Build 22 COGWHEEL FLOATING CONTROL STACK: Handsfree, the explicit
+          Record/Ask pill, and Settings, right-aligned in one floating column
+          — anchored at the same top/right offset the old inline Handsfree
+          button used to sit at (insets.top + 12 matches the header's own
+          paddingTop; 24 matches its paddingHorizontal), so nothing shifts
+          visually from where a user's eye already expects a control here. */}
+      <View pointerEvents="box-none" style={[styles.floatingControlStack, { top: insets.top + 12, right: 24 }]}>
+        <Pressable
+          onPress={handleToggleHandsfree}
+          style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
+        >
+          <Text style={[styles.handsfreePillText, activeMode.isActive && styles.handsfreePillTextActive]}>
+            🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
+          </Text>
+        </Pressable>
+
+        <View style={styles.modePill}>
+          {(["record", "ask"] as const).map((mode) => (
+            <Pressable
+              key={mode}
+              onPress={() => setInputMode(mode)}
+              style={[styles.modePillOption, inputMode === mode && styles.modePillOptionActive]}
+            >
+              <Text style={[styles.modePillText, inputMode === mode && styles.modePillTextActive]}>
+                {mode === "record" ? "Record" : "Ask"}
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+
+        <Pressable onPress={handleSettingsPress} hitSlop={12} style={styles.cogwheelButton}>
+          <Text style={styles.cogwheelIcon}>⚙️</Text>
+        </Pressable>
       </View>
 
       <Animated.View style={[styles.centerArea, centerAreaAnimatedStyle]}>
@@ -503,6 +589,14 @@ export default function HomeScreen() {
           amplitude={recorder.amplitude}
           onPress={() => void handleRecordPress()}
           onLongPress={handleLongPressCenterButton}
+          // NOT gated on activeMode.isActive: RN's Pressable disables BOTH
+          // onPress and onLongPress together, and onLongPress here is what
+          // toggles Handsfree back OFF — disabling the button while
+          // Handsfree is active would remove that gesture as a way to turn
+          // it off again. handleRecordPress's own early-return already
+          // refuses to start a competing manual recording in that state
+          // (see the wake-word/Handsfree mutual-exclusion fix above); that
+          // guard alone is the actual fix, and doesn't need this prop's help.
           disabled={processingState === "processing" || recorder.isTransitioning}
         />
         {recordingStatusText && <Text style={styles.statusText}>{recordingStatusText}</Text>}
@@ -522,7 +616,7 @@ export default function HomeScreen() {
             onInputChange={setInputText}
             onInputFocus={handleInputFocus}
             onSubmit={handleSubmitText}
-            onSettingsPress={handleSettingsPress}
+            placeholder={inputMode === "record" ? "Type your thoughts..." : "Search your thoughts..."}
           />
         }
         notesContent={
@@ -590,9 +684,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
   },
-  headerSpacer: {
-    flex: 1,
-  },
   brandLogo: {
     width: 26,
     height: 26,
@@ -610,22 +701,74 @@ const styles = StyleSheet.create({
     marginTop: 4,
     lineHeight: 18,
   },
-  handsfreeButton: {
-    backgroundColor: "rgba(28,28,30,0.7)",
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "rgba(255,255,255,0.14)",
+  // Build 22 COGWHEEL FLOATING CONTROL STACK: a right-aligned vertical
+  // column, absolutely positioned over the canvas (independent of the
+  // bottom sheet, so it's reachable regardless of sheet expansion) —
+  // `top`/`right` are set inline per-instance to match the header's own
+  // offsets exactly (see the JSX). Order here is visual top-to-bottom:
+  // Handsfree, then the Record/Ask pill, then the Settings cogwheel.
+  floatingControlStack: {
+    position: "absolute",
+    alignItems: "flex-end",
+    zIndex: 25,
+    elevation: 25,
+  },
+  handsfreePill: {
+    marginBottom: 10, // gap above the Record/Ask pill
     borderRadius: 999,
     paddingHorizontal: 12,
     paddingVertical: 7,
+    borderWidth: 1,
+    // OFF state, per spec.
+    backgroundColor: "rgba(28, 28, 30, 0.85)",
+    borderColor: "rgba(255,255,255,0.1)",
   },
-  handsfreeButtonActive: {
-    backgroundColor: "rgba(99,102,241,0.35)",
-    borderColor: "#6366F1",
+  handsfreePillActive: {
+    // ON state, per spec.
+    backgroundColor: "#635BFF",
+    borderColor: "#635BFF",
   },
-  handsfreeButtonText: {
-    color: "#FFFFFF",
+  handsfreePillText: {
     fontSize: 12,
     fontWeight: "600",
+    color: "#8E8E93",
+  },
+  handsfreePillTextActive: {
+    color: "#FFFFFF",
+  },
+  modePill: {
+    marginBottom: 12, // gap above the Settings cogwheel
+    flexDirection: "row",
+    backgroundColor: "#1C1C1E",
+    borderRadius: 999,
+    padding: 3,
+  },
+  modePillOption: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  modePillOptionActive: {
+    backgroundColor: colors.accent,
+  },
+  modePillText: {
+    color: "rgba(235,235,245,0.6)",
+    fontSize: 12,
+    fontWeight: "600",
+  },
+  modePillTextActive: {
+    color: colors.onAccent,
+  },
+  cogwheelButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: "#1C1C1E",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cogwheelIcon: {
+    fontSize: 18,
   },
   centerArea: {
     flex: 1,

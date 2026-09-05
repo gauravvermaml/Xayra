@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useEffect, useRef } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { BottomSheetTextInput } from "@gorhom/bottom-sheet";
 
@@ -9,7 +9,12 @@ export type ComposeBarProps = {
   onInputChange: (text: string) => void;
   onInputFocus: () => void;
   onSubmit: (text: string) => void;
-  onSettingsPress: () => void;
+  /** Build 22 DYNAMIC SEARCH PLACEHOLDER: driven by app/index.tsx's explicit
+   * Record/Ask pill state — "Type your thoughts..." while Record is active,
+   * "Search your thoughts..." while Ask is active. This component has no
+   * opinion of its own on which mode is active; it just renders whatever
+   * string it's given. */
+  placeholder: string;
 };
 
 /**
@@ -63,19 +68,43 @@ export type ComposeBarProps = {
  * needing to compensate at all correctly. Wrapped in `memo` so a value-only
  * prop change elsewhere in app/index.tsx (unrelated state) can't re-render
  * this either.
+ *
+ * Build 22: the settings gear that used to live at the end of this row has
+ * moved out — it's now part of the floating Handsfree/Record-Ask/Settings
+ * stack in app/index.tsx (see FLOATING CONTROL STACK), so this component no
+ * longer takes an `onSettingsPress` prop at all.
  */
 export const ComposeBar = memo(function ComposeBar({
   inputText,
   onInputChange,
   onInputFocus,
   onSubmit,
-  onSettingsPress,
+  placeholder,
 }: ComposeBarProps) {
   const canSubmit = inputText.trim().length > 0;
-  const handleSubmit = () => {
-    if (canSubmit) {
-      onSubmit(inputText.trim());
+
+  // Build 22 FIX DUPLICATE SUBMISSIONS: guards the window between a submit
+  // firing and the parent's cleared `inputText` prop actually landing back
+  // here. Without it, a fast double-tap on the submit button (or a quirky
+  // double-fire of the keyboard's "send" action) could call `onSubmit` twice
+  // with the exact same text before React ever re-renders this component
+  // with the parent's `inputText=""` update, re-processing an identical
+  // query/note. Re-armed the moment the prop confirms the clear — not a
+  // content-based "block this exact string" guard, which would wrongly stop
+  // a legitimately repeated question asked again later.
+  const hasPendingSubmitRef = useRef(false);
+  useEffect(() => {
+    if (inputText === "") {
+      hasPendingSubmitRef.current = false;
     }
+  }, [inputText]);
+
+  const handleSubmit = () => {
+    if (hasPendingSubmitRef.current || !canSubmit) {
+      return;
+    }
+    hasPendingSubmitRef.current = true;
+    onSubmit(inputText.trim());
   };
 
   return (
@@ -87,7 +116,7 @@ export const ComposeBar = memo(function ComposeBar({
             value={inputText}
             onChangeText={onInputChange}
             onFocus={onInputFocus}
-            placeholder="Search or type your thoughts..."
+            placeholder={placeholder}
             placeholderTextColor="rgba(235,235,245,0.45)"
             style={styles.input}
             returnKeyType="send"
@@ -105,9 +134,6 @@ export const ComposeBar = memo(function ComposeBar({
             <Text style={styles.submitIcon}>↑</Text>
           </Pressable>
         </View>
-        <Pressable onPress={onSettingsPress} hitSlop={12} style={styles.settingsButton}>
-          <Text style={styles.settingsIcon}>⚙️</Text>
-        </Pressable>
       </View>
     </View>
   );
@@ -162,16 +188,5 @@ const styles = StyleSheet.create({
     color: colors.onAccent,
     fontSize: 16,
     fontWeight: "700",
-  },
-  settingsButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    backgroundColor: "#1C1C1E",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  settingsIcon: {
-    fontSize: 18,
   },
 });

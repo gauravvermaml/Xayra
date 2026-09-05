@@ -112,15 +112,23 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           guarantees PREVENT OVERLAP: cards can't render under or behind the
           search input if the search input owns real, non-absolute layout
           space above them rather than floating over an independently-scrolled
-          list. */}
+          list.
+          Build 22 re-verified LOCK KEYBOARD FOCUS SNAP TO 50%: the
+          `<BottomSheetTextInput>` inside `composeBarSlot` (ComposeBar.tsx)
+          already has an explicit `onFocus` handler wired all the way up from
+          app/index.tsx's `handleInputFocus`, which calls
+          `sheetRef.current?.snapToIndex(1)` on every focus — this was
+          already true as of Build 21 and needed no change here; re-checked
+          against this build's screenshot regression rather than assumed. */}
       <View style={styles.header}>{composeBarSlot}</View>
 
       {/* IDLE PEEK ISOLATION (cont.): at index 0 (20%), everything below the
           sticky header renders nothing at all — not the segment pill, not
           either history list. Both only mount once the sheet is at 50% or
-          90%. PADDING & CLEARANCE: `body`'s `marginTop` is the 16dp gap
-          between the search bar and the segment pills/list content below
-          it, matching the Apple Maps reference. */}
+          90%. PADDING & CLEARANCE: `body`'s `marginTop` (16dp, below) is the
+          gap between the search bar and the segment pills/list content
+          below it, matching the Apple Maps reference — also already true as
+          of Build 21, re-verified rather than re-implemented here. */}
       {sheetIndex > 0 && (
         <View style={styles.body}>
           <View style={styles.segmentRow}>

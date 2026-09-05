@@ -99,7 +99,15 @@ export function ChatSheetContent({
               </View>
             ) : (
               <View style={styles.bubbleTextWrap}>
-                <MarkdownText text={item.text} color={item.role === "user" ? colors.onAccent : colors.textPrimary} />
+                {/* Build 22: explicit selectable={false} — MarkdownText
+                    defaults to true, which inside this BottomSheetFlatList
+                    let a drag starting on a message bubble be captured as
+                    text-selection instead of list scroll. */}
+                <MarkdownText
+                  text={item.text}
+                  color={item.role === "user" ? colors.onAccent : colors.textPrimary}
+                  selectable={false}
+                />
                 {item.isStreaming && <StreamingCursor color={item.role === "user" ? colors.onAccent : colors.accent} />}
               </View>
             )}

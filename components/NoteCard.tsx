@@ -61,7 +61,11 @@ export function NoteCard({
         )}
       </View>
 
-      <Text style={styles.content} numberOfLines={6} selectable>
+      {/* Build 22: `selectable` removed — inside a BottomSheetFlatList, RN's
+          text-selection long-press gesture competes with the sheet/list's
+          own scroll gesture, so a drag that starts on a card's text could be
+          captured as a text-selection handle drag instead of a scroll. */}
+      <Text style={styles.content} numberOfLines={6}>
         {content}
       </Text>
 
