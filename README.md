@@ -10,15 +10,14 @@ Record a voice note or type one. It's transcribed, embedded, and indexed — ent
 
 ## Product Overview & Aesthetic
 
-As of Build 19, Xayra is a single unified canvas — there is no separate Notes/Chat tab pair anymore. Everything happens on one Apple-Maps-inspired screen:
+As of Build 25, Xayra is a single unified canvas — there is no separate Notes/Chat tab pair. Everything happens on one Apple-Maps-inspired screen:
 
 - **True jet-black (`#000000`) canvas.** Not the app's older charcoal (`#0E0F12`) design system — the recording surface itself is pure black so a [`@gorhom/bottom-sheet`](https://github.com/gorhom/react-native-bottom-sheet) sitting over it (also `#000000`) reads as one continuous surface, the same visual trick Apple Maps uses for its search sheet over the map.
-- **A 1.3× central tactile record button** (`components/CentralRecorderCanvas.tsx`) — a white circular control that scales further (up to +6%) in real time while recording, driven by live microphone RMS amplitude, not a canned animation.
+- **A 1.3× central logo button** (`components/CentralRecorderCanvas.tsx`) — the Xayra emblem + wordmark (`assets/xayra-logo.png`), clipped to a circle, that scales further (up to +6%) in real time while recording, driven by live microphone RMS amplitude, not a canned animation.
 - **A stateful RMS waveform** — a row of bars around the button whose heights are driven by the same real amplitude reading (`services/audio/recorder.ts`'s `amplitude`, computed in `services/audio/wav.ts`'s `computeRms`), smoothed with a Reanimated shared-value sine wave rather than jumping frame-to-frame. Idle and recording are visually distinct states, not just a hidden/shown toggle.
-- **One sticky bottom sheet, three snap points** (`20% / 50% / 90%`, `components/HistorySheet.tsx`) — a resting "peek" showing just a drag handle and the floating compose bar above it, a mid stage the app snaps to automatically while an answer streams in, and a full expansion for browsing Notes or Q&A history via a segmented control.
-- **One text-entry surface** (`components/ComposeBar.tsx`), floating outside the sheet as its own sibling, used identically whether you're typing or the transcript came from voice.
-
-There is no manual Record/Ask mode switch. Every submission — typed or spoken — is classified automatically and routed to the right place (see [Unified Intent Engine](#unified-intent-engine--stage-1--stage-2) below).
+- **One sticky bottom sheet, capped at two snap points** (`20% / 50%`, `components/HistorySheet.tsx`) — a resting "peek" showing just a drag handle and the sticky compose bar, and a single expanded stage (shared by "an answer is streaming in" and "browsing history") showing a `Recorded notes | Searched notes` segmented control. There used to be a third, 90% stage; it was removed outright — a user's own drag gesture could reach it regardless of what the app snapped to programmatically, which pushed content into the status bar.
+- **One text-entry surface** (`components/ComposeBar.tsx`), living inside the sheet as its sticky header (with the settings cogwheel on its right), used identically whether you're typing or the transcript came from voice.
+- **An explicit `[ Record | Ask ]` mode pill**, floating with a `🎧 Handsfree` toggle above the drawer — see [Explicit Mode Routing](#explicit-mode-routing) below.
 
 ## AI & Data Architecture (100% On-Device)
 
@@ -35,9 +34,8 @@ Every stage of the pipeline below runs on-device. Nothing in it makes a network 
          │  transcript text
          ▼
   ┌─────────────────────────────────────┐
-  │  Unified Intent Engine (2-stage)    │
-  │  Stage 1: regex anchor match        │   services/ai/intentRouter.ts
-  │  Stage 2: Llama zero-temp fallback  │   services/ai/localLlama.ts
+  │  Explicit Record/Ask routing        │   app/index.tsx (inputMode state)
+  │  — no classification, no model call │   set only by the user's own tap
   └─────────────────────────────────────┘
          │                      │
    RECORD│                      │ASK
@@ -72,10 +70,8 @@ Every stage of the pipeline below runs on-device. Nothing in it makes a network 
 ### Intent & Reasoning
 `services/ai/localLlama.ts` runs a quantized Llama 3.2 Instruct GGUF model via [`llama.rn`](https://github.com/mybigday/llama.rn) (llama.cpp). Two sizes are supported — a 1B and a 3B variant, both `-UD-Q4_K_XL.gguf` (Unsloth Dynamic quantization) — and `services/ai/modelDownloadManager.ts` fetches whichever one fits the device's RAM tier (see [Hardware Requirements](#hardware-requirements--constraints)). If both happen to be present on disk, the 3B is preferred.
 
-### Unified Intent Engine — Stage 1 / Stage 2
-`services/ai/intentRouter.ts` classifies every submission (typed or transcribed) as `RECORD` (save as a new note) or `ASK` (treat as a RAG question), shared by both the compose bar and the voice pipeline so the same sentence always routes the same way regardless of how it was entered:
-- **Stage 1** — a regex match against question anchors (`what`, `where`, `when`, `who`, `how`, `remind me`, `did i`, `search`, `find`, `how much`) resolves the common case instantly, with no model call at all.
-- **Stage 2** — only for text Stage 1 can't confidently place (an ambiguous statement with no question anchor, e.g. "milk is in the fridge" vs. "is there milk in the fridge"), `classifyIntentWithLlama()` runs a deterministic (`temperature: 0`), short (`n_predict: 16`) micro-prompt through the already-loaded Llama context. This is a short, low-token generation by design so it stays fast relative to a full answer — no on-device latency benchmark has actually been recorded for it, so no specific number is claimed here. If Stage 2 itself fails (model not loaded, a native error), the router falls back to `ASK` rather than `RECORD`: silently mis-filing an ambiguous utterance as a permanent note is worse than answering "I don't have anything on that yet."
+### Explicit Mode Routing
+Earlier builds (through Build 21) classified every submission automatically via a two-stage regex + Llama micro-prompt router (`services/ai/intentRouter.ts`). As of Build 22, that file — and its Llama-side half, `classifyIntentWithLlama()` in `services/ai/localLlama.ts` — is **deleted**, not just unused. Routing is now 100% deterministic: an explicit `[ Record | Ask ]` pill (floating above the drawer, synced with which drawer segment is showing) is the single source of truth for what a submission does, set only by the user's own tap. `RECORD` always saves a note (SQLite + vector index, zero RAG calls); `ASK` always runs retrieval + generation (zero note writes) — never both, never a guess. This is a deliberate product reversal, not a bug fix: automatic classification traded away the occasional wrong guess on ambiguous input (e.g. "do laundry" vs. "did I do laundry") for convenience; the explicit pill trades that convenience back for the user always knowing exactly what a submission will do before they make it.
 
 ### Vector RAG Storage
 [`@op-engineering/op-sqlite`](https://github.com/OP-Engineering/op-sqlite) (`op-sqlite.sqliteVec: true` / `op-sqlite.fts5: true` in `package.json`) provides an encrypted (SQLCipher) SQLite database with [`sqlite-vec`](https://github.com/asg017/sqlite-vec) compiled in as a `vec0` virtual table alongside an FTS5 virtual table (`db/schema.ts`). `services/notes/noteManager.ts` fuses vector cosine similarity and FTS5 bm25 keyword results via reciprocal rank fusion for hybrid retrieval — the top-K notes are injected into the Llama prompt as an XML `<context>` block, with `[Note N]` citations enforced by the system prompt.
@@ -93,15 +89,24 @@ Running Whisper transcription and a multi-hundred-MB-to-multi-GB Llama context c
 
 **Worth being precise about scope here:** that RAM-tier split is implemented in app code and confirmed in the repo. A Google Play Console device-catalog exclusion rule (blocking install entirely below some RAM floor) is a Play Console **dashboard** setting, external to this codebase — nothing in `app.json`/`eas.json` currently encodes one, so if that exclusion is desired as a second line of defense against OOM terminations on very low-RAM devices, it needs to be configured directly in the Play Console's device catalog, not assumed from anything checked into this repo.
 
-## Build 19 — UI & Layout Physics
+## Handsfree Mode
 
-- **Keyboard pinning** — `ComposeBar.tsx` uses Reanimated's `useAnimatedKeyboard()` (a worklet-backed hook) to read live keyboard height and rides the compose bar up in lockstep via `useAnimatedStyle`, on top of `app.json`'s `android.softwareKeyboardLayoutMode: "resize"`.
-- **Backdrop tap-to-dismiss** — the root canvas is a `Pressable` that dismisses the keyboard and snaps the sheet back to index 0 on any tap that isn't claimed by a more specific control (the record button, Handsfree toggle, or the sheet itself).
-- **Auto-tab segment flipping** — `RECORD`-classified submissions flip the sheet's history segment to **Notes**; `ASK`-classified submissions flip it to **QA History** and snap the sheet to 50%, so a submission always lands on the tab that actually shows its result, regardless of whether it came from typing, a manual voice recording, or Handsfree.
-- **Strict idle sheet isolation** — at snap index 0 (20% resting peek), `HistorySheet.tsx` doesn't render the segment control or either history list at all (not just visually clip them) — they only mount once the sheet reaches 50% or 90%.
-- **Solid navigation bar** — `app.json`'s `android.navigationBarColor: "#1C1C1E"`. Note: Android 15+ increasingly ignores app-set nav-bar colors under enforced edge-to-edge, an OS behavior an app-config value can't override — only checkable on a real device running a real OS version.
+The `🎧 Handsfree` toggle (floating above the drawer) engages `services/audio/activeMode.ts`'s continuous listen-until-silence loop — an RMS-amplitude VAD that auto-detects when an utterance starts and ends, with no manual tap needed per utterance once engaged.
 
-*(All five items above landed in Build 19 and, as of this writing, have only been verified via `tsc --noEmit` and `expo export` — see `PROJECT_STATE_HANDOFF.md` for the full build log and exactly what's still unverified on a physical device.)*
+**Worth being precise about scope here, same as the Hardware Requirements caveat above:** there is no "Hey Xayra" acoustic wake-word engine in this app. A real one (e.g. Porcupine) needs a native module, an external vendor AccessKey, and a custom-trained wake-word model file — none of which exist in this repo. What exists instead is a two-part guard against ambient noise being mistaken for speech:
+- **Mutual exclusion** — the manual record button and Handsfree share one native audio-capture session (`@fugood/react-native-audio-pcm-stream` supports exactly one at a time); each refuses to start while the other is active, so they can't corrupt or steal each other's session.
+- **Post-transcription phrase filtering** (`isLikelyAmbientNoise()`) — once a Handsfree utterance is transcribed, a result under three words that doesn't mention "Xayra" is treated as a stray noise fragment and discarded silently (no note, no card, no TTS) rather than saved or asked. This is a blunt heuristic, not a semantic classifier — a genuinely short Handsfree question with no wake-word mention is also discarded by it. Manual recordings never go through this filter: a deliberately short manual note is a real note, not noise.
+
+## UI & Layout Physics
+
+- **Keyboard-locked compose bar** — `ComposeBar.tsx`'s `BottomSheetTextInput` lives inside the sheet as its sticky header; on focus, the sheet explicitly snaps to its 50% stage. The actual fix for this not simply working "for free" was `android_keyboardInputMode="adjustResize"` on `HistorySheet.tsx`'s `<BottomSheet>` — `@gorhom/bottom-sheet`'s own `keyboardBehavior="interactive"` otherwise computes and wins with its own keyboard-avoidance position, overriding any explicit `snapToIndex` call.
+- **Backdrop tap-to-dismiss** — the root canvas is a `Pressable` that dismisses the keyboard and snaps the sheet back to index 0 on any tap that isn't claimed by a more specific control (the record button, Handsfree/mode pills, or the sheet itself).
+- **Auto-tab segment sync** — `RECORD`-classified submissions flip the sheet's history segment to **Recorded notes**; `ASK`-classified submissions flip it to **Searched notes** and snap the sheet to 50%. Tapping the `[ Record | Ask ]` pill directly also flips the segment immediately, before any submission — the pill and the drawer tab can never disagree.
+- **Strict idle sheet isolation** — at snap index 0 (20% resting peek), `HistorySheet.tsx` doesn't render the segment control or either history list at all (not just visually clip them) — they only mount once the sheet reaches its (now sole) 50% expanded stage.
+- **50% height cap, structural** — the sheet's `snapPoints` are `["20%", "50%"]` only; a third, 90% stage existed through Build 23 and was removed outright, since a user's own drag gesture could reach it regardless of what the app snapped to programmatically, pushing the sticky header and the floating pill cluster into the status bar.
+- **Solid navigation bar** — `app.json`'s `android.navigationBarColor: "#1C1C1E"`, backed by a dedicated in-app `View` docked to the safe-area inset as a second line of defense. Android 15+ increasingly ignores app-set nav-bar colors under enforced edge-to-edge, an OS behavior an app-config value can't override.
+
+*(All items above have been verified on a physical device — see `PROJECT_STATE_HANDOFF.md`'s Build 20–25 entries for exactly what was tested and how.)*
 
 ## Privacy & Security
 
