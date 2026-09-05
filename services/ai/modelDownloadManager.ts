@@ -9,6 +9,7 @@ import { resetWhisperContext } from "./localWhisper";
 import { MODEL_CDN_BASE_URL } from "./modelCdn";
 import { getWhisperModelPath, isWhisperModelDownloaded, WHISPER_BASE_FILENAME } from "./whisperModels";
 import { readPreferences, writePreferences } from "../settings/preferences";
+import { syncDownloadNotification } from "../notifications/downloadNotification";
 
 /**
  * Replaces the old first-launch onboarding picker and per-model Settings
@@ -243,6 +244,11 @@ let currentStatus: ModelDownloadStatus = {
 function setStatus(patch: Partial<ModelDownloadStatus>): void {
   currentStatus = { ...currentStatus, ...patch };
   listeners.forEach((listener) => listener(currentStatus));
+  // Build 25 SYSTEM NOTIFICATION: mirrors every status change into the
+  // Android notification shade — see downloadNotification.ts for why this
+  // is a fire-and-forget, permission-optional side effect rather than
+  // something awaited or allowed to affect the download itself.
+  syncDownloadNotification(currentStatus);
 }
 
 /**

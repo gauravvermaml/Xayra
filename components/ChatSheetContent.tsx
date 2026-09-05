@@ -144,18 +144,10 @@ export function ChatSheetContent({
         </View>
       )}
 
-      {modelDownload.status === "downloading" && (
-        <View style={styles.setupStatusBar}>
-          <View style={styles.setupStatusTrack}>
-            <View style={[styles.setupStatusFill, { width: `${Math.round(modelDownload.progressPercent)}%` }]} />
-          </View>
-          <Text style={styles.setupStatusText}>Preparing Xayra… {Math.round(modelDownload.progressPercent)}%</Text>
-          <Text style={styles.setupStatusSubtext}>
-            {modelDownload.downloadedMB} MB / {modelDownload.totalMB} MB • {modelDownload.speedMBps} MB/s •{" "}
-            {modelDownload.etaSeconds}s remaining
-          </Text>
-        </View>
-      )}
+      {/* Build 25: the "downloading" progress card used to render here —
+          it's now components/ModelDownloadCard.tsx, rendered once by
+          HistorySheet.tsx beneath whichever list is showing, Notes or QA
+          alike, rather than duplicated per-tab. */}
 
       {modelDownload.status === "cellular_blocked" && (
         <View style={styles.chatModelPrompt}>
@@ -315,35 +307,5 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     fontSize: 13,
     fontWeight: "600",
-  },
-  setupStatusBar: {
-    backgroundColor: "#1C1C1E",
-    borderRadius: radius.lg,
-    padding: spacing.sm + 2,
-    marginBottom: spacing.sm,
-  },
-  setupStatusTrack: {
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#2C2C2E",
-    overflow: "hidden",
-    marginBottom: spacing.xs,
-  },
-  setupStatusFill: {
-    height: "100%",
-    backgroundColor: colors.accent,
-    borderRadius: 3,
-  },
-  setupStatusText: {
-    color: colors.textMuted,
-    ...typography.caption,
-    textAlign: "center",
-  },
-  setupStatusSubtext: {
-    color: colors.textMuted,
-    fontSize: 11,
-    textAlign: "center",
-    marginTop: 2,
-    opacity: 0.8,
   },
 });

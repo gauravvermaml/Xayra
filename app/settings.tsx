@@ -11,6 +11,7 @@ import {
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
+import Constants from "expo-constants";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { listNotes } from "../services/notes/noteManager";
@@ -46,6 +47,14 @@ function formatBytes(bytes: number): string {
 function formatTimestamp(iso: string): string {
   return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
+
+/** Build 25 SUB-VERSIONING: reads app.json's `version`/`android.versionCode`
+ * straight from Constants rather than a second hardcoded copy of either — so
+ * this label can never drift out of sync with app.json the way a literal
+ * string would the next time either number changes. */
+const APP_VERSION = Constants.expoConfig?.version ?? "1.0.0";
+const APP_VERSION_CODE = Constants.expoConfig?.android?.versionCode ?? 0;
+const VERSION_LABEL = `v${APP_VERSION} (Build ${APP_VERSION_CODE})`;
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -321,6 +330,8 @@ export default function SettingsScreen() {
             </>
           )}
         </View>
+
+        <Text style={styles.versionFooter}>{VERSION_LABEL}</Text>
       </ScrollView>
     </SafeAreaView>
   );
@@ -510,5 +521,12 @@ const styles = StyleSheet.create({
   modelButtonFlex: {
     flex: 1,
     marginTop: 0,
+  },
+  versionFooter: {
+    color: colors.textMuted,
+    fontSize: 12,
+    textAlign: "center",
+    marginTop: spacing.xl,
+    opacity: 0.7,
   },
 });

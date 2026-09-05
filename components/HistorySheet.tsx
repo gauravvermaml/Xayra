@@ -3,7 +3,9 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import BottomSheet, { type BottomSheetProps } from "@gorhom/bottom-sheet";
 import type { SharedValue } from "react-native-reanimated";
 
+import { ModelDownloadCard } from "./ModelDownloadCard";
 import { colors, radius, spacing } from "../constants/theme";
+import type { ModelDownloadStatus } from "../services/ai/modelDownloadManager";
 
 /**
  * Build 24 STRICTLY CAP BOTTOM SHEET AT 50% MAX HEIGHT: the old third stage
@@ -76,6 +78,10 @@ export type HistorySheetProps = {
    * not mounting it at index 0 avoids all three. `composeBarSlot` is exempt
    * from this — it's the one thing that IS visible at index 0 (see below). */
   sheetIndex: number;
+  /** Build 25 CARD POSITIONING: rendered once here, beneath whichever
+      list is currently visible — see ModelDownloadCard.tsx's own doc
+      comment for why this replaced the old QA-tab-only setup bar. */
+  modelDownload: ModelDownloadStatus;
 };
 
 /**
@@ -90,7 +96,17 @@ export type HistorySheetProps = {
  * switching segments never loses anything, only which is visible.
  */
 export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function HistorySheet(
-  { historyTab, onHistoryTabChange, composeBarSlot, notesContent, qaContent, onIndexChange, animatedIndex, sheetIndex },
+  {
+    historyTab,
+    onHistoryTabChange,
+    composeBarSlot,
+    notesContent,
+    qaContent,
+    onIndexChange,
+    animatedIndex,
+    sheetIndex,
+    modelDownload,
+  },
   ref
 ) {
   // Stable across every render regardless of any other state in the app —
@@ -198,6 +214,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
             ))}
           </View>
           {historyTab === "notes" ? notesContent : qaContent}
+          <ModelDownloadCard modelDownload={modelDownload} />
         </View>
       )}
     </BottomSheet>

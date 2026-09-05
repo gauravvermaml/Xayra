@@ -67,41 +67,36 @@ const KEEP_AWAKE_TAG = "remi-active-mode";
  * phrase matching" alternative. The RMS-threshold VAD above still can't tell
  * "someone is talking" from "loud ambient noise" at the AUDIO level (that
  * limitation is unchanged and undiminished); this instead asks, once
- * Whisper has already produced a transcript, whether the RESULT looks like
- * something a user actually meant to say. A transcript that's short (under
- * three words) and never mentions "Xayra" is treated as a stray room-noise
- * fragment and discarded — see `isLikelyAmbientNoise` below, called from
- * app/index.tsx's `finishUtterance`, scoped to the Handsfree path only.
- * Manual recordings (the center button) never go through this filter: a
- * deliberately short manual note ("Buy milk") is a real, wanted 2-word note,
- * not noise — the same brevity is only suspicious when nobody physically
- * pressed record for it.
+ * Whisper has already produced a transcript, whether the RESULT actually
+ * mentions the wake word. Manual recordings (the center button) never go
+ * through this filter: a deliberately short manual note ("Buy milk") is a
+ * real, wanted 2-word note, not noise — this gate only applies when nobody
+ * physically pressed record for it.
+ *
+ * Build 25 STRICT DUAL-MODE WAKE-WORD GATEKEEPER — supersedes Build 24's
+ * leniency. Build 24's version (`isLikelyAmbientNoise`, since removed) let
+ * ANY transcript of three or more words through even without ever saying
+ * "Xayra" — a bare "Any notes today?" was accepted as deliberate speech.
+ * Build 25 tightens that: EVERY Handsfree utterance, in both Record and Ask
+ * mode, must contain something recognizable as the wake word or it's
+ * discarded before it ever reaches SQLite (Record) or the RAG pipeline
+ * (Ask) — see app/index.tsx's `finishUtterance`. `WAKE_WORD_GATE_PATTERN`
+ * also recognizes a handful of phonetically-close near-misses ("Zaira",
+ * "Cyra", "Zyra", "Exayra") the on-device Whisper model has been observed to
+ * mishear "Xayra" as — still purely a post-transcription text match, not an
+ * acoustic wake-word engine (see the long comment above; that gap is
+ * unchanged). There is no more word-count leniency: a two-word "Xayra, stop"
+ * still passes (it contains the word), but a wake-word-free "Any notes
+ * today?" no longer does, regardless of length. This is a blunt text match,
+ * not a semantic classifier — that tradeoff is the actual, honest scope of a
+ * filter that costs no model call and needs no native dependency.
  */
-const MIN_DELIBERATE_SPEECH_WORDS = 3;
-const WAKE_WORD_PATTERN = /\bxayra\b/i;
+export const WAKE_WORD_GATE_PATTERN = /(xayra|zaira|cyra|zyra|exayra)/i;
 
-/**
- * True if `transcript` looks more like an ambient-noise fragment the
- * RMS-threshold VAD picked up than a deliberate Handsfree command/question —
- * see the long comment above for exactly what this is and (more
- * importantly) isn't. Mentioning "Xayra" always counts as deliberate,
- * regardless of length ("Xayra, stop" is 2 words and clearly intentional);
- * everything else needs at least `MIN_DELIBERATE_SPEECH_WORDS` words. This
- * is a blunt heuristic, not a semantic classifier — a genuinely short
- * Handsfree question with no wake-word mention (e.g. "Any notes?", 2 words)
- * will also get discarded by it. That tradeoff is the actual, honest scope
- * of a filter that costs no model call and needs no native dependency.
- */
-export function isLikelyAmbientNoise(transcript: string): boolean {
-  const trimmed = transcript.trim();
-  if (!trimmed) {
-    return true;
-  }
-  if (WAKE_WORD_PATTERN.test(trimmed)) {
-    return false;
-  }
-  const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
-  return wordCount < MIN_DELIBERATE_SPEECH_WORDS;
+/** True if `transcript` contains the wake word or one of its known
+ * phonetic near-misses — see the long comment above. */
+export function containsWakeWord(transcript: string): boolean {
+  return WAKE_WORD_GATE_PATTERN.test(transcript.trim());
 }
 
 /**

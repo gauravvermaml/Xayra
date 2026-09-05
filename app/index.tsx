@@ -16,7 +16,7 @@ import { colors } from "../constants/theme";
 import { asrRouter } from "../services/ai/asrRouter";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
 import { useChatSession } from "../services/ai/useChatSession";
-import { isLikelyAmbientNoise, useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
+import { containsWakeWord, useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakTextAndWait } from "../services/audio/tts";
 import { isAudioTooShort } from "../services/audio/wav";
@@ -326,12 +326,17 @@ export default function HomeScreen() {
       if (isSilentTranscript(transcript)) {
         return;
       }
-      // Build 24 SILENCE DISCARD: scoped to Handsfree only — see
-      // isLikelyAmbientNoise's own doc comment (services/audio/activeMode.ts)
-      // for why manual recordings are exempt (a short manual note is a
-      // deliberate choice, not noise). Discarded here, before routing/
-      // saving/speaking ever happens — no note, no card, no TTS.
-      if (options?.isHandsfree && isLikelyAmbientNoise(transcript)) {
+      // Build 25 STRICT DUAL-MODE WAKE-WORD GATEKEEPER: scoped to Handsfree
+      // only — see containsWakeWord's own doc comment
+      // (services/audio/activeMode.ts) for why manual recordings are exempt
+      // (a short manual note is a deliberate choice, not noise) and why this
+      // is stricter than Build 24's word-count leniency. Runs BEFORE either
+      // branch `routeFreeformInput` can take — Record's SQLite insert and
+      // Ask's RAG query alike — so a wake-word-free transcript never reaches
+      // either pipeline: no note saved, no query run, no card appended to
+      // "Recorded notes" or "Searched notes".
+      if (options?.isHandsfree && !containsWakeWord(transcript)) {
+        showToast("Ignored — wake word \"Xayra\" not detected");
         return;
       }
 
@@ -709,6 +714,7 @@ export default function HomeScreen() {
         animatedIndex={sheetAnimatedIndex}
         sheetIndex={sheetIndex}
         onIndexChange={handleSheetIndexChange}
+        modelDownload={chatSession.modelDownload}
         composeBarSlot={
           <ComposeBar
             inputText={inputText}
