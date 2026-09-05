@@ -101,6 +101,30 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       enableDynamicSizing={false}
       keyboardBehavior="interactive"
       keyboardBlurBehavior="restore"
+      // Build 22.2 — the actual fix for "search bar shoots to the top status
+      // bar on focus" (confirmed on-device, contradicting Build 22's
+      // assumption that this was already working). Root cause, found in
+      // @gorhom/bottom-sheet's own source
+      // (src/components/bottomSheet/BottomSheet.tsx): keyboardBehavior=
+      // "interactive" computes its OWN target position while the keyboard is
+      // shown — `highestDetentPosition - keyboardHeightInContainer`, clamped
+      // to a floor of 0 — and that computed position wins over whatever
+      // index our own onFocus handler explicitly snapped to. The library
+      // skips that override ONLY on Android when this prop is explicitly
+      // "adjustResize" — which we never set, even though app.json's
+      // android.softwareKeyboardLayoutMode is already "resize" at the OS
+      // window level. Those are two different settings the library checks
+      // independently; app.json's controls the window, this one controls
+      // whether THIS library's internal keyboard math runs at all. Without
+      // it, `highestDetentPosition` (a small number — the 90% snap point
+      // starts near the top of the screen) minus the keyboard's height
+      // (larger) went negative and clamped to 0 — literally pinning the
+      // sheet's top edge to the top of the screen. Setting this to match
+      // app.json's own window mode makes the library stand down and leaves
+      // our explicit `snapToIndex(1)` (ComposeBar's onFocus, via
+      // app/index.tsx's handleInputFocus) as the only thing controlling the
+      // sheet's position on focus.
+      android_keyboardInputMode="adjustResize"
       backgroundStyle={styles.background}
       handleComponent={renderHandle}
     >
@@ -113,22 +137,28 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           search input if the search input owns real, non-absolute layout
           space above them rather than floating over an independently-scrolled
           list.
-          Build 22 re-verified LOCK KEYBOARD FOCUS SNAP TO 50%: the
-          `<BottomSheetTextInput>` inside `composeBarSlot` (ComposeBar.tsx)
-          already has an explicit `onFocus` handler wired all the way up from
-          app/index.tsx's `handleInputFocus`, which calls
-          `sheetRef.current?.snapToIndex(1)` on every focus — this was
-          already true as of Build 21 and needed no change here; re-checked
-          against this build's screenshot regression rather than assumed. */}
+          LOCK KEYBOARD FOCUS SNAP TO 50%: the `<BottomSheetTextInput>`
+          inside `composeBarSlot` (ComposeBar.tsx) has an explicit `onFocus`
+          handler wired up from app/index.tsx's `handleInputFocus`, which
+          calls `sheetRef.current?.snapToIndex(1)` on every focus — but that
+          call alone was NOT sufficient (confirmed on a physical device: the
+          sheet still pinned to the very top instead). The actual fix is
+          `android_keyboardInputMode="adjustResize"` on `<BottomSheet>`
+          above — see the long comment on that prop for the real root cause;
+          this `onFocus` call only does anything useful once that prop stops
+          the library's own keyboard math from overriding it. */}
       <View style={styles.header}>{composeBarSlot}</View>
 
       {/* IDLE PEEK ISOLATION (cont.): at index 0 (20%), everything below the
           sticky header renders nothing at all — not the segment pill, not
           either history list. Both only mount once the sheet is at 50% or
-          90%. PADDING & CLEARANCE: `body`'s `marginTop` (16dp, below) is the
-          gap between the search bar and the segment pills/list content
-          below it, matching the Apple Maps reference — also already true as
-          of Build 21, re-verified rather than re-implemented here. */}
+          90%. PADDING & CLEARANCE: `body`'s `marginTop` (16dp, below) is a
+          real flex margin, not a clipping trick — the segment pills/list can
+          structurally never render behind the sticky header above them
+          (there's no absolute positioning or negative margin anywhere in
+          this tree that could cause that), so this gap holds regardless of
+          scroll position or sheet index, matching the Apple Maps
+          reference. */}
       {sheetIndex > 0 && (
         <View style={styles.body}>
           <View style={styles.segmentRow}>
@@ -138,8 +168,11 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
                 onPress={() => onHistoryTabChange(tab)}
                 style={[styles.segmentOption, historyTab === tab && styles.segmentOptionActive]}
               >
+                {/* Labels only — the underlying "notes"/"qa" identifiers
+                    (HistoryTab, state, routing) are unchanged; this is a
+                    display-text rename, not a rename of what the tabs are. */}
                 <Text style={[styles.segmentText, historyTab === tab && styles.segmentTextActive]}>
-                  {tab === "notes" ? "Notes" : "QA History"}
+                  {tab === "notes" ? "Recorded notes" : "Searched notes"}
                 </Text>
               </Pressable>
             ))}

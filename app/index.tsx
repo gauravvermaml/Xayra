@@ -538,49 +538,61 @@ export default function HomeScreen() {
   return (
     <Pressable style={styles.canvas} onPress={handleBackdropPress}>
       <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
-        <View style={styles.brandRow}>
-          {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
-          <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
-          <Text style={styles.brandTitle}>Xayra</Text>
+        {/* Build 22.1 — RESPONSIVE FLEX CONTROL STACK: the Handsfree/Record-
+            Ask/Settings column used to be a sibling of this header,
+            `position: "absolute"` at a hand-computed `{ top: insets.top + 12,
+            right: 24 }` guess. On a narrower screen, or once the subtitle
+            below wrapped to a different number of lines, that guess didn't
+            actually line up with anything — it just floated wherever the
+            fixed numbers put it, independent of where the header's own
+            content actually ended up, which is what read as "scattered."
+            Making this row (`headerTopRow`) an ordinary
+            `flexDirection: "row", justifyContent: "space-between"` container
+            fixes that structurally, not by recalculating better numbers:
+            the control stack is now a normal flex sibling of the brand
+            block, vertically aligned to it by flexbox itself, at every
+            density/screen size, with zero absolute positioning or
+            hardcoded offsets anywhere in it. */}
+        <View style={styles.headerTopRow}>
+          <View style={styles.brandRow}>
+            {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
+            <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
+            <Text style={styles.brandTitle}>Xayra</Text>
+          </View>
+
+          <View style={styles.controlStack}>
+            <Pressable
+              onPress={handleToggleHandsfree}
+              style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
+            >
+              <Text style={[styles.handsfreePillText, activeMode.isActive && styles.handsfreePillTextActive]}>
+                🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
+              </Text>
+            </Pressable>
+
+            <View style={styles.modePill}>
+              {(["record", "ask"] as const).map((mode) => (
+                <Pressable
+                  key={mode}
+                  onPress={() => setInputMode(mode)}
+                  style={[styles.modePillOption, inputMode === mode && styles.modePillOptionActive]}
+                >
+                  <Text style={[styles.modePillText, inputMode === mode && styles.modePillTextActive]}>
+                    {mode === "record" ? "Record" : "Ask"}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+
+            <Pressable onPress={handleSettingsPress} hitSlop={12} style={styles.cogwheelButton}>
+              <Text style={styles.cogwheelIcon}>⚙️</Text>
+            </Pressable>
+          </View>
         </View>
+
         <Text style={styles.brandSubtitle}>
           Tap to record your thoughts, later bring back your memories by tapping Xayra....
         </Text>
-      </View>
-
-      {/* Build 22 COGWHEEL FLOATING CONTROL STACK: Handsfree, the explicit
-          Record/Ask pill, and Settings, right-aligned in one floating column
-          — anchored at the same top/right offset the old inline Handsfree
-          button used to sit at (insets.top + 12 matches the header's own
-          paddingTop; 24 matches its paddingHorizontal), so nothing shifts
-          visually from where a user's eye already expects a control here. */}
-      <View pointerEvents="box-none" style={[styles.floatingControlStack, { top: insets.top + 12, right: 24 }]}>
-        <Pressable
-          onPress={handleToggleHandsfree}
-          style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
-        >
-          <Text style={[styles.handsfreePillText, activeMode.isActive && styles.handsfreePillTextActive]}>
-            🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
-          </Text>
-        </Pressable>
-
-        <View style={styles.modePill}>
-          {(["record", "ask"] as const).map((mode) => (
-            <Pressable
-              key={mode}
-              onPress={() => setInputMode(mode)}
-              style={[styles.modePillOption, inputMode === mode && styles.modePillOptionActive]}
-            >
-              <Text style={[styles.modePillText, inputMode === mode && styles.modePillTextActive]}>
-                {mode === "record" ? "Record" : "Ask"}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-
-        <Pressable onPress={handleSettingsPress} hitSlop={12} style={styles.cogwheelButton}>
-          <Text style={styles.cogwheelIcon}>⚙️</Text>
-        </Pressable>
       </View>
 
       <Animated.View style={[styles.centerArea, centerAreaAnimatedStyle]}>
@@ -701,17 +713,19 @@ const styles = StyleSheet.create({
     marginTop: 4,
     lineHeight: 18,
   },
-  // Build 22 COGWHEEL FLOATING CONTROL STACK: a right-aligned vertical
-  // column, absolutely positioned over the canvas (independent of the
-  // bottom sheet, so it's reachable regardless of sheet expansion) —
-  // `top`/`right` are set inline per-instance to match the header's own
-  // offsets exactly (see the JSX). Order here is visual top-to-bottom:
-  // Handsfree, then the Record/Ask pill, then the Settings cogwheel.
-  floatingControlStack: {
-    position: "absolute",
+  // Build 22.1 RESPONSIVE FLEX CONTROL STACK: `headerTopRow` puts the brand
+  // block and this control column as ordinary flex siblings — no absolute
+  // positioning, no hardcoded top/right offsets, so it aligns correctly at
+  // any screen density/size by construction rather than by a guessed number.
+  headerTopRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+  },
+  // Order here is visual top-to-bottom: Handsfree, then the Record/Ask pill,
+  // then the Settings cogwheel.
+  controlStack: {
     alignItems: "flex-end",
-    zIndex: 25,
-    elevation: 25,
   },
   handsfreePill: {
     marginBottom: 10, // gap above the Record/Ask pill
