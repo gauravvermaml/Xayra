@@ -715,6 +715,7 @@ export default function HomeScreen() {
         sheetIndex={sheetIndex}
         onIndexChange={handleSheetIndexChange}
         modelDownload={chatSession.modelDownload}
+        bottomInset={insets.bottom}
         composeBarSlot={
           <ComposeBar
             inputText={inputText}

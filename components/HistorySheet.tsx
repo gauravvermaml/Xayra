@@ -82,6 +82,14 @@ export type HistorySheetProps = {
       list is currently visible — see ModelDownloadCard.tsx's own doc
       comment for why this replaced the old QA-tab-only setup bar. */
   modelDownload: ModelDownloadStatus;
+  /** Device's safe-area bottom inset — same Build 20 SCROLL CONTENT
+      CLEARANCE pattern already used by NotesSheetContent/ChatSheetContent's
+      own `bottomInset` prop. `ModelDownloadCard` sits OUTSIDE either
+      scrollable list, as a plain flex sibling at the bottom of `body`, so it
+      needs this applied directly — confirmed on-device (a Build 25
+      screenshot showed the card's subtitle clipped flush against the
+      Android nav bar without it). */
+  bottomInset: number;
 };
 
 /**
@@ -106,6 +114,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     animatedIndex,
     sheetIndex,
     modelDownload,
+    bottomInset,
   },
   ref
 ) {
@@ -214,7 +223,9 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
             ))}
           </View>
           {historyTab === "notes" ? notesContent : qaContent}
-          <ModelDownloadCard modelDownload={modelDownload} />
+          <View style={{ paddingBottom: bottomInset }}>
+            <ModelDownloadCard modelDownload={modelDownload} />
+          </View>
         </View>
       )}
     </BottomSheet>
