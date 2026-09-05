@@ -291,6 +291,28 @@ export default function HomeScreen() {
   // loop funnel through this exact function — see its own note on the
   // "Hey Xayra" gap below.
 
+  // Build 25 ATOMIC VOICE LOCK: fixes a real double-submission/double-RAG-
+  // response bug. `isProcessingVoiceQueryRef` is a plain ref, not React
+  // state — checked and set SYNCHRONOUSLY, immune to the render-batching
+  // window that made the previous guard (useChatSession's `isSending`
+  // STATE, read from a `useCallback` closure) unreliable: two calls into
+  // `finishUtterance`/`chatSession.ask()` landing close enough together
+  // could both read the same stale "not sending yet" closure before either
+  // call's `setIsSending(true)` had actually committed and re-rendered,
+  // letting both proceed and run the RAG pipeline twice for one utterance.
+  // (useChatSession.ts's `ask`/`submitQuery` now also guard on their own
+  // ref for the same reason — this is defense in depth, not either/or.)
+  const isProcessingVoiceQueryRef = useRef(false);
+  // Belt-and-suspenders against a second, LATER call for what's really the
+  // same phrase (e.g. a duplicate "result" event firing after the first one
+  // already completed processing, rather than while it was still in
+  // flight — the ref above alone wouldn't catch that since it's already
+  // been released by then). Normalized (trimmed + lowercased) so trivial
+  // casing/whitespace differences between two events reporting "the same"
+  // utterance don't defeat the match.
+  const lastVoiceQueryRef = useRef<{ normalizedText: string; at: number } | null>(null);
+  const DUPLICATE_VOICE_QUERY_WINDOW_MS = 3000;
+
   const finishUtterance = useCallback(
     async (
       audioUri: string,
@@ -313,24 +335,50 @@ export default function HomeScreen() {
         return;
       }
 
-      reportState?.("processing");
-      const { intent } = await routeFreeformInput(transcript.trim(), audioUri, whisperModelId ?? null);
+      // Build 25 ATOMIC VOICE LOCK (cont.): both checks happen BEFORE any
+      // async work starts, and the lock is claimed synchronously in the same
+      // breath — nothing here awaits between reading and setting either ref.
+      const normalizedText = transcript.trim().toLowerCase();
+      const now = Date.now();
+      const previous = lastVoiceQueryRef.current;
+      const isDuplicateOfRecent =
+        !!previous && previous.normalizedText === normalizedText && now - previous.at < DUPLICATE_VOICE_QUERY_WINDOW_MS;
+      if (isProcessingVoiceQueryRef.current || isDuplicateOfRecent) {
+        return;
+      }
+      isProcessingVoiceQueryRef.current = true;
+      // "Immediately clear the active transcription buffer the exact
+      // millisecond the phrase is accepted" (per the task): this app has no
+      // separate live transcription-buffer state to clear (asrRouter.
+      // transcribe() already hands back one final string, not a stream this
+      // component accumulates into) — the equivalent here is recording
+      // exactly which phrase was just accepted, at this exact instant,
+      // before any routing/saving/RAG work begins, so a second event for
+      // that same phrase has something to be compared against immediately.
+      lastVoiceQueryRef.current = { normalizedText, at: now };
 
-      reportState?.("speaking");
-      if (intent === "RECORD") {
-        await speakTextAndWait("Saved.");
-      } else {
-        // Deliberately NOT chatSession's own (fire-and-forget) speech —
-        // Handsfree Mode needs to actually wait for playback to finish
-        // before ActiveModeManager re-arms the mic, or it would transcribe
-        // the assistant's own voice as the next "question" (no echo
-        // cancellation exists here). `ask()` runs the same RAG exchange
-        // with no speech side effect of its own, so this is the only
-        // speech that happens.
-        const { text } = await chatSession.ask(transcript.trim());
-        if (text) {
-          await speakTextAndWait(text);
+      try {
+        reportState?.("processing");
+        const { intent } = await routeFreeformInput(transcript.trim(), audioUri, whisperModelId ?? null);
+
+        reportState?.("speaking");
+        if (intent === "RECORD") {
+          await speakTextAndWait("Saved.");
+        } else {
+          // Deliberately NOT chatSession's own (fire-and-forget) speech —
+          // Handsfree Mode needs to actually wait for playback to finish
+          // before ActiveModeManager re-arms the mic, or it would transcribe
+          // the assistant's own voice as the next "question" (no echo
+          // cancellation exists here). `ask()` runs the same RAG exchange
+          // with no speech side effect of its own, so this is the only
+          // speech that happens.
+          const { text } = await chatSession.ask(transcript.trim());
+          if (text) {
+            await speakTextAndWait(text);
+          }
         }
+      } finally {
+        isProcessingVoiceQueryRef.current = false;
       }
     },
     [routeFreeformInput, chatSession]

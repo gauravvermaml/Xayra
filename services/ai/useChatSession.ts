@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import * as Crypto from "expo-crypto";
 
 import { LLAMA_MODEL_MISSING_ERROR_PREFIX } from "./localLlama";
@@ -55,6 +55,18 @@ export function useChatSession(): ChatSession {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isSending, setIsSending] = useState(false);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+
+  // Build 25: `isSending` (React state) is what the UI reads, but it's the
+  // wrong thing to guard re-entrancy on — a `useCallback` closure captures
+  // whatever `isSending` was at the time IT was created, and two calls into
+  // `ask`/`submitQuery` landing close enough together (e.g. a duplicate STT
+  // "result" event, see app/index.tsx's ATOMIC VOICE LOCK) can both read the
+  // same stale "false" before either call's `setIsSending(true)` has
+  // actually committed and re-rendered a fresh closure. A plain ref is
+  // checked and set synchronously, with no such window — this is what
+  // actually closes the "double RAG response" race, not just app/index.tsx's
+  // own guard one layer up (which stays too, as a second line of defense).
+  const isSendingRef = useRef(false);
 
   const modelDownload = useModelDownload();
   const isModelReady = modelDownload.status === "ready";
@@ -143,9 +155,10 @@ export function useChatSession(): ChatSession {
   const ask = useCallback(
     async (rawText: string): Promise<{ text: string }> => {
       const query = rawText.trim();
-      if (!query || isSending || !isModelReady) {
+      if (!query || isSendingRef.current || !isModelReady) {
         return { text: "" };
       }
+      isSendingRef.current = true;
       void stopSpeech();
       setSpeakingMessageId(null);
       setIsSending(true);
@@ -155,19 +168,21 @@ export function useChatSession(): ChatSession {
       } catch {
         return { text: "" };
       } finally {
+        isSendingRef.current = false;
         setIsSending(false);
       }
     },
-    [isSending, isModelReady, runRagExchange]
+    [isModelReady, runRagExchange]
   );
 
   const submitQuery = useCallback(
     async (rawText: string, source: "text" | "voice" = "text") => {
       const query = rawText.trim();
-      if (!query || isSending || !isModelReady) {
+      if (!query || isSendingRef.current || !isModelReady) {
         return;
       }
 
+      isSendingRef.current = true;
       void stopSpeech();
       setSpeakingMessageId(null);
       setIsSending(true);
@@ -181,10 +196,11 @@ export function useChatSession(): ChatSession {
         // Errors are already recorded into the assistant bubble by
         // runRagExchange — nobody here needs to Alert on top of that.
       } finally {
+        isSendingRef.current = false;
         setIsSending(false);
       }
     },
-    [isSending, isModelReady, runRagExchange, playMessageSpeech]
+    [isModelReady, runRagExchange, playMessageSpeech]
   );
 
   return { messages, isSending, speakingMessageId, modelDownload, isModelReady, submitQuery, ask, toggleSpeech };
