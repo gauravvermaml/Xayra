@@ -247,7 +247,17 @@ async function getContext(): Promise<LlamaContext> {
     contextPromise = resolveModelPath()
       .then(({ path, label }) => {
         console.log(`[Llama] Initialized Model: ${label} (q4_k_m)`);
-        return initLlama({ model: path, n_ctx: 4096, n_threads: 4 });
+        // Build 26: `use_mmap: true` maps the GGUF file straight into the
+        // process's address space instead of reading it into a heap buffer
+        // — the OS page-caches it, so a released-then-reloaded context (or a
+        // second cold start after a background app kill) is materially
+        // faster to reload since the pages are often still resident. (Named
+        // `use_mmap`, not `useMmap` — llama.rn's option names mirror
+        // llama.cpp's own C API snake_case, same as n_ctx/n_threads below.)
+        // `n_threads: 4` matches this project's target devices (the Galaxy
+        // A50 this project tests on has 4 usable cores after reserving the
+        // rest for the OS/foreground UI thread).
+        return initLlama({ model: path, n_ctx: 4096, n_threads: 4, use_mmap: true });
       })
       .then((context) => {
         logDuration("Llama cold-start (GGUF model load from disk)", coldStart);
@@ -335,18 +345,43 @@ export async function generateLocalRAGAnswer(
   return result.text.trim();
 }
 
+/** A minimal, throwaway prompt for the silent warm-up pass below — real
+ * instruct-template turn markers so llama.cpp exercises the actual
+ * generation path, not a bare string it would reject or mishandle. */
+const WARMUP_PROMPT =
+  "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|>" +
+  "<|start_header_id|>assistant<|end_header_id|>\n\n";
+
 /**
- * Fire-and-forget: loads the GGUF model into native memory ahead of the
- * first real generation/classification call, so that call doesn't pay the
- * multi-second cold-start cost (see services/ai/enginePrewarmer.ts, called
- * once from app/index.tsx on launch). Swallows its own error — a model not
- * downloaded yet, or a corrupt file, is exactly what the real call will
- * surface properly when it's actually needed; prewarming has nobody to
- * report a failure to.
+ * Fire-and-forget: loads the GGUF model into native memory AND runs one
+ * silent, 1-token dummy generation ahead of the first real question, so
+ * neither cost lands on the user's first real "Ask". Build 26 INVESTIGATE
+ * INFERENCE STALL: `getContext()` alone (Build 25 and earlier) only loads
+ * the model's weights — llama.cpp's KV-cache allocation and thread-pool
+ * spin-up are lazily initialized on the first real `completion()` call
+ * instead, which is why a query submitted right after a fresh model
+ * download still paid several extra seconds of latency the "cold-start"
+ * timing log never accounted for. This throwaway `n_predict: 1` completion
+ * (its output is discarded — `() => {}` ignores every token) forces that
+ * machinery to spin up here, off the user's critical path, so by the time
+ * they actually tap "Ask" the context is already fully hot.
+ *
+ * Runs on whichever native thread llama.rn's own `completion()` uses (not
+ * the JS thread) — same as every other call into the model — so this never
+ * blocks the UI. Swallows its own error — a model not downloaded yet, or a
+ * corrupt file, is exactly what the real call will surface properly when
+ * it's actually needed; prewarming has nobody to report a failure to.
+ *
+ * Called from two places (see services/ai/enginePrewarmer.ts for app-launch
+ * prewarm, and modelDownloadManager.ts's `setStatus` for the moment a
+ * download that just finished flips status to "ready") — both routes
+ * through this one function, so app-boot-with-model-already-present and
+ * download-completes-live are covered by the same warm-up path.
  */
 export async function prewarmLocalLlama(): Promise<void> {
   try {
-    await getContext();
+    const context = await getContext();
+    await context.completion({ prompt: WARMUP_PROMPT, n_predict: 1 }, () => {});
   } catch (err) {
     console.warn("[Llama] Prewarm skipped:", err instanceof Error ? err.message : err);
   }

@@ -4,7 +4,7 @@ import * as FileSystem from "expo-file-system/legacy";
 import * as Network from "expo-network";
 
 import { downloadEmbeddingAssets, isEmbeddingModelDownloaded } from "./embeddingModel";
-import { LLAMA_MODEL_FILENAMES } from "./localLlama";
+import { LLAMA_MODEL_FILENAMES, prewarmLocalLlama } from "./localLlama";
 import { resetWhisperContext } from "./localWhisper";
 import { MODEL_CDN_BASE_URL } from "./modelCdn";
 import { getWhisperModelPath, isWhisperModelDownloaded, WHISPER_BASE_FILENAME } from "./whisperModels";
@@ -242,6 +242,7 @@ let currentStatus: ModelDownloadStatus = {
 };
 
 function setStatus(patch: Partial<ModelDownloadStatus>): void {
+  const previousStatus = currentStatus.status;
   currentStatus = { ...currentStatus, ...patch };
   listeners.forEach((listener) => listener(currentStatus));
   // Build 25 SYSTEM NOTIFICATION: mirrors every status change into the
@@ -249,6 +250,16 @@ function setStatus(patch: Partial<ModelDownloadStatus>): void {
   // is a fire-and-forget, permission-optional side effect rather than
   // something awaited or allowed to affect the download itself.
   syncDownloadNotification(currentStatus);
+  // Build 26 AUTO-WARMUP: fires the instant the chat model actually becomes
+  // usable — either `beginDownloads` finishing a live download, or
+  // `runInitialCheck` finding it already on disk at boot — rather than
+  // waiting for the user's first "Ask" to pay the full cold-start cost (see
+  // prewarmLocalLlama's own doc comment for what "warm" actually means as
+  // of Build 26). `previousStatus !== "ready"` guards against re-firing on
+  // every later status read once the app is already warm and idle.
+  if (currentStatus.status === "ready" && previousStatus !== "ready") {
+    void prewarmLocalLlama();
+  }
 }
 
 /**

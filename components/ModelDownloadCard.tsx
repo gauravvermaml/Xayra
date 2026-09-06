@@ -42,14 +42,22 @@ export function ModelDownloadCard({ modelDownload }: ModelDownloadCardProps) {
 
 const styles = StyleSheet.create({
   // COMPACT STYLING: sleek, caption-scale card — noticeably smaller than the
-  // old QA-only setup bar it replaces.
+  // old QA-only setup bar it replaces. INLINE DOWNLOAD CARD FLOW (Build 26):
+  // a plain flex child, same as its siblings above — nothing here is
+  // position:"absolute". marginBottom/paddingBottom are explicit literal
+  // values (not the usual spacing.* scale) so the card's own bottom edge
+  // never sits flush against anything below it; HistorySheet.tsx additionally
+  // wraps this in a `paddingBottom: bottomInset` View for genuine Android
+  // nav-bar clearance (confirmed necessary on-device in Build 25 — this
+  // fixed margin alone isn't tall enough for a 3-button nav bar).
   card: {
     backgroundColor: "#1C1C1E",
     borderRadius: radius.lg,
     paddingHorizontal: spacing.sm + 2,
-    paddingVertical: spacing.sm,
+    paddingTop: spacing.sm,
+    paddingBottom: 16,
     marginHorizontal: spacing.base,
-    marginBottom: spacing.sm,
+    marginBottom: 24,
   },
   track: {
     height: 4,

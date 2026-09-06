@@ -51,10 +51,14 @@ export function NotesSheetContent({
       keyExtractor={(item) => item.id}
       ListEmptyComponent={
         <View style={styles.emptyState}>
-          <Text style={styles.emptyIcon}>{isSearchActive ? "🔍" : "🎙"}</Text>
+          {/* Build 26 EMPTY STATE UI BRANDING: the generic 🔍/🎙 glyphs are
+              gone — the empty state now leans entirely on the Xayra logo
+              button already visible above the drawer (CentralRecorderCanvas)
+              rather than a second, redundant icon here. Search still gets
+              its own icon-free copy; only the record-mode text changed. */}
           <Text style={styles.emptyText}>{isSearchActive ? "No matching notes yet." : "No notes recorded yet."}</Text>
           <Text style={styles.emptySubtext}>
-            {isSearchActive ? "Try a different search term." : "Tap the microphone to record your first voice note."}
+            {isSearchActive ? "Try a different search term." : "Tap Xayra to record your first voice note"}
           </Text>
           {!isSearchActive && (
             <Pressable onPress={onRestoreFromDrive} disabled={isRestoring} style={styles.restoreLinkRow}>
@@ -96,11 +100,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingTop: spacing.xxl,
     paddingHorizontal: spacing.lg,
-  },
-  emptyIcon: {
-    fontSize: 32,
-    marginBottom: spacing.sm,
-    opacity: 0.7,
   },
   emptyText: {
     color: colors.textSecondary,

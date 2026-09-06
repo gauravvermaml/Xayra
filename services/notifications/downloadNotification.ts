@@ -39,6 +39,16 @@ Notifications.setNotificationHandler({
   }),
 });
 
+/**
+ * Build 26 SILENT DOWNLOAD NOTIFICATION: no heads-up popover, no vibration,
+ * ever — a background model download is not an event worth interrupting the
+ * user for, only a status they can glance at in the shade if they choose to
+ * pull it down. `AndroidImportance.LOW` alone already suppresses heads-up
+ * banners, but LOW-importance channels default to whatever sound/vibration
+ * the user's own device profile has set — `sound: null` and
+ * `vibrationPattern: []`/`enableVibrate: false` close that gap explicitly
+ * rather than relying on the importance level alone.
+ */
 async function ensureChannel(): Promise<void> {
   if (channelReady || Platform.OS !== "android") {
     return;
@@ -47,7 +57,8 @@ async function ensureChannel(): Promise<void> {
   await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
     name: "Model setup",
     importance: Notifications.AndroidImportance.LOW,
-    vibrationPattern: null,
+    sound: null,
+    vibrationPattern: [],
     enableVibrate: false,
     showBadge: false,
   }).catch(() => {
@@ -112,8 +123,17 @@ async function applyStatus(status: ModelDownloadStatus, seq: number): Promise<vo
       content: {
         title: "Setting up Xayra",
         body: `Downloading in progress... ${percent}% of 100%`,
+        // `sticky: true` is expo-notifications' equivalent of Android's
+        // "ongoing" flag (non-dismissable by a swipe) — every progress
+        // update re-issues it, so it stays ongoing for the life of the
+        // download. `sound: false`/`vibrate: []`/`priority: LOW` repeat the
+        // channel's own silence at the per-notification level too, since a
+        // channel's settings can be overridden per-post on some OEM skins.
         sticky: true,
         autoDismiss: false,
+        sound: false,
+        vibrate: [],
+        priority: Notifications.AndroidNotificationPriority.LOW,
         ...(Platform.OS === "android" ? { channelId: CHANNEL_ID } : {}),
       },
       trigger: null,
