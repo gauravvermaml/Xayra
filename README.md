@@ -10,7 +10,7 @@ Record a voice note or type one. It's transcribed, embedded, and indexed — ent
 
 ## Product Overview & Aesthetic
 
-As of Build 25, Xayra is a single unified canvas — there is no separate Notes/Chat tab pair. Everything happens on one Apple-Maps-inspired screen:
+As of Build 26, Xayra is a single unified canvas — there is no separate Notes/Chat tab pair. Everything happens on one Apple-Maps-inspired screen:
 
 - **True jet-black (`#000000`) canvas.** Not the app's older charcoal (`#0E0F12`) design system — the recording surface itself is pure black so a [`@gorhom/bottom-sheet`](https://github.com/gorhom/react-native-bottom-sheet) sitting over it (also `#000000`) reads as one continuous surface, the same visual trick Apple Maps uses for its search sheet over the map.
 - **A 1.3× central logo button** (`components/CentralRecorderCanvas.tsx`) — the Xayra emblem + wordmark (`assets/xayra-logo.png`), clipped to a circle, that scales further (up to +6%) in real time while recording, driven by live microphone RMS amplitude, not a canned animation.
@@ -83,6 +83,12 @@ None of the model files (whisper GGML, ONNX embedding model, Llama GGUF — tens
 
 Files are fetched from a **Cloudflare Worker CDN proxy** (`services/ai/modelCdn.ts`'s `MODEL_CDN_BASE_URL`) rather than hitting Hugging Face or an R2 bucket directly from the client.
 
+Progress is surfaced two ways at once, both fed by the same `modelDownloadManager.ts` status:
+- **In-app** — `components/ModelDownloadCard.tsx`, rendered in natural flex flow in the drawer beneath whichever list is showing ("Downloading in progress... N% of 100%"), with explicit spacing so its text never collides with the Android nav bar.
+- **Notification shade** — `services/notifications/downloadNotification.ts` mirrors the same progress there, so it stays visible even while Xayra isn't the foreground app. The channel is deliberately fully silent at both the channel level (`sound: null`, `vibrationPattern: []`, `enableVibrate: false`) and per-notification (`sound: false`, `vibrate: []`, `priority: LOW`) — a background model download should never produce a heads-up popup or a haptic buzz, on any OEM skin's defaults.
+
+The moment a model finishes downloading (or is found already on disk at boot), `services/ai/localLlama.ts`'s `prewarmLocalLlama()` loads the GGUF context **and** runs one silent, throwaway 1-token completion — llama.cpp's KV-cache/thread-pool spin-up is otherwise lazily deferred to the first real generation call, which is what used to make a user's first "Ask" after setup noticeably slower than every one after it. By the time the user actually asks something, the context is already fully hot. Every call site funnels through one deduplicated in-flight promise (the same pattern the context loader itself uses), so the app-boot warm-up and the "download just finished" warm-up can never race each other into calling the native completion API twice at once.
+
 ## Hardware Requirements & Constraints
 
 Running Whisper transcription and a multi-hundred-MB-to-multi-GB Llama context concurrently on-device is memory-intensive. `services/ai/modelDownloadManager.ts` reads `expo-device`'s `Device.totalMemory` and treats **7GB** as the tier boundary (`RAM_TIER_THRESHOLD_BYTES`): at or above it, a device is treated as a modern flagship and gets the 3B Llama model; below it, the 1B model. This project's own low-end test device (a Galaxy A50) is 4GB and is the reference point for the "must still work" floor.
@@ -95,7 +101,7 @@ The `🎧 Handsfree` toggle (floating above the drawer) engages `services/audio/
 
 **Worth being precise about scope here, same as the Hardware Requirements caveat above:** there is no "Hey Xayra" acoustic wake-word engine in this app. A real one (e.g. Porcupine) needs a native module, an external vendor AccessKey, and a custom-trained wake-word model file — none of which exist in this repo. What exists instead is a two-part guard against ambient noise being mistaken for speech:
 - **Mutual exclusion** — the manual record button and Handsfree share one native audio-capture session (`@fugood/react-native-audio-pcm-stream` supports exactly one at a time); each refuses to start while the other is active, so they can't corrupt or steal each other's session.
-- **Post-transcription phrase filtering** (`isLikelyAmbientNoise()`) — once a Handsfree utterance is transcribed, a result under three words that doesn't mention "Xayra" is treated as a stray noise fragment and discarded silently (no note, no card, no TTS) rather than saved or asked. This is a blunt heuristic, not a semantic classifier — a genuinely short Handsfree question with no wake-word mention is also discarded by it. Manual recordings never go through this filter: a deliberately short manual note is a real note, not noise.
+- **Strict post-transcription wake-word filtering** (`containsWakeWord()`, `services/audio/activeMode.ts`) — once a Handsfree utterance is transcribed, the text must match `/(xayra|zaira|cyra|zyra|exayra)/i` (the extra spellings are phonetic near-misses the on-device Whisper model has been observed to mishear "Xayra" as) or it's discarded silently before it ever reaches the database (Record mode) or the RAG pipeline (Ask mode) — no note, no query, no card, no TTS — with a toast confirming the rejection. This is a blunt text match, not a semantic classifier or an audio-level detector, and as of Build 25 there's no length-based exception: every Handsfree utterance must mention the wake word, full stop. Manual recordings never go through this filter: a deliberately short manual note is a real note, not noise.
 
 ## UI & Layout Physics
 
@@ -106,7 +112,7 @@ The `🎧 Handsfree` toggle (floating above the drawer) engages `services/audio/
 - **50% height cap, structural** — the sheet's `snapPoints` are `["20%", "50%"]` only; a third, 90% stage existed through Build 23 and was removed outright, since a user's own drag gesture could reach it regardless of what the app snapped to programmatically, pushing the sticky header and the floating pill cluster into the status bar.
 - **Solid navigation bar** — `app.json`'s `android.navigationBarColor: "#1C1C1E"`, backed by a dedicated in-app `View` docked to the safe-area inset as a second line of defense. Android 15+ increasingly ignores app-set nav-bar colors under enforced edge-to-edge, an OS behavior an app-config value can't override.
 
-*(All items above have been verified on a physical device — see `PROJECT_STATE_HANDOFF.md`'s Build 20–25 entries for exactly what was tested and how.)*
+*(All items above have been verified on a physical device — see `PROJECT_STATE_HANDOFF.md`'s Build 20–26 entries for exactly what was tested and how.)*
 
 ## Privacy & Security
 
