@@ -17,7 +17,9 @@
         "buildType": "apk"
       }
     },
-    "production": {}
+    "production": {
+      "autoIncrement": true
+    }
   },
   "submit": {
     "production": {}
