@@ -14,7 +14,7 @@ import { useFocusEffect, useRouter } from "expo-router";
 import Constants from "expo-constants";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
-import { listNotes } from "../services/notes/noteManager";
+import { listNotes, purgeAllNotes } from "../services/notes/noteManager";
 import {
   backupToDrive,
   getAutoSyncOnWifi,
@@ -36,7 +36,7 @@ import { showToast } from "../components/Toast";
  * download step, so there's nothing left here for either of them to manage.
  */
 
-type BusyAction = "connect" | "backup" | "disconnect" | "restore" | null;
+type BusyAction = "connect" | "backup" | "disconnect" | "restore" | "wipe" | null;
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -152,6 +152,40 @@ export default function SettingsScreen() {
               .then(refreshStatus)
               .catch((err) => {
                 Alert.alert("Error", err instanceof Error ? err.message : "Failed to disconnect.");
+              })
+              .finally(() => setBusyAction(null));
+          },
+        },
+      ]
+    );
+  }, [refreshStatus]);
+
+  // DATA DELETION & PRIVACY COMPLIANCE: the only user-facing path in the app
+  // that irreversibly wipes every note, embedding, FTS row, and on-disk
+  // audio file (purgeAllNotes() already did all of that — it just had no UI
+  // in front of it before this, only a globalThis.__purgeAllNotes debug
+  // hook reachable from a JS console). Double-confirmed (a plain destructive
+  // Alert, matching handleDisconnect's own pattern) since there's no undo —
+  // this is deliberately more final than "Disconnect Google Drive" above,
+  // which only ever stops future syncing.
+  const handleWipeAllNotes = useCallback(() => {
+    Alert.alert(
+      "Delete All Notes",
+      "This permanently deletes every note, recording, and search index on this device. This cannot be undone. Your Google Drive backup (if any) is not affected.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete Everything",
+          style: "destructive",
+          onPress: () => {
+            setBusyAction("wipe");
+            void purgeAllNotes()
+              .then(async () => {
+                await refreshStatus();
+                showToast("All local notes deleted.");
+              })
+              .catch((err) => {
+                Alert.alert("Error", err instanceof Error ? err.message : "Failed to delete local notes.");
               })
               .finally(() => setBusyAction(null));
           },
@@ -329,6 +363,29 @@ export default function SettingsScreen() {
               )}
             </>
           )}
+        </View>
+
+        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Data & Privacy</Text>
+        <View style={styles.card}>
+          <Text style={styles.metaText}>
+            Every note, recording, and search index lives only in this app's own encrypted storage on this device.
+            Deleting them here removes them completely and immediately — there's no server copy to also clear.
+          </Text>
+          <Pressable
+            onPress={handleWipeAllNotes}
+            disabled={busyAction !== null || notesStoredLocally === 0}
+            style={({ pressed }) => [
+              styles.dangerButton,
+              pressed && styles.buttonPressed,
+              (busyAction !== null || notesStoredLocally === 0) && styles.buttonDisabled,
+            ]}
+          >
+            {busyAction === "wipe" ? (
+              <ActivityIndicator color={colors.danger} size="small" />
+            ) : (
+              <Text style={styles.dangerButtonText}>Delete All Notes</Text>
+            )}
+          </Pressable>
         </View>
 
         <Text style={styles.versionFooter}>{VERSION_LABEL}</Text>

@@ -13,6 +13,7 @@ expo-env.d.ts
 .kotlin/
 *.orig.*
 *.jks
+*.keystore
 *.p8
 *.p12
 *.key
@@ -30,7 +31,10 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
+# env files (bare .env too, not just the *.local variants — this app has no
+# runtime need for one, see CLAUDE.md's note on the deleted config/env.ts,
+# but nothing should ever land here uncommitted-by-accident either)
+.env
 .env*.local
 
 # typescript

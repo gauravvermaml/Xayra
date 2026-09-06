@@ -61,5 +61,8 @@
   "op-sqlite": {
     "sqliteVec": true,
     "fts5": true
+  },
+  "overrides": {
+    "decode-uri-component": "^0.5.0"
   }
 }

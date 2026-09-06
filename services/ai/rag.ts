@@ -153,7 +153,15 @@ export async function generateRAGAnswer(
   const noteContext =
     notes.length > 0 ? formatNoteContext(notes) : "--- NOTE CONTEXT ---\nNo relevant voice notes were found.";
 
-  console.log("[RAG Prompt Context]", noteContext);
+  // Security audit finding: this used to log unconditionally, in every
+  // build including release — printing the user's full private note content
+  // to logcat on every single query, where it's exposed to anything with
+  // device-debugging or (on older/rooted devices) READ_LOGS access. Gated
+  // behind `__DEV__` (false and dead in a release JS bundle) so it stays
+  // useful for local development without ever reaching a real user's device.
+  if (__DEV__) {
+    console.log("[RAG Prompt Context]", noteContext);
+  }
 
   const rawText = await generateLocalRAGAnswer(userQuery, noteContext, (token) => onChunk?.(token));
   return { text: sanitizeLLMResponse(rawText), citations };
