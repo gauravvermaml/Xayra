@@ -165,9 +165,26 @@ async function applyStatus(status: ModelDownloadStatus, seq: number): Promise<vo
         vibrate: [],
         badge: 0,
         priority: Notifications.AndroidNotificationPriority.LOW,
-        ...(Platform.OS === "android" ? { channelId: CHANNEL_ID } : {}),
       },
-      trigger: null,
+      // Real bug, found on-device: `channelId` was previously spread into
+      // `content` above — but `NotificationContentInput` has no such field
+      // at all (confirmed against expo-notifications' own types). TypeScript
+      // never caught the excess property because it was added via a
+      // conditional spread (`...(cond ? {channelId} : {})`), which suppresses
+      // the usual excess-property check on object literals. The value was
+      // silently dropped on every single post, so every notification this
+      // app has ever sent landed on Android's auto-created
+      // "expo_notifications_fallback_notification_channel" instead of our
+      // silent "model-download" one — which defaults to HIGH importance,
+      // vibration enabled, and a default sound, exactly matching the
+      // on-device symptom (buzzing + heads-up popups) despite the
+      // "model-download" channel itself being correctly configured as
+      // silent (confirmed via `adb shell dumpsys notification`). The correct
+      // place for the channel on an immediate (non-scheduled) notification is
+      // the TRIGGER, not the content — `{ channelId }` is expo-notifications'
+      // own `ChannelAwareTriggerInput`, documented as "deliver immediately"
+      // while carrying the channel, replacing the old `trigger: null`.
+      trigger: Platform.OS === "android" ? { channelId: CHANNEL_ID } : null,
     });
     if (seq === latestSeq) {
       lastShownPercent = percent;
