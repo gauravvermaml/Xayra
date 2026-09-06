@@ -378,10 +378,35 @@ const WARMUP_PROMPT =
  * through this one function, so app-boot-with-model-already-present and
  * download-completes-live are covered by the same warm-up path.
  */
+/**
+ * Build 26 fix, found on-device: with two independent call sites now
+ * triggering this (app-mount prewarm AND modelDownloadManager's "just
+ * became ready" hook), both firing at boot when the model is already on
+ * disk raced to run the dummy `completion()` below on the SAME shared
+ * context at once — llama.rn allows only one in-flight completion per
+ * context, so the loser failed with "Context is busy" (visible in the
+ * Metro log). Deduping here, the same pattern `getContext()` itself already
+ * uses for context creation, means every caller shares one warm-up
+ * in-flight promise instead of racing independent attempts.
+ */
+let warmupPromise: Promise<void> | null = null;
+
 export async function prewarmLocalLlama(): Promise<void> {
+  if (!warmupPromise) {
+    warmupPromise = (async () => {
+      const context = await getContext();
+      await context.completion({ prompt: WARMUP_PROMPT, n_predict: 1 }, () => {});
+    })();
+    // Same reset-on-failure as getContext()'s own contextPromise — a failed
+    // warm-up (model not downloaded yet, a corrupt file) shouldn't poison
+    // every later call site into skipping the warm-up forever once the
+    // real condition is fixed.
+    warmupPromise.catch(() => {
+      warmupPromise = null;
+    });
+  }
   try {
-    const context = await getContext();
-    await context.completion({ prompt: WARMUP_PROMPT, n_predict: 1 }, () => {});
+    await warmupPromise;
   } catch (err) {
     console.warn("[Llama] Prewarm skipped:", err instanceof Error ? err.message : err);
   }
