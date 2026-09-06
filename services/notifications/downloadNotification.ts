@@ -22,11 +22,19 @@ import type { ModelDownloadStatus } from "../ai/modelDownloadManager";
 const CHANNEL_ID = "model-download";
 const NOTIFICATION_ID = "xayra-model-download";
 
-/** Update-shown-notification only when the rounded percent actually moves —
- * `setStatus` fires on every ~250ms progress tick (see modelDownloadManager's
- * MIN_SAMPLE_INTERVAL_MS), and re-issuing an identical native notification
- * that often would be pure overhead for no visible change. */
+/** Build 27 PROGRESS UPDATE THROTTLING: `setStatus` fires on every ~250ms
+ * progress tick (see modelDownloadManager's MIN_SAMPLE_INTERVAL_MS) — posting
+ * a real native `scheduleNotificationAsync` call that often is what was
+ * actually choking the Android notification queue and freezing progress on
+ * screen at a stale percentage (observed on-device stuck at 91%). An update
+ * now only reaches the native API when the rounded percent has moved by at
+ * least `PERCENT_STEP_THRESHOLD` (5) since the last one actually shown, OR
+ * `MIN_UPDATE_INTERVAL_MS` (3s) has elapsed since then — whichever comes
+ * first, so a slow download still visibly ticks even between 5%-sized jumps. */
+const PERCENT_STEP_THRESHOLD = 5;
+const MIN_UPDATE_INTERVAL_MS = 3000;
 let lastShownPercent = -1;
+let lastShownAtMs = 0;
 let channelReady = false;
 let permissionRequested = false;
 
@@ -35,6 +43,10 @@ Notifications.setNotificationHandler({
     shouldShowBanner: false,
     shouldShowList: true,
     shouldPlaySound: false,
+    // Build 27 DISABLE LAUNCHER APP BADGE: a background model download is
+    // not something the app icon should ever reflect a count for — this,
+    // plus `badge: 0` on every posted notification's own content below, is
+    // belt-and-suspenders against the OS incrementing the home-screen badge.
     shouldSetBadge: false,
   }),
 });
@@ -43,11 +55,17 @@ Notifications.setNotificationHandler({
  * Build 26 SILENT DOWNLOAD NOTIFICATION: no heads-up popover, no vibration,
  * ever — a background model download is not an event worth interrupting the
  * user for, only a status they can glance at in the shade if they choose to
- * pull it down. `AndroidImportance.LOW` alone already suppresses heads-up
- * banners, but LOW-importance channels default to whatever sound/vibration
- * the user's own device profile has set — `sound: null` and
- * `vibrationPattern: []`/`enableVibrate: false` close that gap explicitly
- * rather than relying on the importance level alone.
+ * pull it down. `sound: null` and `vibrationPattern: []`/`enableVibrate:
+ * false` close the sound/vibration gap explicitly rather than relying on the
+ * importance level alone.
+ *
+ * Build 27: importance dropped from `LOW` to `MIN` — `MIN` is what actually
+ * puts a notification in Android's collapsed "Silent" section of the shade
+ * alongside other system alerts (no status-bar icon, no visual weight), which
+ * is a better match for "quietly informational" than `LOW` (still shown
+ * expanded, just without a heads-up popup). `showBadge: false` here is the
+ * channel-level half of DISABLE LAUNCHER APP BADGE — paired with
+ * `shouldSetBadge: false` in the global handler and `badge: 0` per-post below.
  */
 async function ensureChannel(): Promise<void> {
   if (channelReady || Platform.OS !== "android") {
@@ -56,7 +74,7 @@ async function ensureChannel(): Promise<void> {
   channelReady = true;
   await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
     name: "Model setup",
-    importance: Notifications.AndroidImportance.LOW,
+    importance: Notifications.AndroidImportance.MIN,
     sound: null,
     vibrationPattern: [],
     enableVibrate: false,
@@ -107,7 +125,16 @@ let latestSeq = 0;
 async function applyStatus(status: ModelDownloadStatus, seq: number): Promise<void> {
   if (status.status === "downloading") {
     const percent = Math.round(status.progressPercent);
-    if (percent === lastShownPercent) {
+    // PROGRESS UPDATE THROTTLING: only reaches the native API on a real
+    // step (>= 5 percentage points since the last shown update) or after
+    // MIN_UPDATE_INTERVAL_MS has elapsed — see the constants' own doc
+    // comment above for why. `lastShownPercent === -1` (nothing shown yet
+    // this download) always passes, so the first update is never throttled.
+    const percentStep = Math.abs(percent - lastShownPercent);
+    const elapsedSinceShown = Date.now() - lastShownAtMs;
+    const shouldPost =
+      lastShownPercent === -1 || percentStep >= PERCENT_STEP_THRESHOLD || elapsedSinceShown >= MIN_UPDATE_INTERVAL_MS;
+    if (!shouldPost) {
       return;
     }
     await ensureChannel();
@@ -129,10 +156,14 @@ async function applyStatus(status: ModelDownloadStatus, seq: number): Promise<vo
         // download. `sound: false`/`vibrate: []`/`priority: LOW` repeat the
         // channel's own silence at the per-notification level too, since a
         // channel's settings can be overridden per-post on some OEM skins.
+        // `badge: 0` is the per-post half of DISABLE LAUNCHER APP BADGE —
+        // see the global handler's `shouldSetBadge: false` and the
+        // channel's `showBadge: false` for the other two layers of it.
         sticky: true,
         autoDismiss: false,
         sound: false,
         vibrate: [],
+        badge: 0,
         priority: Notifications.AndroidNotificationPriority.LOW,
         ...(Platform.OS === "android" ? { channelId: CHANNEL_ID } : {}),
       },
@@ -140,18 +171,23 @@ async function applyStatus(status: ModelDownloadStatus, seq: number): Promise<vo
     });
     if (seq === latestSeq) {
       lastShownPercent = percent;
+      lastShownAtMs = Date.now();
     }
     return;
   }
-  // Every other state (ready, error, idle, cellular_blocked, paused_offline)
-  // clears the shade entry — "ready" because setup is done, the rest because
-  // a stalled/blocked download showing "in progress" forever would be a lie.
+  // AUTO-DISMISS ON COMPLETION: every other state (ready, error, idle,
+  // cellular_blocked, paused_offline) immediately clears the shade entry —
+  // "ready" because setup is done (the moment progress conceptually reaches
+  // 100%, whether or not a "100%" update was itself ever posted, thanks to
+  // throttling above), the rest because a stalled/blocked download showing
+  // "in progress" forever would be a lie.
   if (lastShownPercent === -1) {
     return;
   }
   await Notifications.dismissNotificationAsync(NOTIFICATION_ID).catch(() => {});
   if (seq === latestSeq) {
     lastShownPercent = -1;
+    lastShownAtMs = 0;
   }
 }
 
