@@ -112,7 +112,7 @@ The `🎧 Handsfree` toggle (floating above the drawer) engages `services/audio/
 - **50% height cap, structural** — the sheet's `snapPoints` are `["20%", "50%"]` only; a third, 90% stage existed through Build 23 and was removed outright, since a user's own drag gesture could reach it regardless of what the app snapped to programmatically, pushing the sticky header and the floating pill cluster into the status bar.
 - **Solid navigation bar** — `app.json`'s `android.navigationBarColor: "#1C1C1E"`, backed by a dedicated in-app `View` docked to the safe-area inset as a second line of defense. Android 15+ increasingly ignores app-set nav-bar colors under enforced edge-to-edge, an OS behavior an app-config value can't override.
 
-*(All items above have been verified on a physical device — see `PROJECT_STATE_HANDOFF.md`'s Build 20–27 entries for exactly what was tested and how.)*
+*(All items above have been verified on a physical device — see `PROJECT_STATE_HANDOFF.md`'s Build 20–28 entries for exactly what was tested and how.)*
 
 ## Privacy & Security
 

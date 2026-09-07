@@ -271,9 +271,33 @@ export default function HomeScreen() {
    * is null for a typed submission (nothing to attach if it turns out to be
    * a RECORD). Returns once fully handled — including, for ASK, once the
    * RAG answer has finished streaming in (not once speech has finished
-   * playing; see `ask`/`submitQuery`'s own distinction for that). */
+   * playing; see `ask`/`submitQuery`'s own distinction for that).
+   *
+   * Security audit finding (real duplicate-query bug, confirmed on-device):
+   * a voice ASK used to run the ENTIRE RAG pipeline twice for one spoken
+   * question. This function's ASK branch called `chatSession.submitQuery`
+   * (which itself runs the full RAG exchange and appends a user+assistant
+   * message pair) — but `finishUtterance` below THEN called `chatSession.ask`
+   * a second time on the very same transcript once this returned, appending
+   * a second, redundant user+assistant pair and re-running local Llama
+   * generation from scratch (confirmed in a live device log: two full
+   * "SQLite-vec + FTS5 search retrieval" + "Llama total generation" cycles
+   * back to back for one utterance). Neither of `useChatSession`'s own
+   * re-entrancy refs caught this because the two calls are strictly
+   * sequential, not concurrent — this was never the race those guard
+   * against. Fixed by having this function itself call the side-effect-free
+   * `ask()` for a voice-sourced query and hand the answer text back to the
+   * caller to speak — `finishUtterance` no longer calls `ask()` on its own,
+   * so the RAG pipeline now runs exactly once per utterance. A typed
+   * (non-voice) ASK is unaffected: it still goes through `submitQuery`,
+   * which never had this problem since ComposeBar's submit handler never
+   * called `ask()` afterward. */
   const routeFreeformInput = useCallback(
-    async (text: string, audioUri: string | null, whisperModelId: string | null): Promise<{ intent: "RECORD" | "ASK" }> => {
+    async (
+      text: string,
+      audioUri: string | null,
+      whisperModelId: string | null
+    ): Promise<{ intent: "RECORD" | "ASK"; answerText?: string }> => {
       setProcessingState("processing");
       // ASK auto-peeks to 50% to show the answer card; RECORD snaps back to
       // the resting peek once saved (see routeRecord). Snapped immediately —
@@ -286,14 +310,24 @@ export default function HomeScreen() {
         setProcessingLabel(intent === "RECORD" ? "note" : "query");
         if (intent === "RECORD") {
           await routeRecord(text, audioUri, whisperModelId);
-        } else {
-          // ASK flips the active tab to QA History so the streaming answer
-          // is what's actually visible once the sheet reaches its 50%
-          // auto-peek, rather than leaving Notes selected underneath it.
-          setHistoryTab("qa");
-          sheetRef.current?.snapToIndex(1);
-          await chatSession.submitQuery(text, audioUri ? "voice" : "text");
+          return { intent };
         }
+        // ASK flips the active tab to QA History so the streaming answer
+        // is what's actually visible once the sheet reaches its 50%
+        // auto-peek, rather than leaving Notes selected underneath it.
+        setHistoryTab("qa");
+        sheetRef.current?.snapToIndex(1);
+        if (audioUri) {
+          // Voice-sourced: run the RAG exchange via `ask()`, which has no
+          // speech side effect of its own — the caller (finishUtterance)
+          // needs to actually await playback finishing before Handsfree
+          // re-arms the mic, which `submitQuery`'s own fire-and-forget
+          // speech can't provide. This is now the ONLY RAG call for a voice
+          // query — see this function's doc comment above.
+          const { text: answerText } = await chatSession.ask(text);
+          return { intent, answerText };
+        }
+        await chatSession.submitQuery(text, "text");
         return { intent };
       } finally {
         setProcessingState("idle");
@@ -382,23 +416,22 @@ export default function HomeScreen() {
 
       try {
         reportState?.("processing");
-        const { intent } = await routeFreeformInput(transcript.trim(), audioUri, whisperModelId ?? null);
+        const { intent, answerText } = await routeFreeformInput(transcript.trim(), audioUri, whisperModelId ?? null);
 
         reportState?.("speaking");
         if (intent === "RECORD") {
           await speakTextAndWait("Saved.");
-        } else {
+        } else if (answerText) {
           // Deliberately NOT chatSession's own (fire-and-forget) speech —
           // Handsfree Mode needs to actually wait for playback to finish
           // before ActiveModeManager re-arms the mic, or it would transcribe
           // the assistant's own voice as the next "question" (no echo
-          // cancellation exists here). `ask()` runs the same RAG exchange
-          // with no speech side effect of its own, so this is the only
-          // speech that happens.
-          const { text } = await chatSession.ask(transcript.trim());
-          if (text) {
-            await speakTextAndWait(text);
-          }
+          // cancellation exists here). `routeFreeformInput` already ran the
+          // RAG exchange via `ask()` (no speech side effect of its own) and
+          // handed back the answer text — this is the only speech that
+          // happens, and the only RAG call that happened; see this bug's
+          // full writeup on `routeFreeformInput`'s own doc comment above.
+          await speakTextAndWait(answerText);
         }
       } finally {
         isProcessingVoiceQueryRef.current = false;
