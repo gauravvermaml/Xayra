@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Dimensions, Image, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
-import BottomSheet from "@gorhom/bottom-sheet";
+import BottomSheet, { useBottomSheetSpringConfigs } from "@gorhom/bottom-sheet";
 import Animated, { interpolate, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 
 import { CentralRecorderCanvas, type RecorderCanvasState } from "../components/CentralRecorderCanvas";
@@ -41,18 +41,18 @@ import { getSyncStatus, restoreFromDrive, signInWithGoogle, type SyncStatus } fr
  * indefinitely. */
 const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
-// Percentage snap points (SHEET_SNAP_POINTS = ['20%', '50%'] as of Build 24 —
-// see HistorySheet.tsx) are the bottom sheet's own geometry, expressed as
-// strings for @gorhom/bottom-sheet. The center canvas's own bottom clearance
-// (BUTTON CLEARANCE — Build 20) and the floating pill cluster above the
-// drawer (Build 23) both need the same values as plain pixel numbers to
-// interpolate against the sheet's live animated index, so they're derived
-// here once, from SHEET_SNAP_POINTS itself, rather than each hardcoding the
-// split independently.
+// Percentage snap points (SHEET_SNAP_POINTS = ['20%', '50%', '88%'] as of the
+// monochromatic-glass expandable box — see HistorySheet.tsx) are the bottom
+// sheet's own geometry, expressed as strings for @gorhom/bottom-sheet. The
+// center canvas's own bottom clearance (BUTTON CLEARANCE — Build 20) and the
+// floating pill cluster above the drawer (Build 23) both need the same
+// values as plain pixel numbers to interpolate against the sheet's live
+// animated index, so they're derived here once, from SHEET_SNAP_POINTS
+// itself, rather than each hardcoding the split independently.
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 const SHEET_HEIGHTS_PX = SHEET_SNAP_POINTS.map(
   (point) => (parseFloat(point) / 100) * SCREEN_HEIGHT
-) as [number, number];
+) as [number, number, number];
 /** Clean breathing room kept between the record button and the sheet's top
  * edge, on top of the sheet's own current height — Build 20 BUTTON
  * CLEARANCE, most visible when the sheet auto-peeks to Index 1 (50%) while
@@ -125,6 +125,29 @@ export default function HomeScreen() {
   const [sheetIndex, setSheetIndex] = useState(0);
   const handleSheetIndexChange = useCallback((index: number) => setSheetIndex(index), []);
 
+  // MONOCHROMATIC GLASS EXPAND/COLLAPSE: the micro-chip toggle (top-right of
+  // HistorySheet's textContainerBox) flips between the 50% (idle, State A)
+  // and 88% (expanded, State B) stages. Reads the live `sheetIndex` mirror
+  // rather than tracking its own separate boolean, so this can never drift
+  // out of sync with what `@gorhom/bottom-sheet` itself reports as current.
+  const handleToggleExpand = useCallback(() => {
+    sheetRef.current?.snapToIndex(sheetIndex === 2 ? 1 : 2);
+  }, [sheetIndex]);
+
+  // Shared spring physics for every snapToIndex call this sheet makes
+  // (`@gorhom/bottom-sheet`'s own `animationConfigs` prop, applied uniformly
+  // to the sheet's whole imperative API) — so the new 50%<->88% micro-chip
+  // transition decelerates with the same soft, native-feeling curve as every
+  // other snap already firing throughout this screen (auto-peek on ASK,
+  // backdrop-tap collapse, keyboard-focus snap, etc.), rather than the
+  // library's stiffer built-in default.
+  const sheetAnimationConfigs = useBottomSheetSpringConfigs({
+    damping: 24,
+    stiffness: 260,
+    mass: 0.9,
+    overshootClamping: false,
+  });
+
   // Build 20 BUTTON CLEARANCE: the center canvas's own bottom padding tracks
   // the sheet's live height (same interpolation approach as ComposeBar's
   // PINNED DRAWER HEADER below) plus a fixed breathing-room margin, so the
@@ -133,7 +156,11 @@ export default function HomeScreen() {
   const centerAreaAnimatedStyle = useAnimatedStyle(() => ({
     paddingBottom: interpolate(
       sheetAnimatedIndex.value,
-      [0, 1],
+      // Monochromatic glass box's 88% stage (index 2) is a third real point
+      // on this curve now, not just 0/1 — otherwise "clamp" would pin this
+      // at the 50% value the whole time the sheet sits at 88%, same bug
+      // class as the floating-pill interpolation just below.
+      [0, 1, 2],
       SHEET_HEIGHTS_PX.map((heightPx) => heightPx + CENTER_AREA_BREATHING_ROOM_PX),
       "clamp"
     ),
@@ -151,7 +178,12 @@ export default function HomeScreen() {
   // there's no text input or keyboard interaction in this stack at all, just
   // a plain shared-value interpolation against the sheet's own index.
   const drawerFloatingStackAnimatedStyle = useAnimatedStyle(() => ({
-    bottom: interpolate(sheetAnimatedIndex.value, [0, 1], SHEET_HEIGHTS_PX, "clamp") + 16,
+    // Same fix as centerAreaAnimatedStyle above: input range now spans all
+    // three real snap indices (0/1/2), matching SHEET_HEIGHTS_PX's own
+    // now-3-element output range — an [0, 1] input range against a 3-element
+    // output array would mismatch lengths and silently clamp at the 50%
+    // value for the entire 88% stage.
+    bottom: interpolate(sheetAnimatedIndex.value, [0, 1, 2], SHEET_HEIGHTS_PX, "clamp") + 16,
   }));
 
   // BACKDROP TAP TO DISMISS: tapping anywhere on the canvas outside the
@@ -786,6 +818,9 @@ export default function HomeScreen() {
         onIndexChange={handleSheetIndexChange}
         modelDownload={chatSession.modelDownload}
         bottomInset={insets.bottom}
+        topInset={insets.top}
+        onToggleExpand={handleToggleExpand}
+        animationConfigs={sheetAnimationConfigs}
         composeBarSlot={
           <ComposeBar
             inputText={inputText}

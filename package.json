@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "expo-router/entry",
   "dependencies": {
+    "@expo/vector-icons": "^15.0.2",
     "@fugood/react-native-audio-pcm-stream": "1.1.4",
     "@gorhom/bottom-sheet": "^5.2.14",
     "@op-engineering/op-sqlite": "^17.1.5",

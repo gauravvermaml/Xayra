@@ -1,7 +1,8 @@
 import { forwardRef, useCallback } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import BottomSheet, { type BottomSheetProps } from "@gorhom/bottom-sheet";
-import type { SharedValue } from "react-native-reanimated";
+import Animated, { FadeIn, FadeOut, Layout, type SharedValue } from "react-native-reanimated";
+import { Feather } from "@expo/vector-icons";
 
 import { ModelDownloadCard } from "./ModelDownloadCard";
 import { colors, radius, spacing } from "../constants/theme";
@@ -22,12 +23,24 @@ import type { ModelDownloadStatus } from "../services/ai/modelDownloadManager";
  * nothing left to drag to above it, for a gesture or for any future
  * programmatic snap.
  *
- * Two stages now: resting peek (just the compose bar) and a single
- * expanded stage — both the "AI request in flight" auto-peek and full
- * history browsing share this one 50% stage rather than having their own
- * separate heights.
+ * Two stages were the whole story through Build 24 — resting peek (just the
+ * compose bar) and a single 50% expanded stage. A third, 88% stage is added
+ * here as the MONOCHROMATIC GLASS container's own "fully expanded" state
+ * (see `textContainerBox`/the micro-chip toggle below) — deliberately NOT a
+ * regression back to Build 24's original bug (an unbounded 90% stage a
+ * user's own drag could reach, crowding the sticky header/floating pills
+ * into the status bar with nothing accounting for it). This time the
+ * expanded stage's own content — `textContainerBox` — explicitly pads for
+ * `topInset + 16` (see below) whenever the sheet is actually at this new top
+ * stage, so it stops softly below the status bar instead of colliding with
+ * it. The 88% stage is reached only programmatically (the micro-chip
+ * toggle's `onToggleExpand`, via `snapToIndex(2)`), same as how 50% has
+ * always been reached only via an explicit `snapToIndex(1)` call — a manual
+ * drag can still reach it since it's a real configured snap point, but nothing
+ * about that reintroduces Build 24's original bug, since this stage's content
+ * now correctly accounts for the inset that bug never did.
  */
-export const SHEET_SNAP_POINTS = ["20%", "50%"];
+export const SHEET_SNAP_POINTS = ["20%", "50%", "88%"];
 
 export type HistoryTab = "notes" | "qa";
 
@@ -90,6 +103,23 @@ export type HistorySheetProps = {
       screenshot showed the card's subtitle clipped flush against the
       Android nav bar without it). */
   bottomInset: number;
+  /** Device's safe-area top inset — used ONLY while `sheetIndex === 2` (the
+   * 88% expanded stage) to pad `textContainerBox`'s own top edge so it stops
+   * softly below the status bar instead of the sheet's new top stage
+   * crowding into it (see SHEET_SNAP_POINTS's own doc comment above for why
+   * this stage is safe to add where Build 24 previously found it wasn't). */
+  topInset: number;
+  /** Micro-chip toggle (top-right of `textContainerBox`) between the 50%
+   * (idle) and 88% (expanded) stages — owned by app/index.tsx since it's the
+   * one holding `sheetRef` and calling `snapToIndex`. */
+  onToggleExpand: () => void;
+  /** Spring physics shared with every `snapToIndex` call this sheet makes
+   * (both app/index.tsx's own calls and the drag-handle/micro-chip taps
+   * here), via `@gorhom/bottom-sheet`'s own `animationConfigs` prop — so the
+   * 50%<->88% micro-chip transition decelerates with the exact same feel as
+   * every other snap this sheet already does, rather than the library's
+   * default spring. */
+  animationConfigs?: BottomSheetProps["animationConfigs"];
 };
 
 /**
@@ -115,9 +145,13 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     sheetIndex,
     modelDownload,
     bottomInset,
+    topInset,
+    onToggleExpand,
+    animationConfigs,
   },
   ref
 ) {
+  const isExpanded = sheetIndex === 2;
   // Stable across every render regardless of any other state in the app —
   // `ref` (a React ref object) never changes identity, so this closure
   // never needs to be recreated, and `handleComponent` below stays the same
@@ -171,6 +205,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       android_keyboardInputMode="adjustResize"
       backgroundStyle={styles.background}
       handleComponent={renderHandle}
+      animationConfigs={animationConfigs}
     >
       {/* Build 21 STICKY DRAWER HEADER: always rendered, at every snap
           index — this, plus the drag handle above (handleComponent), is
@@ -206,23 +241,61 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           reference. */}
       {sheetIndex > 0 && (
         <View style={styles.body}>
-          <View style={styles.segmentRow}>
-            {(["notes", "qa"] as const).map((tab) => (
-              <Pressable
-                key={tab}
-                onPress={() => onHistoryTabChange(tab)}
-                style={[styles.segmentOption, historyTab === tab && styles.segmentOptionActive]}
-              >
-                {/* Labels only — the underlying "notes"/"qa" identifiers
-                    (HistoryTab, state, routing) are unchanged; this is a
-                    display-text rename, not a rename of what the tabs are. */}
-                <Text style={[styles.segmentText, historyTab === tab && styles.segmentTextActive]}>
-                  {tab === "notes" ? "Recorded notes" : "Searched notes"}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-          {historyTab === "notes" ? notesContent : qaContent}
+          {/* MONOCHROMATIC GLASS — TWO-STATE VISIBILITY: State A (50%, idle)
+              shows the tab-selection cards above the glass box; State B (88%,
+              expanded) hides them entirely, giving the box the full sheet
+              height to itself. `FadeIn`/`FadeOut` (mount/unmount transitions)
+              plus `layout={Layout.springify()}` on the glass box below (a
+              layout-CHANGE transition, not mount/unmount) are what let this
+              conditional unmount and the box's resulting height change both
+              animate smoothly instead of jump-cutting. */}
+          {!isExpanded && (
+            <Animated.View
+              entering={FadeIn.duration(180)}
+              exiting={FadeOut.duration(140)}
+              style={styles.segmentRow}
+            >
+              {(["notes", "qa"] as const).map((tab) => (
+                <Pressable
+                  key={tab}
+                  onPress={() => onHistoryTabChange(tab)}
+                  style={[styles.segmentOption, historyTab === tab && styles.segmentOptionActive]}
+                >
+                  {/* Labels only — the underlying "notes"/"qa" identifiers
+                      (HistoryTab, state, routing) are unchanged; this is a
+                      display-text rename, not a rename of what the tabs are. */}
+                  <Text style={[styles.segmentText, historyTab === tab && styles.segmentTextActive]}>
+                    {tab === "notes" ? "Recorded notes" : "Searched notes"}
+                  </Text>
+                </Pressable>
+              ))}
+            </Animated.View>
+          )}
+
+          {/* Monochromatic glass container: wraps whichever list is active
+              in one translucent, bordered box rather than either list
+              rendering directly against the sheet's own jet-black
+              background. `layout={Layout.springify()}` animates the box's
+              own height/position change as the segment row above mounts or
+              unmounts, and as the sheet itself moves between the 50%/88%
+              stages — both are ordinary layout changes from this box's
+              perspective, not something it needs to know the cause of. */}
+          <Animated.View
+            layout={Layout.springify()}
+            style={[styles.textContainerBox, isExpanded && { paddingTop: topInset + 16 }]}
+          >
+            {/* Floating micro-chip toggle: arrow-up-right (State A) expands
+                to 88%; x (State B) — same chip, same position — collapses
+                back to 50%, restoring the tab cards and reverting the icon.
+                One Pressable/one icon swap, not two separate buttons, so
+                there's exactly one source of truth for "what does tapping
+                this chip do right now." */}
+            <Pressable onPress={onToggleExpand} hitSlop={8} style={styles.microChip}>
+              <Feather name={isExpanded ? "x" : "arrow-up-right"} size={18} color="#E2E8F0" />
+            </Pressable>
+            {historyTab === "notes" ? notesContent : qaContent}
+          </Animated.View>
+
           <View style={{ paddingBottom: bottomInset }}>
             <ModelDownloadCard modelDownload={modelDownload} />
           </View>
@@ -290,5 +363,34 @@ const styles = StyleSheet.create({
   },
   segmentTextActive: {
     color: colors.onAccent,
+  },
+  // MONOCHROMATIC GLASS: a single translucent, subtly-bordered box wrapping
+  // whichever list (notes or QA) is currently active — `flex: 1` and
+  // `overflow: "hidden"` are additive to the requested spec (not part of
+  // it), needed for a real scrollable list to actually fill the box's
+  // height and for its content to respect the box's own rounded corners.
+  textContainerBox: {
+    flex: 1,
+    position: "relative",
+    backgroundColor: "rgba(18, 18, 26, 0.65)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.12)",
+    borderRadius: 18,
+    padding: 16,
+    overflow: "hidden",
+  },
+  // Floating micro-chip toggle, top-right corner of textContainerBox.
+  microChip: {
+    position: "absolute",
+    top: 12,
+    right: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    alignItems: "center",
+    justifyContent: "center",
+    // Sits above the list content it's layered on top of.
+    zIndex: 10,
   },
 });
