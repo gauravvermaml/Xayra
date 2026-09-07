@@ -193,7 +193,24 @@ export default function HomeScreen() {
     }, [refreshNotes, refreshSyncStatus])
   );
 
+  // Security audit finding: this had no re-entrancy guard of its own — only
+  // the `isRestoring` REACT STATE the "Restore from Drive" link disables on
+  // (see NotesSheetContent). Exactly the same closure-staleness window
+  // documented on `useChatSession`'s `isSendingRef` applies here: a fast
+  // double-tap can fire this callback twice before `setIsRestoring(true)`
+  // has actually committed and re-rendered the disabled button, letting both
+  // calls race into `restoreFromDrive()` → `mergeMissingNotes()` at once.
+  // `INSERT OR IGNORE` there stops a duplicate *note* row either way, but the
+  // two calls' own fire-and-forget embedding passes would then both try to
+  // embed the same newly-restored notes concurrently. A plain ref is
+  // checked and set synchronously, with no such window — same fix shape as
+  // every other duplicate-execution guard in this file.
+  const isRestoringRef = useRef(false);
   const handleRestoreFromDrive = useCallback(() => {
+    if (isRestoringRef.current) {
+      return;
+    }
+    isRestoringRef.current = true;
     void (async () => {
       setIsRestoring(true);
       setError(null);
@@ -210,6 +227,7 @@ export default function HomeScreen() {
         setError(message);
         Alert.alert("Restore Failed", message);
       } finally {
+        isRestoringRef.current = false;
         setIsRestoring(false);
       }
     })();

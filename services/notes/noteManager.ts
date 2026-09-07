@@ -107,6 +107,18 @@ async function updateNoteStatus(
  * TEXT id — looking it back up rather than trusting `insertId` keeps this
  * correct even if another statement runs on the connection in between.
  * sqlite-vec accepts a JSON-text array for the vector column.
+ *
+ * Security audit finding: `tryEmbedNote` for the same note can legitimately
+ * be triggered twice — e.g. `retryPendingEmbeddings()` (run on every screen
+ * focus) racing the fire-and-forget embedding pass `mergeMissingNotes()`
+ * kicks off after a Drive restore, both scanning for the same
+ * still-`transcribed` note. A plain `INSERT` would either throw a UNIQUE
+ * constraint error on the second attempt or, depending on how a given
+ * sqlite-vec build enforces `rowid` uniqueness on a `vec0` virtual table,
+ * risk a duplicate vector row winning extra weight in
+ * `hybridSearchNotes`'s reciprocal-rank-fusion scoring. `INSERT OR REPLACE`
+ * makes this idempotent either way — the same note's vector just gets
+ * overwritten with an identical value the second time, never duplicated.
  */
 /**
  * Best-effort embedding attempt for an already-saved note: on success,
@@ -144,7 +156,7 @@ async function insertEmbedding(noteId: string, embedding: number[]): Promise<voi
   }
 
   await db.execute(
-    "INSERT INTO note_embeddings (rowid, embedding) VALUES (?, ?)",
+    "INSERT OR REPLACE INTO note_embeddings (rowid, embedding) VALUES (?, ?)",
     [rowid, JSON.stringify(embedding)]
   );
 }
