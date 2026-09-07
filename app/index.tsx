@@ -672,6 +672,25 @@ export default function HomeScreen() {
     setHistoryTab(mode === "record" ? "notes" : "qa");
   }, []);
 
+  // Build 29 fix: the Build 23 comment above claimed inputMode/historyTab
+  // stayed "in lockstep the moment the pill itself is tapped" — true only
+  // for the floating [Record|Ask] pill. HistorySheet's own drawer segment
+  // pill ("Recorded notes"/"Searched notes") was wired straight to the raw
+  // `setHistoryTab` setter, which flips which list is visible but leaves
+  // `inputMode` — and with it the floating pill's highlighted state —
+  // untouched. Concretely: tap the floating pill to "Record", then tap the
+  // drawer's "Searched notes" segment to browse old Q&A; the drawer now
+  // correctly shows QA history, but the floating pill still highlights
+  // "Record", and the NEXT submission (compose bar or mic) would silently
+  // try to save a note instead of asking a question — routeFreeformInput
+  // only ever reads `inputMode`, which never moved. Mirrors handleSelectMode
+  // in the other direction so BOTH pills — and the routing they drive —
+  // move together regardless of which one the user actually taps.
+  const handleHistoryTabChange = useCallback((tab: HistoryTab) => {
+    setHistoryTab(tab);
+    setInputMode(tab === "notes" ? "record" : "ask");
+  }, []);
+
   const handleSubmitText = useCallback(
     (text: string) => {
       setInputText("");
@@ -761,7 +780,7 @@ export default function HomeScreen() {
       <HistorySheet
         ref={sheetRef}
         historyTab={historyTab}
-        onHistoryTabChange={setHistoryTab}
+        onHistoryTabChange={handleHistoryTabChange}
         animatedIndex={sheetAnimatedIndex}
         sheetIndex={sheetIndex}
         onIndexChange={handleSheetIndexChange}
