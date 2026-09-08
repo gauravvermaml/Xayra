@@ -8,6 +8,7 @@ import Animated, { FadeIn, FadeOut, interpolate, useAnimatedStyle, useSharedValu
 import { CentralRecorderCanvas, type RecorderCanvasState } from "../components/CentralRecorderCanvas";
 import { ChatSheetContent } from "../components/ChatSheetContent";
 import { ComposeBar } from "../components/ComposeBar";
+import { ExpandedTextOverlay } from "../components/ExpandedTextOverlay";
 import { HistorySheet, SHEET_SNAP_POINTS, type HistoryTab } from "../components/HistorySheet";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { NotesSheetContent, type DisplayNote } from "../components/NotesSheetContent";
@@ -132,59 +133,27 @@ export default function HomeScreen() {
   const [sheetIndex, setSheetIndex] = useState(0);
   const handleSheetIndexChange = useCallback((index: number) => setSheetIndex(index), []);
 
-  // MONOCHROMATIC GLASS EXPAND/COLLAPSE: the micro-chip toggle (top-right of
-  // HistorySheet's textContainerBox) flips between the 50% (idle, State A)
-  // and 88% (expanded, State B) stages. Tracked as its OWN boolean rather
-  // than derived from `sheetIndex` — 88% is deliberately never a real
-  // `snapPoints` entry (see HistorySheet.tsx's SHEET_SNAP_POINTS doc comment
-  // for why: making it one previously let a plain swipe-up reach it too, and
-  // let a slow/partial swipe leave the sheet at some in-between height with
-  // the record button visibly peeking out from behind it — both real,
-  // on-device bugs). Reached ONLY via `snapToPosition`, which the library
-  // treats as a temporary, gesture-unreachable position outside `snapPoints`
-  // — `sheetIndex` never reports an index for it at all, so there's nothing
-  // to derive from even if this tried to.
+  // MONOCHROMATIC GLASS EXPAND/COLLAPSE: the micro-chip toggle opens/closes
+  // `ExpandedTextOverlay` — a plain, full-screen component rendered further
+  // down as an ordinary sibling of `<HistorySheet>`, completely independent
+  // of the sheet's own snap-point state machine. Two earlier versions tried
+  // to make this a literal stage OF the sheet itself (a real "88%" snap
+  // point, then a `snapToPosition("88%")` excursion) — see
+  // HistorySheet.tsx's SHEET_SNAP_POINTS doc comment for exactly what broke
+  // both times. Because the overlay is a plain opaque full-screen View, not
+  // a sheet stage, nothing else in this file needs to know or care about
+  // `isTextBoxExpanded` — the sheet just stays wherever it already was
+  // (always 50%, since that's the only place the chip that opens this
+  // lives) underneath it.
   const [isTextBoxExpanded, setIsTextBoxExpanded] = useState(false);
+  const handleToggleExpand = useCallback(() => setIsTextBoxExpanded((prev) => !prev), []);
 
-  // Every OTHER `snapToIndex` call in this screen (backdrop tap, auto-peek
-  // on submit, keyboard focus, etc.) moves the sheet to a real snap index —
-  // which always means leaving the 88% temporary position, since
-  // `snapToIndex` unconditionally clears the library's own
-  // `isInTemporaryPosition` flag internally. `isTextBoxExpanded` has to be
-  // reset alongside every one of those calls too, not just
-  // `handleToggleExpand`'s own collapse branch below, or it would silently
-  // drift stale — e.g. expand the glass box, then submit a query (which
-  // snaps to index 1 directly): the sheet visually leaves 88%, but without
-  // this, the chip would still show "x" and the tab cards would stay
-  // hidden. Kept as one small wrapper rather than resetting the boolean at
-  // each call site individually, so there's exactly one place this rule
-  // lives. Declared before `handleToggleExpand` (not just used-before in the
-  // callback body, but referenced in that callback's own dependency array,
-  // which — unlike the body — is evaluated immediately) so it's already
-  // initialized by the time that array is built.
-  const collapseSheetToIndex = useCallback((index: 0 | 1) => {
-    setIsTextBoxExpanded(false);
-    sheetRef.current?.snapToIndex(index);
-  }, []);
-
-  const handleToggleExpand = useCallback(() => {
-    if (isTextBoxExpanded) {
-      // collapseSheetToIndex already resets isTextBoxExpanded — see its own
-      // doc comment above.
-      collapseSheetToIndex(1);
-    } else {
-      setIsTextBoxExpanded(true);
-      sheetRef.current?.snapToPosition("88%");
-    }
-  }, [isTextBoxExpanded, collapseSheetToIndex]);
-
-  // Shared spring physics for every snapToIndex/snapToPosition call this
-  // sheet makes (`@gorhom/bottom-sheet`'s own `animationConfigs` prop,
-  // applied uniformly to the sheet's whole imperative API) — so the new
-  // 50%<->88% micro-chip transition decelerates with the same soft,
-  // native-feeling curve as every other snap already firing throughout this
-  // screen (auto-peek on ASK, backdrop-tap collapse, keyboard-focus snap,
-  // etc.), rather than the library's stiffer built-in default.
+  // Shared spring physics for every snapToIndex call this sheet makes
+  // (`@gorhom/bottom-sheet`'s own `animationConfigs` prop, applied uniformly
+  // to the sheet's whole imperative API) — so every snap (backdrop tap,
+  // auto-peek on submit, keyboard focus, drag-handle tap) decelerates with
+  // the same soft, native-feeling curve, rather than the library's stiffer
+  // built-in default.
   const sheetAnimationConfigs = useBottomSheetSpringConfigs({
     damping: 24,
     stiffness: 260,
@@ -229,8 +198,8 @@ export default function HomeScreen() {
   // to first check whether either is actually open.
   const handleBackdropPress = useCallback(() => {
     Keyboard.dismiss();
-    collapseSheetToIndex(0);
-  }, [collapseSheetToIndex]);
+    sheetRef.current?.snapToIndex(0);
+  }, []);
 
   const refreshNotes = useCallback(async () => {
     try {
@@ -318,7 +287,7 @@ export default function HomeScreen() {
         await refreshNotes();
         showToast("Saved thought to memory");
         setHistoryTab("notes");
-        collapseSheetToIndex(0);
+        sheetRef.current?.snapToIndex(0);
         if (note.status !== "embedded") {
           setError(null);
         }
@@ -331,7 +300,7 @@ export default function HomeScreen() {
         }
       }
     },
-    [refreshNotes, collapseSheetToIndex]
+    [refreshNotes]
   );
 
   /** Shared by ComposeBar's typed submit and both voice paths. `audioUri`
@@ -371,7 +340,7 @@ export default function HomeScreen() {
       // there's no classification step to wait on anymore, but the sheet
       // still moves right away rather than only after the note/answer
       // pipeline finishes.
-      collapseSheetToIndex(1);
+      sheetRef.current?.snapToIndex(1);
       const intent: "RECORD" | "ASK" = inputMode === "record" ? "RECORD" : "ASK";
       try {
         setProcessingLabel(intent === "RECORD" ? "note" : "query");
@@ -383,7 +352,7 @@ export default function HomeScreen() {
         // is what's actually visible once the sheet reaches its 50%
         // auto-peek, rather than leaving Notes selected underneath it.
         setHistoryTab("qa");
-        collapseSheetToIndex(1);
+        sheetRef.current?.snapToIndex(1);
         if (audioUri) {
           // Voice-sourced: run the RAG exchange via `ask()`, which has no
           // speech side effect of its own — the caller (finishUtterance)
@@ -613,14 +582,14 @@ export default function HomeScreen() {
       } else {
         // Tapping to start recording collapses the sheet to its resting
         // peek immediately.
-        collapseSheetToIndex(0);
+        sheetRef.current?.snapToIndex(0);
         asrRouter.startListening();
         await recorder.startRecording();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Recording failed.");
     }
-  }, [recorder, activeMode.isActive, finishUtterance, collapseSheetToIndex]);
+  }, [recorder, activeMode.isActive, finishUtterance]);
 
   // 10-minute no-speech safety timeout (Requirement 5) — armed the moment
   // Handsfree engages, and re-armed on every utterance ActiveModeManager
@@ -724,7 +693,7 @@ export default function HomeScreen() {
   const handleSelectNote = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
   const handleShowCitation = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
   const handleSettingsPress = useCallback(() => router.push("/settings"), [router]);
-  const handleInputFocus = useCallback(() => collapseSheetToIndex(1), [collapseSheetToIndex]);
+  const handleInputFocus = useCallback(() => sheetRef.current?.snapToIndex(1), []);
 
   // Build 23 SYNCHRONIZE MODE PILLS WITH DRAWER TABS: tapping a mode pill
   // sets both the deterministic routing mode AND which drawer segment is
@@ -870,8 +839,6 @@ export default function HomeScreen() {
         onIndexChange={handleSheetIndexChange}
         modelDownload={chatSession.modelDownload}
         bottomInset={insets.bottom}
-        topInset={insets.top}
-        isExpanded={isTextBoxExpanded}
         onToggleExpand={handleToggleExpand}
         animationConfigs={sheetAnimationConfigs}
         composeBarSlot={
@@ -923,6 +890,47 @@ export default function HomeScreen() {
           buttons reads correctly even on a device where the OS-level color
           is ignored. */}
       <View pointerEvents="none" style={[styles.navBarInset, { height: insets.bottom }]} />
+
+      {/* MONOCHROMATIC GLASS — FULL-SCREEN EXPANDED STAGE: a plain, opaque
+          overlay covering the entire canvas, rendered as the last real
+          sibling here so it paints on top of absolutely everything —
+          header, center button, floating pills, the sheet itself, even the
+          nav-bar inset strip above. See ExpandedTextOverlay.tsx's own doc
+          comment for why this is a separate component entirely rather than
+          a stage of `<HistorySheet>`. Builds its OWN fresh
+          NotesSheetContent/ChatSheetContent element (not the same instances
+          passed to `<HistorySheet>` above) since only one of the two
+          copies is ever actually mounted at a time — this one, while
+          expanded; HistorySheet's own copy, otherwise. */}
+      {isTextBoxExpanded && (
+        <ExpandedTextOverlay topInset={insets.top} bottomInset={insets.bottom} onClose={handleToggleExpand}>
+          {historyTab === "notes" ? (
+            <NotesSheetContent
+              notes={displayedNotes}
+              isSearchActive={false}
+              onSelectNote={handleSelectNote}
+              onDeleteNote={handleDeleteNote}
+              isRestoring={isRestoring}
+              onRestoreFromDrive={handleRestoreFromDrive}
+              bottomInset={insets.bottom}
+              usePlainList
+            />
+          ) : (
+            <ChatSheetContent
+              messages={chatSession.messages}
+              isSending={chatSession.isSending}
+              speakingMessageId={chatSession.speakingMessageId}
+              modelDownload={chatSession.modelDownload}
+              isModelReady={chatSession.isModelReady}
+              onSubmitStarterPrompt={(prompt) => void chatSession.submitQuery(prompt, "text")}
+              onToggleSpeech={chatSession.toggleSpeech}
+              onShowCitation={handleShowCitation}
+              bottomInset={insets.bottom}
+              usePlainList
+            />
+          )}
+        </ExpandedTextOverlay>
+      )}
 
       <NoteDetailModal
         noteId={selectedNoteId}

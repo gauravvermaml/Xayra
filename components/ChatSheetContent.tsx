@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { ActivityIndicator, Animated, Pressable, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Animated, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
 
 import { MarkdownText } from "./MarkdownText";
@@ -45,6 +45,14 @@ export type ChatSheetContentProps = {
    * message can scroll clear of the solid Android nav bar instead of ending
    * up clipped behind it. */
   bottomInset: number;
+  /** True only when rendered inside `ExpandedTextOverlay` — a plain
+   * full-screen View, NOT a real `<BottomSheet>`. See
+   * NotesSheetContent.tsx's identical prop for why `BottomSheetFlatList`
+   * throws ("'useBottomSheetInternal' cannot be used out of the
+   * BottomSheet!") when rendered there, and why a plain RN `FlatList` is
+   * the right (and simpler) choice for a static full-screen overlay with
+   * no sheet-drag gesture to coordinate with. */
+  usePlainList?: boolean;
 };
 
 /**
@@ -63,8 +71,20 @@ export function ChatSheetContent({
   onToggleSpeech,
   onShowCitation,
   bottomInset,
+  usePlainList,
 }: ChatSheetContentProps) {
-  const listRef = useRef<React.ElementRef<typeof BottomSheetFlatList<ChatMessage>>>(null);
+  // Two separate, exactly-typed refs rather than one shared union-typed
+  // ref — `FlatList` and `BottomSheetFlatList` both expose `scrollToEnd`,
+  // but their ref types aren't structurally assignable to each other, so
+  // TypeScript rejects a single ref used as both. Only one of the two ever
+  // actually mounts for a given instance's lifetime (`usePlainList` is a
+  // constant prop), so exactly one of these is ever populated.
+  const plainListRef = useRef<FlatList<ChatMessage>>(null);
+  const sheetListRef = useRef<React.ElementRef<typeof BottomSheetFlatList<ChatMessage>>>(null);
+  const scrollToEnd = () => {
+    plainListRef.current?.scrollToEnd({ animated: true });
+    sheetListRef.current?.scrollToEnd({ animated: true });
+  };
 
   const handleAllowCellularDownload = () => {
     void allowCellularDownloadAndResume();
@@ -73,61 +93,76 @@ export function ChatSheetContent({
     void resumeDownloads();
   };
 
+  const messageListContentContainerStyle = { paddingBottom: bottomInset + 80 };
+  const emptyComponent = <Text style={styles.emptyText}>Ask anything — answers are grounded in your recorded notes.</Text>;
+  const renderItem = ({ item }: { item: ChatMessage }) => (
+    <Pressable
+      onLongPress={() => void copyTextWithFeedback(item.text)}
+      disabled={item.text.trim().length === 0}
+      style={[styles.bubble, item.role === "user" ? styles.bubbleUser : styles.bubbleAssistant]}
+    >
+      <Text style={styles.roleLabel}>{item.role === "user" ? "You" : "Xayra"}</Text>
+      {item.isStreaming && item.text.length === 0 ? (
+        <View style={styles.streamingStartRow}>
+          <ActivityIndicator color={colors.textMuted} size="small" />
+          <Text style={styles.streamingStartText}>Thinking…</Text>
+        </View>
+      ) : (
+        <View style={styles.bubbleTextWrap}>
+          {/* Build 22: explicit selectable={false} — MarkdownText
+              defaults to true, which inside this BottomSheetFlatList
+              let a drag starting on a message bubble be captured as
+              text-selection instead of list scroll. */}
+          <MarkdownText
+            text={item.text}
+            color={item.role === "user" ? colors.onAccent : colors.textPrimary}
+            selectable={false}
+          />
+          {item.isStreaming && <StreamingCursor color={item.role === "user" ? colors.onAccent : colors.accent} />}
+        </View>
+      )}
+      {item.role === "assistant" && !item.isStreaming && item.text.length > 0 && (
+        <Pressable onPress={() => onToggleSpeech(item)} style={styles.speakerButton}>
+          <Text style={styles.speakerButtonText}>{speakingMessageId === item.id ? "⏹ Stop" : "🔊 Listen"}</Text>
+        </Pressable>
+      )}
+      {!!item.citations?.length && (
+        <View style={styles.citationRow}>
+          {item.citations.map((citation) => (
+            <Pressable key={citation.noteId} onPress={() => onShowCitation(citation.noteId)} style={styles.citationChip}>
+              <Text style={styles.citationChipText}>[Note {citation.index}]</Text>
+            </Pressable>
+          ))}
+        </View>
+      )}
+    </Pressable>
+  );
+
   return (
     <View style={styles.container}>
-      <BottomSheetFlatList
-        ref={listRef}
-        style={styles.messageList}
-        contentContainerStyle={{ paddingBottom: bottomInset + 80 }}
-        data={messages}
-        keyExtractor={(item) => item.id}
-        onContentSizeChange={() => listRef.current?.scrollToEnd({ animated: true })}
-        ListEmptyComponent={
-          <Text style={styles.emptyText}>Ask anything — answers are grounded in your recorded notes.</Text>
-        }
-        renderItem={({ item }) => (
-          <Pressable
-            onLongPress={() => void copyTextWithFeedback(item.text)}
-            disabled={item.text.trim().length === 0}
-            style={[styles.bubble, item.role === "user" ? styles.bubbleUser : styles.bubbleAssistant]}
-          >
-            <Text style={styles.roleLabel}>{item.role === "user" ? "You" : "Xayra"}</Text>
-            {item.isStreaming && item.text.length === 0 ? (
-              <View style={styles.streamingStartRow}>
-                <ActivityIndicator color={colors.textMuted} size="small" />
-                <Text style={styles.streamingStartText}>Thinking…</Text>
-              </View>
-            ) : (
-              <View style={styles.bubbleTextWrap}>
-                {/* Build 22: explicit selectable={false} — MarkdownText
-                    defaults to true, which inside this BottomSheetFlatList
-                    let a drag starting on a message bubble be captured as
-                    text-selection instead of list scroll. */}
-                <MarkdownText
-                  text={item.text}
-                  color={item.role === "user" ? colors.onAccent : colors.textPrimary}
-                  selectable={false}
-                />
-                {item.isStreaming && <StreamingCursor color={item.role === "user" ? colors.onAccent : colors.accent} />}
-              </View>
-            )}
-            {item.role === "assistant" && !item.isStreaming && item.text.length > 0 && (
-              <Pressable onPress={() => onToggleSpeech(item)} style={styles.speakerButton}>
-                <Text style={styles.speakerButtonText}>{speakingMessageId === item.id ? "⏹ Stop" : "🔊 Listen"}</Text>
-              </Pressable>
-            )}
-            {!!item.citations?.length && (
-              <View style={styles.citationRow}>
-                {item.citations.map((citation) => (
-                  <Pressable key={citation.noteId} onPress={() => onShowCitation(citation.noteId)} style={styles.citationChip}>
-                    <Text style={styles.citationChipText}>[Note {citation.index}]</Text>
-                  </Pressable>
-                ))}
-              </View>
-            )}
-          </Pressable>
-        )}
-      />
+      {usePlainList ? (
+        <FlatList
+          ref={plainListRef}
+          style={styles.messageList}
+          contentContainerStyle={messageListContentContainerStyle}
+          data={messages}
+          keyExtractor={(item) => item.id}
+          onContentSizeChange={scrollToEnd}
+          ListEmptyComponent={emptyComponent}
+          renderItem={renderItem}
+        />
+      ) : (
+        <BottomSheetFlatList
+          ref={sheetListRef}
+          style={styles.messageList}
+          contentContainerStyle={messageListContentContainerStyle}
+          data={messages}
+          keyExtractor={(item) => item.id}
+          onContentSizeChange={scrollToEnd}
+          ListEmptyComponent={emptyComponent}
+          renderItem={renderItem}
+        />
+      )}
 
       {messages.length === 0 && isModelReady && (
         <View style={styles.starterChipRow}>
