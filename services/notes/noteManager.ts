@@ -6,6 +6,8 @@ import type { NoteStatus } from "../../db/schema";
 import { isEmbeddingModelDownloaded } from "../ai/embeddingModel";
 import { generateEmbeddingLocal } from "../ai/localEmbeddings";
 import { logDuration, nowMs } from "../ai/perf";
+import { extractToDosFromText } from "../ai/transformationEngine";
+import { addToDo } from "../todos/todoManager";
 
 export type Note = {
   id: string;
@@ -146,6 +148,37 @@ async function tryEmbedNote(id: string, text: string): Promise<boolean> {
   }
 }
 
+/**
+ * Phase 2 "Your To-Dos" module: fires the local Llama extraction pass on a
+ * just-saved note's text and persists whatever it finds. Deliberately never
+ * awaited by its callers (createVoiceNote/createTextNote below) — extraction
+ * runs a real GGUF completion, which can take seconds on-device, and a note
+ * must finish saving and return to the UI immediately regardless of whether
+ * anything actionable was found in it. Every failure (model not downloaded,
+ * malformed output) is already swallowed inside extractToDosFromText itself,
+ * so this only needs to guard against a single already-extracted item's own
+ * DB write failing and taking the rest of the batch down with it.
+ */
+function scheduleToDoExtraction(noteId: string, text: string): void {
+  void (async () => {
+    const extracted = await extractToDosFromText(text);
+    if (extracted.length === 0) {
+      return;
+    }
+
+    let added = 0;
+    for (const item of extracted) {
+      try {
+        await addToDo(item.task, item.actionDate, item.recurrence);
+        added += 1;
+      } catch (err) {
+        console.error("[Note] Failed to save an extracted to-do", noteId, item, err);
+      }
+    }
+    console.log(`[Note] To-do extraction complete for note ${noteId}: ${added}/${extracted.length} saved.`);
+  })();
+}
+
 async function insertEmbedding(noteId: string, embedding: number[]): Promise<void> {
   const db = await getRawDatabase();
 
@@ -201,6 +234,7 @@ export async function createVoiceNote(
       throw new SilentRecordingError();
     }
     await updateNoteStatus(id, "transcribed", { content: transcript, transcript, transcriptionModel });
+    scheduleToDoExtraction(id, transcript);
 
     const embedded = await tryEmbedNote(id, transcript);
 
@@ -234,6 +268,7 @@ export async function createTextNote(text: string): Promise<Note> {
     "INSERT INTO notes (id, content, audio_uri, transcript, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     [id, text, null, null, "transcribed", createdAt]
   );
+  scheduleToDoExtraction(id, text);
 
   const embedded = await tryEmbedNote(id, text);
   console.log("[Note] text note saved", id, embedded ? "status=embedded" : "status=transcribed (offline)");

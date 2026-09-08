@@ -14,6 +14,7 @@ import { NoteDetailModal } from "../components/NoteDetailModal";
 import { NotesSheetContent, type DisplayNote } from "../components/NotesSheetContent";
 import { showToast } from "../components/Toast";
 import { colors } from "../constants/theme";
+import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
 import { useChatSession } from "../services/ai/useChatSession";
@@ -93,6 +94,10 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const recorder = useVoiceRecorder();
   const chatSession = useChatSession();
+  // Only the count is used on this screen (the pill's badge) — the To-Dos
+  // screen itself (app/todos.tsx) owns its own useToDos() instance for the
+  // full list, refetched independently on its own focus.
+  const { pendingCount } = useToDos();
 
   // Cold-start layout guard (Requirement 3): the header/compose bar/sheet
   // all depend on `insets` for correct placement — rendering them before
@@ -805,6 +810,12 @@ export default function HomeScreen() {
           pointerEvents="box-none"
           style={[styles.drawerFloatingStack, { right: 24 }, drawerFloatingStackAnimatedStyle]}
         >
+          <Pressable onPress={() => router.push("/todos")} style={styles.todosPill}>
+            <Text style={styles.todosPillText}>
+              {pendingCount > 0 ? `To-Dos (${pendingCount})` : "To-Dos"}
+            </Text>
+          </Pressable>
+
           <Pressable
             onPress={handleToggleHandsfree}
             style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
@@ -988,7 +999,24 @@ const styles = StyleSheet.create({
     zIndex: 25,
     elevation: 25,
   },
-  // Order here is visual top-to-bottom: Handsfree, then the Record/Ask pill.
+  // Order here is visual top-to-bottom: To-Dos, then Handsfree, then the
+  // Record/Ask pill. Styled as a plain dark pill, deliberately unstyled by
+  // pendingCount (no accent tint at >0) — the badge NUMBER inside the label
+  // is the whole affordance per spec, not a color change on top of it.
+  todosPill: {
+    marginBottom: 10, // gap above the Handsfree pill
+    borderRadius: 999,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderWidth: 1,
+    backgroundColor: "rgba(28, 28, 30, 0.85)",
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+  todosPillText: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#8E8E93",
+  },
   handsfreePill: {
     marginBottom: 10, // gap above the Record/Ask pill
     borderRadius: 999,
