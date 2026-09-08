@@ -3,7 +3,7 @@ import { Alert, Dimensions, Image, Keyboard, Pressable, StyleSheet, Text, View }
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import BottomSheet, { useBottomSheetSpringConfigs } from "@gorhom/bottom-sheet";
-import Animated, { interpolate, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
+import Animated, { FadeIn, FadeOut, interpolate, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 
 import { CentralRecorderCanvas, type RecorderCanvasState } from "../components/CentralRecorderCanvas";
 import { ChatSheetContent } from "../components/ChatSheetContent";
@@ -41,18 +41,25 @@ import { getSyncStatus, restoreFromDrive, signInWithGoogle, type SyncStatus } fr
  * indefinitely. */
 const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
-// Percentage snap points (SHEET_SNAP_POINTS = ['20%', '50%', '88%'] as of the
-// monochromatic-glass expandable box — see HistorySheet.tsx) are the bottom
-// sheet's own geometry, expressed as strings for @gorhom/bottom-sheet. The
-// center canvas's own bottom clearance (BUTTON CLEARANCE — Build 20) and the
-// floating pill cluster above the drawer (Build 23) both need the same
+// Percentage snap points (SHEET_SNAP_POINTS = ['20%', '50%'] — see
+// HistorySheet.tsx's own doc comment for why the monochromatic glass box's
+// 88% "expanded" stage is deliberately NOT a third entry here) are the
+// bottom sheet's own geometry, expressed as strings for @gorhom/bottom-sheet.
+// The center canvas's own bottom clearance (BUTTON CLEARANCE — Build 20) and
+// the floating pill cluster above the drawer (Build 23) both need the same
 // values as plain pixel numbers to interpolate against the sheet's live
 // animated index, so they're derived here once, from SHEET_SNAP_POINTS
-// itself, rather than each hardcoding the split independently.
+// itself, rather than each hardcoding the split independently. Both stay
+// pinned at their 50%-height values throughout the 88% expanded stage (that
+// stage isn't a real index — see `handleToggleExpand` below — so
+// `sheetAnimatedIndex` simply never reports anything past 1), which is fine:
+// what actually hides the record button behind the sheet at 88% is the
+// sheet's own real rendered height sitting on top of it in z-order, not
+// this padding value.
 const SCREEN_HEIGHT = Dimensions.get("window").height;
 const SHEET_HEIGHTS_PX = SHEET_SNAP_POINTS.map(
   (point) => (parseFloat(point) / 100) * SCREEN_HEIGHT
-) as [number, number, number];
+) as [number, number];
 /** Clean breathing room kept between the record button and the sheet's top
  * edge, on top of the sheet's own current height — Build 20 BUTTON
  * CLEARANCE, most visible when the sheet auto-peeks to Index 1 (50%) while
@@ -127,20 +134,57 @@ export default function HomeScreen() {
 
   // MONOCHROMATIC GLASS EXPAND/COLLAPSE: the micro-chip toggle (top-right of
   // HistorySheet's textContainerBox) flips between the 50% (idle, State A)
-  // and 88% (expanded, State B) stages. Reads the live `sheetIndex` mirror
-  // rather than tracking its own separate boolean, so this can never drift
-  // out of sync with what `@gorhom/bottom-sheet` itself reports as current.
-  const handleToggleExpand = useCallback(() => {
-    sheetRef.current?.snapToIndex(sheetIndex === 2 ? 1 : 2);
-  }, [sheetIndex]);
+  // and 88% (expanded, State B) stages. Tracked as its OWN boolean rather
+  // than derived from `sheetIndex` — 88% is deliberately never a real
+  // `snapPoints` entry (see HistorySheet.tsx's SHEET_SNAP_POINTS doc comment
+  // for why: making it one previously let a plain swipe-up reach it too, and
+  // let a slow/partial swipe leave the sheet at some in-between height with
+  // the record button visibly peeking out from behind it — both real,
+  // on-device bugs). Reached ONLY via `snapToPosition`, which the library
+  // treats as a temporary, gesture-unreachable position outside `snapPoints`
+  // — `sheetIndex` never reports an index for it at all, so there's nothing
+  // to derive from even if this tried to.
+  const [isTextBoxExpanded, setIsTextBoxExpanded] = useState(false);
 
-  // Shared spring physics for every snapToIndex call this sheet makes
-  // (`@gorhom/bottom-sheet`'s own `animationConfigs` prop, applied uniformly
-  // to the sheet's whole imperative API) — so the new 50%<->88% micro-chip
-  // transition decelerates with the same soft, native-feeling curve as every
-  // other snap already firing throughout this screen (auto-peek on ASK,
-  // backdrop-tap collapse, keyboard-focus snap, etc.), rather than the
-  // library's stiffer built-in default.
+  // Every OTHER `snapToIndex` call in this screen (backdrop tap, auto-peek
+  // on submit, keyboard focus, etc.) moves the sheet to a real snap index —
+  // which always means leaving the 88% temporary position, since
+  // `snapToIndex` unconditionally clears the library's own
+  // `isInTemporaryPosition` flag internally. `isTextBoxExpanded` has to be
+  // reset alongside every one of those calls too, not just
+  // `handleToggleExpand`'s own collapse branch below, or it would silently
+  // drift stale — e.g. expand the glass box, then submit a query (which
+  // snaps to index 1 directly): the sheet visually leaves 88%, but without
+  // this, the chip would still show "x" and the tab cards would stay
+  // hidden. Kept as one small wrapper rather than resetting the boolean at
+  // each call site individually, so there's exactly one place this rule
+  // lives. Declared before `handleToggleExpand` (not just used-before in the
+  // callback body, but referenced in that callback's own dependency array,
+  // which — unlike the body — is evaluated immediately) so it's already
+  // initialized by the time that array is built.
+  const collapseSheetToIndex = useCallback((index: 0 | 1) => {
+    setIsTextBoxExpanded(false);
+    sheetRef.current?.snapToIndex(index);
+  }, []);
+
+  const handleToggleExpand = useCallback(() => {
+    if (isTextBoxExpanded) {
+      // collapseSheetToIndex already resets isTextBoxExpanded — see its own
+      // doc comment above.
+      collapseSheetToIndex(1);
+    } else {
+      setIsTextBoxExpanded(true);
+      sheetRef.current?.snapToPosition("88%");
+    }
+  }, [isTextBoxExpanded, collapseSheetToIndex]);
+
+  // Shared spring physics for every snapToIndex/snapToPosition call this
+  // sheet makes (`@gorhom/bottom-sheet`'s own `animationConfigs` prop,
+  // applied uniformly to the sheet's whole imperative API) — so the new
+  // 50%<->88% micro-chip transition decelerates with the same soft,
+  // native-feeling curve as every other snap already firing throughout this
+  // screen (auto-peek on ASK, backdrop-tap collapse, keyboard-focus snap,
+  // etc.), rather than the library's stiffer built-in default.
   const sheetAnimationConfigs = useBottomSheetSpringConfigs({
     damping: 24,
     stiffness: 260,
@@ -156,11 +200,7 @@ export default function HomeScreen() {
   const centerAreaAnimatedStyle = useAnimatedStyle(() => ({
     paddingBottom: interpolate(
       sheetAnimatedIndex.value,
-      // Monochromatic glass box's 88% stage (index 2) is a third real point
-      // on this curve now, not just 0/1 — otherwise "clamp" would pin this
-      // at the 50% value the whole time the sheet sits at 88%, same bug
-      // class as the floating-pill interpolation just below.
-      [0, 1, 2],
+      [0, 1],
       SHEET_HEIGHTS_PX.map((heightPx) => heightPx + CENTER_AREA_BREATHING_ROOM_PX),
       "clamp"
     ),
@@ -178,12 +218,7 @@ export default function HomeScreen() {
   // there's no text input or keyboard interaction in this stack at all, just
   // a plain shared-value interpolation against the sheet's own index.
   const drawerFloatingStackAnimatedStyle = useAnimatedStyle(() => ({
-    // Same fix as centerAreaAnimatedStyle above: input range now spans all
-    // three real snap indices (0/1/2), matching SHEET_HEIGHTS_PX's own
-    // now-3-element output range — an [0, 1] input range against a 3-element
-    // output array would mismatch lengths and silently clamp at the 50%
-    // value for the entire 88% stage.
-    bottom: interpolate(sheetAnimatedIndex.value, [0, 1, 2], SHEET_HEIGHTS_PX, "clamp") + 16,
+    bottom: interpolate(sheetAnimatedIndex.value, [0, 1], SHEET_HEIGHTS_PX, "clamp") + 16,
   }));
 
   // BACKDROP TAP TO DISMISS: tapping anywhere on the canvas outside the
@@ -194,8 +229,8 @@ export default function HomeScreen() {
   // to first check whether either is actually open.
   const handleBackdropPress = useCallback(() => {
     Keyboard.dismiss();
-    sheetRef.current?.snapToIndex(0);
-  }, []);
+    collapseSheetToIndex(0);
+  }, [collapseSheetToIndex]);
 
   const refreshNotes = useCallback(async () => {
     try {
@@ -283,7 +318,7 @@ export default function HomeScreen() {
         await refreshNotes();
         showToast("Saved thought to memory");
         setHistoryTab("notes");
-        sheetRef.current?.snapToIndex(0);
+        collapseSheetToIndex(0);
         if (note.status !== "embedded") {
           setError(null);
         }
@@ -296,7 +331,7 @@ export default function HomeScreen() {
         }
       }
     },
-    [refreshNotes]
+    [refreshNotes, collapseSheetToIndex]
   );
 
   /** Shared by ComposeBar's typed submit and both voice paths. `audioUri`
@@ -336,7 +371,7 @@ export default function HomeScreen() {
       // there's no classification step to wait on anymore, but the sheet
       // still moves right away rather than only after the note/answer
       // pipeline finishes.
-      sheetRef.current?.snapToIndex(1);
+      collapseSheetToIndex(1);
       const intent: "RECORD" | "ASK" = inputMode === "record" ? "RECORD" : "ASK";
       try {
         setProcessingLabel(intent === "RECORD" ? "note" : "query");
@@ -348,7 +383,7 @@ export default function HomeScreen() {
         // is what's actually visible once the sheet reaches its 50%
         // auto-peek, rather than leaving Notes selected underneath it.
         setHistoryTab("qa");
-        sheetRef.current?.snapToIndex(1);
+        collapseSheetToIndex(1);
         if (audioUri) {
           // Voice-sourced: run the RAG exchange via `ask()`, which has no
           // speech side effect of its own — the caller (finishUtterance)
@@ -578,14 +613,14 @@ export default function HomeScreen() {
       } else {
         // Tapping to start recording collapses the sheet to its resting
         // peek immediately.
-        sheetRef.current?.snapToIndex(0);
+        collapseSheetToIndex(0);
         asrRouter.startListening();
         await recorder.startRecording();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Recording failed.");
     }
-  }, [recorder, activeMode.isActive, finishUtterance]);
+  }, [recorder, activeMode.isActive, finishUtterance, collapseSheetToIndex]);
 
   // 10-minute no-speech safety timeout (Requirement 5) — armed the moment
   // Handsfree engages, and re-armed on every utterance ActiveModeManager
@@ -689,7 +724,7 @@ export default function HomeScreen() {
   const handleSelectNote = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
   const handleShowCitation = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
   const handleSettingsPress = useCallback(() => router.push("/settings"), [router]);
-  const handleInputFocus = useCallback(() => sheetRef.current?.snapToIndex(1), []);
+  const handleInputFocus = useCallback(() => collapseSheetToIndex(1), [collapseSheetToIndex]);
 
   // Build 23 SYNCHRONIZE MODE PILLS WITH DRAWER TABS: tapping a mode pill
   // sets both the deterministic routing mode AND which drawer segment is
@@ -780,34 +815,51 @@ export default function HomeScreen() {
           pill float in a single right-aligned cluster directly above the
           bottom sheet drawer, tracking the sheet's live height (see
           drawerFloatingStackAnimatedStyle above) so it stays above the
-          drawer at every snap index instead of only at the 20% rest peek. */}
-      <Animated.View
-        pointerEvents="box-none"
-        style={[styles.drawerFloatingStack, { right: 24 }, drawerFloatingStackAnimatedStyle]}
-      >
-        <Pressable
-          onPress={handleToggleHandsfree}
-          style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
-        >
-          <Text style={[styles.handsfreePillText, activeMode.isActive && styles.handsfreePillTextActive]}>
-            🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
-          </Text>
-        </Pressable>
+          drawer at every snap index instead of only at the 20% rest peek.
 
-        <View style={styles.modePill}>
-          {(["record", "ask"] as const).map((mode) => (
-            <Pressable
-              key={mode}
-              onPress={() => handleSelectMode(mode)}
-              style={[styles.modePillOption, inputMode === mode && styles.modePillOptionActive]}
-            >
-              <Text style={[styles.modePillText, inputMode === mode && styles.modePillTextActive]}>
-                {mode === "record" ? "Record" : "Ask"}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-      </Animated.View>
+          Hidden entirely while the glass box is at its 88% expanded stage:
+          `drawerFloatingStackAnimatedStyle` tracks `sheetAnimatedIndex`,
+          which never reports anything past its 50%-height value during that
+          stage (see this screen's own SHEET_HEIGHTS_PX comment for why) —
+          confirmed on-device, this cluster stayed pinned at the 50%
+          position and visibly overlapped the now-much-taller box's note
+          cards instead of floating cleanly above it. Rather than build a
+          second, independent animated position purely to track an
+          overshoot state the user isn't even meant to interact with these
+          controls during (they're browsing/reading, not recording, while
+          expanded — the chip's own "x" is right there to get back), hiding
+          the cluster removes the collision outright. */}
+      {!isTextBoxExpanded && (
+        <Animated.View
+          entering={FadeIn.duration(150)}
+          exiting={FadeOut.duration(120)}
+          pointerEvents="box-none"
+          style={[styles.drawerFloatingStack, { right: 24 }, drawerFloatingStackAnimatedStyle]}
+        >
+          <Pressable
+            onPress={handleToggleHandsfree}
+            style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
+          >
+            <Text style={[styles.handsfreePillText, activeMode.isActive && styles.handsfreePillTextActive]}>
+              🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
+            </Text>
+          </Pressable>
+
+          <View style={styles.modePill}>
+            {(["record", "ask"] as const).map((mode) => (
+              <Pressable
+                key={mode}
+                onPress={() => handleSelectMode(mode)}
+                style={[styles.modePillOption, inputMode === mode && styles.modePillOptionActive]}
+              >
+                <Text style={[styles.modePillText, inputMode === mode && styles.modePillTextActive]}>
+                  {mode === "record" ? "Record" : "Ask"}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
+        </Animated.View>
+      )}
 
       <HistorySheet
         ref={sheetRef}
@@ -819,6 +871,7 @@ export default function HomeScreen() {
         modelDownload={chatSession.modelDownload}
         bottomInset={insets.bottom}
         topInset={insets.top}
+        isExpanded={isTextBoxExpanded}
         onToggleExpand={handleToggleExpand}
         animationConfigs={sheetAnimationConfigs}
         composeBarSlot={

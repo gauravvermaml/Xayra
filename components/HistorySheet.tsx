@@ -23,24 +23,31 @@ import type { ModelDownloadStatus } from "../services/ai/modelDownloadManager";
  * nothing left to drag to above it, for a gesture or for any future
  * programmatic snap.
  *
- * Two stages were the whole story through Build 24 — resting peek (just the
- * compose bar) and a single 50% expanded stage. A third, 88% stage is added
- * here as the MONOCHROMATIC GLASS container's own "fully expanded" state
- * (see `textContainerBox`/the micro-chip toggle below) — deliberately NOT a
- * regression back to Build 24's original bug (an unbounded 90% stage a
- * user's own drag could reach, crowding the sticky header/floating pills
- * into the status bar with nothing accounting for it). This time the
- * expanded stage's own content — `textContainerBox` — explicitly pads for
- * `topInset + 16` (see below) whenever the sheet is actually at this new top
- * stage, so it stops softly below the status bar instead of colliding with
- * it. The 88% stage is reached only programmatically (the micro-chip
- * toggle's `onToggleExpand`, via `snapToIndex(2)`), same as how 50% has
- * always been reached only via an explicit `snapToIndex(1)` call — a manual
- * drag can still reach it since it's a real configured snap point, but nothing
- * about that reintroduces Build 24's original bug, since this stage's content
- * now correctly accounts for the inset that bug never did.
+ * Two stages, same as Build 24 — resting peek (just the compose bar) and a
+ * single 50% expanded stage. That stays a hard, gesture-reachable ceiling:
+ * `snapPoints` below still lists only these two.
+ *
+ * The MONOCHROMATIC GLASS container's own "fully expanded" 88% state is
+ * deliberately NOT a third entry here — an earlier version of this feature
+ * added "88%" to this array and reached it via `snapToIndex(2)`, which
+ * reintroduced exactly the class of bug Build 24 fixed: because it was a
+ * real configured snap point, the sheet's own pan gesture could drag to it
+ * too — a plain swipe-up from 50% (not just the micro-chip tap) could reach
+ * it, and worse, a slow/partial swipe could leave the sheet sitting at some
+ * in-between height, visibly exposing a sliver of the record button behind
+ * it. Both were real, reported, on-device bugs, not theoretical.
+ *
+ * The fix: 88% is reached ONLY via `@gorhom/bottom-sheet`'s own
+ * `snapToPosition` API (see app/index.tsx's `handleToggleExpand`) — "snap to
+ * a position out of provided `snapPoints`," which the library treats as a
+ * temporary, gesture-UNREACHABLE position. Since it's never in this array,
+ * the pan gesture's own range stays hard-clamped to [20%, 50%] exactly as
+ * Build 24 intended — there is nothing to drag past 50% to, full stop — and
+ * the ONLY path to 88% is one discrete, always-fully-animated call the
+ * micro-chip's `onPress` makes. A partial/interrupted state is no longer
+ * possible because there's no gesture involved in reaching it at all.
  */
-export const SHEET_SNAP_POINTS = ["20%", "50%", "88%"];
+export const SHEET_SNAP_POINTS = ["20%", "50%"];
 
 export type HistoryTab = "notes" | "qa";
 
@@ -103,18 +110,25 @@ export type HistorySheetProps = {
       screenshot showed the card's subtitle clipped flush against the
       Android nav bar without it). */
   bottomInset: number;
-  /** Device's safe-area top inset — used ONLY while `sheetIndex === 2` (the
-   * 88% expanded stage) to pad `textContainerBox`'s own top edge so it stops
-   * softly below the status bar instead of the sheet's new top stage
-   * crowding into it (see SHEET_SNAP_POINTS's own doc comment above for why
-   * this stage is safe to add where Build 24 previously found it wasn't). */
+  /** Device's safe-area top inset — applied as extra `marginTop` on
+   * `textContainerBox` ONLY while `isExpanded` is true, pushing the box's
+   * own outer edge (not its internal padding — see CHIP_CONTENT_CLEARANCE
+   * below for why those stay separate) down below the status bar for the
+   * 88% expanded stage. */
   topInset: number;
+  /** True only while the monochromatic glass box is in its 88% expanded
+   * stage — owned by app/index.tsx as its own boolean (see that file's
+   * `isTextBoxExpanded`) rather than derived from the sheet's own snap
+   * index, since 88% is deliberately NOT a real snap index here (see
+   * SHEET_SNAP_POINTS's doc comment above) — the sheet's own `onChange`
+   * never reports an index for it. */
+  isExpanded: boolean;
   /** Micro-chip toggle (top-right of `textContainerBox`) between the 50%
    * (idle) and 88% (expanded) stages — owned by app/index.tsx since it's the
-   * one holding `sheetRef` and calling `snapToIndex`. */
+   * one holding `sheetRef` and calling `snapToPosition`/`snapToIndex`. */
   onToggleExpand: () => void;
-  /** Spring physics shared with every `snapToIndex` call this sheet makes
-   * (both app/index.tsx's own calls and the drag-handle/micro-chip taps
+  /** Spring physics shared with every `snapToIndex`/`snapToPosition` call
+   * this sheet makes (both app/index.tsx's own calls and the drag-handle tap
    * here), via `@gorhom/bottom-sheet`'s own `animationConfigs` prop — so the
    * 50%<->88% micro-chip transition decelerates with the exact same feel as
    * every other snap this sheet already does, rather than the library's
@@ -124,14 +138,19 @@ export type HistorySheetProps = {
 
 /**
  * Sticky Apple-Maps-style bottom sheet: true jet-black background so it
- * reads as part of the same canvas as the screen behind it. Three snap
- * points (see SHEET_SNAP_POINTS) rather than two — the middle stage is what
- * `app/index.tsx` snaps to automatically while an ASK-classified request is
- * processing. At full expansion, a Notes/QA History segment control filters
- * which scrollable list is shown; both segments' underlying state
- * (`allNotes` in app/index.tsx, and the chat session from
- * services/ai/useChatSession.ts) lives above this component either way, so
- * switching segments never loses anything, only which is visible.
+ * reads as part of the same canvas as the screen behind it. Two
+ * gesture-reachable snap points (see SHEET_SNAP_POINTS) — the 50% stage is
+ * what `app/index.tsx` snaps to automatically while an ASK-classified
+ * request is processing, and is also as far as any manual swipe can ever
+ * go. A third, 88% "expanded" stage exists ONLY as a `snapToPosition` target
+ * the micro-chip toggle reaches programmatically — see SHEET_SNAP_POINTS's
+ * own doc comment for why it's deliberately not a real snap point. At 50%
+ * (segment cards visible) or 88% (segment cards hidden) alike, a Notes/QA
+ * History segment control filters which scrollable list is shown inside the
+ * monochromatic glass box; both segments' underlying state (`allNotes` in
+ * app/index.tsx, and the chat session from services/ai/useChatSession.ts)
+ * lives above this component either way, so switching segments never loses
+ * anything, only which is visible.
  */
 export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function HistorySheet(
   {
@@ -146,12 +165,12 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     modelDownload,
     bottomInset,
     topInset,
+    isExpanded,
     onToggleExpand,
     animationConfigs,
   },
   ref
 ) {
-  const isExpanded = sheetIndex === 2;
   // Stable across every render regardless of any other state in the app —
   // `ref` (a React ref object) never changes identity, so this closure
   // never needs to be recreated, and `handleComponent` below stays the same
@@ -231,15 +250,33 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       {/* IDLE PEEK ISOLATION (cont.): at index 0 (20%), everything below the
           sticky header renders nothing at all — not the segment pill, not
           either history list. Both only mount once the sheet reaches its
-          (now sole, Build 24) expanded 50% stage. PADDING & CLEARANCE:
-          `body`'s `marginTop` (16dp, below) is a
+          expanded 50% stage, or the glass box's own 88% expanded stage.
+          PADDING & CLEARANCE: `body`'s `marginTop` (16dp, below) is a
           real flex margin, not a clipping trick — the segment pills/list can
           structurally never render behind the sticky header above them
           (there's no absolute positioning or negative margin anywhere in
           this tree that could cause that), so this gap holds regardless of
           scroll position or sheet index, matching the Apple Maps
-          reference. */}
-      {sheetIndex > 0 && (
+          reference.
+
+          `|| isExpanded` — found on-device: while `snapToPosition("88%")`
+          holds the sheet at a position outside `snapPoints`, the library's
+          own `onChange`/`animatedIndex` index math (it interpolates against
+          an internal extra point mapping full container height to index
+          -1 — see @gorhom/bottom-sheet's BottomSheet.tsx) does NOT simply
+          clamp at the highest real snap index the way it does for an
+          in-range position; near-full-height positions like 88% pull the
+          reported index down toward that -1 anchor instead. `sheetIndex`
+          landing at 0 (or lower) here made this condition go false the
+          instant the box expanded, unmounting the entire glass box,
+          chip, and list mid-transition — confirmed directly on-device (a
+          screenshot showed the sheet visually at 88% with nothing rendered
+          below the sticky header at all). `isExpanded` is this component's
+          own explicit, JS-state-driven signal for "the glass box is
+          supposed to be visible right now" and is never subject to that
+          index math at all, so it's authoritative here regardless of what
+          `sheetIndex` reports during the excursion. */}
+      {(sheetIndex > 0 || isExpanded) && (
         <View style={styles.body}>
           {/* MONOCHROMATIC GLASS — TWO-STATE VISIBILITY: State A (50%, idle)
               shows the tab-selection cards above the glass box; State B (88%,
@@ -279,10 +316,16 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
               own height/position change as the segment row above mounts or
               unmounts, and as the sheet itself moves between the 50%/88%
               stages — both are ordinary layout changes from this box's
-              perspective, not something it needs to know the cause of. */}
+              perspective, not something it needs to know the cause of.
+              `marginTop` (not `paddingTop`) is what shifts the whole box
+              down to clear the status bar while expanded — kept as an OUTER
+              offset, deliberately separate from the box's own internal
+              `padding: 16`, so the chip-to-content clearance below stays
+              identical in both states instead of the status-bar inset
+              silently changing it too. */}
           <Animated.View
             layout={Layout.springify()}
-            style={[styles.textContainerBox, isExpanded && { paddingTop: topInset + 16 }]}
+            style={[styles.textContainerBox, isExpanded && { marginTop: topInset + 16 }]}
           >
             {/* Floating micro-chip toggle: arrow-up-right (State A) expands
                 to 88%; x (State B) — same chip, same position — collapses
@@ -293,7 +336,19 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
             <Pressable onPress={onToggleExpand} hitSlop={8} style={styles.microChip}>
               <Feather name={isExpanded ? "x" : "arrow-up-right"} size={18} color="#E2E8F0" />
             </Pressable>
-            {historyTab === "notes" ? notesContent : qaContent}
+            {/* CHIP CLEARANCE: found on-device — the chip (top:12, 32px tall,
+                so it occupies the box's own top 12-44px) was overlapping the
+                very top of the first note/message card, since the box's own
+                16px padding alone wasn't enough clearance below it. This
+                fixed extra top offset (chip's own 44px bottom edge + a 12px
+                gap) reserves real layout space above the list instead, so
+                content structurally starts below the chip rather than
+                merely being visually covered by it. Applied as its own
+                wrapper (not baked into the box's `padding`) so it stays
+                exactly the same in both the idle and expanded states — see
+                the box's own `marginTop` comment above for why the two are
+                kept independent. */}
+            <View style={styles.listClearance}>{historyTab === "notes" ? notesContent : qaContent}</View>
           </Animated.View>
 
           <View style={{ paddingBottom: bottomInset }}>
@@ -378,6 +433,15 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     padding: 16,
     overflow: "hidden",
+  },
+  // CHIP CLEARANCE (see the render-side comment above): 44 (chip's own
+  // bottom edge, relative to the box's outer top) + 12 (breathing room)
+  // rounded to 40, on top of the box's own 16px padding — 56px total from
+  // the box's top edge to the first list item, a clean 12px gap below the
+  // chip.
+  listClearance: {
+    flex: 1,
+    paddingTop: 40,
   },
   // Floating micro-chip toggle, top-right corner of textContainerBox.
   microChip: {
