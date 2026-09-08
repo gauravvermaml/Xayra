@@ -41,6 +41,31 @@ export const NOTE_EMBEDDINGS_TABLE_SQL = `
   );
 `;
 
+/** Auto-Structured "Your To-Dos" module (Phase 2) — how often a completed
+ * to-do respawns a fresh occurrence. See services/todos/todoManager.ts's
+ * `completeToDo()` for the actual respawn logic. */
+export const RECURRENCE_OPTIONS = ["none", "daily", "weekly", "monthly"] as const;
+export type Recurrence = (typeof RECURRENCE_OPTIONS)[number];
+
+/**
+ * A single actionable to-do, either entered directly or extracted from a
+ * note's text by services/ai/transformationEngine.ts's local Llama pass.
+ * `actionDate`/`createdAt` are plain ISO strings (`YYYY-MM-DD` /
+ * `toISOString()`), not drizzle's integer timestamp mode like `notes` above —
+ * a to-do's action date is a calendar day a user reasons about directly
+ * ("do this on the 3rd"), not an instant in time, so keeping it as the exact
+ * string the extraction model and the UI both read/write avoids a timezone
+ * round-trip through `Date` on every read.
+ */
+export const todos = sqliteTable("todos", {
+  id: text("id").primaryKey(),
+  text: text("text").notNull(),
+  actionDate: text("action_date").notNull(),
+  isCompleted: integer("is_completed").notNull().default(0),
+  recurrence: text("recurrence").notNull().default("none"),
+  createdAt: text("created_at").notNull(),
+});
+
 /**
  * FTS5 keyword index over `notes.content`, as an "external content" table:
  * it stores no copy of the text itself, just the token index, keyed by

@@ -302,6 +302,19 @@ function buildPrompt(userQuery: string, noteContext: string): string {
 }
 
 /**
+ * Exposes the same shared, lazily-loaded llama.cpp context RAG answers use
+ * to other on-device services that need raw completions of their own —
+ * currently services/ai/transformationEngine.ts's to-do extraction pass.
+ * Deliberately the same singleton as generateLocalRAGAnswer() below rather
+ * than a second `initLlama()` call: a phone can't spare the memory for two
+ * multi-GB GGUF models resident at once, and every caller sharing one
+ * context also means whichever ran last keeps the model warm for the next.
+ */
+export async function getSharedLlamaContext(): Promise<LlamaContext> {
+  return getContext();
+}
+
+/**
  * Generates a RAG answer entirely on-device via a local GGUF model — no
  * network round-trip, no OpenAI API key. Streams each token to `onToken` as
  * it's produced (for live UI updates) and resolves with the full text once

@@ -134,6 +134,19 @@ async function createCoreTables(db: DB): Promise<void> {
       throw err;
     }
   }
+
+  // Phase 2: Auto-Structured "Your To-Dos" module — see db/schema.ts's
+  // `todos` table doc comment and services/todos/todoManager.ts.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS todos (
+      id TEXT PRIMARY KEY NOT NULL,
+      text TEXT NOT NULL,
+      action_date TEXT NOT NULL,
+      is_completed INTEGER NOT NULL DEFAULT 0,
+      recurrence TEXT NOT NULL DEFAULT 'none',
+      created_at TEXT NOT NULL
+    );
+  `);
 }
 
 /**
