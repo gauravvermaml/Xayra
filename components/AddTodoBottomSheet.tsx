@@ -14,7 +14,7 @@ import { RECURRENCE_OPTIONS, type Recurrence } from "../db/schema";
 export type AddTodoBottomSheetProps = {
   visible: boolean;
   onClose: () => void;
-  onSave: (text: string, recurrence: Recurrence) => void;
+  onSave: (text: string, actionDate: string, recurrence: Recurrence) => void;
 };
 
 const RECURRENCE_PICKER_LABELS: Record<Recurrence, string> = {
@@ -23,6 +23,54 @@ const RECURRENCE_PICKER_LABELS: Record<Recurrence, string> = {
   weekly: "Weekly",
   monthly: "Monthly",
 };
+
+function formatIsoDate(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function todayIso(): string {
+  return formatIsoDate(new Date());
+}
+
+function addDays(iso: string, days: number): string {
+  const [year, month, day] = iso.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  date.setDate(date.getDate() + days);
+  return formatIsoDate(date);
+}
+
+/** Manual-entry validation for the "Custom" date field: exactly
+ * YYYY-MM-DD, and the pieces have to form a real calendar date — e.g.
+ * "2026-02-30" is the right shape but not a real day, and `new Date`
+ * would silently roll it over into March rather than reject it. */
+function isValidIsoDate(value: string): boolean {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) {
+    return false;
+  }
+  const [, yearStr, monthStr, dayStr] = match;
+  const year = Number(yearStr);
+  const month = Number(monthStr);
+  const day = Number(dayStr);
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+/** Quick-pick chips for the common cases, plus a "Custom" chip that reveals
+ * a plain typed YYYY-MM-DD field for everything else. A full calendar
+ * widget (e.g. `@react-native-community/datetimepicker`) would need a new
+ * native dependency and the prebuild/run:android cycle that entails — not
+ * worth it for a field that, per the user's own use case, is very often
+ * just "today" or "tomorrow" anyway. Revisit with a real native picker if
+ * "Custom" turns out to be the common case in practice. */
+const DATE_PRESETS: { label: string; getIso: (today: string) => string }[] = [
+  { label: "Today", getIso: (today) => today },
+  { label: "Tomorrow", getIso: (today) => addDays(today, 1) },
+  { label: "Next week", getIso: (today) => addDays(today, 7) },
+];
 
 // Fixed snap point, matching HistorySheet.tsx's own proven setup — NOT
 // dynamic sizing. Two earlier attempts both broke keyboardBehavior=
@@ -94,6 +142,14 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
   const sheetRef = useRef<BottomSheet>(null);
   const [text, setText] = useState("");
   const [recurrence, setRecurrence] = useState<Recurrence>("none");
+  // `actionDate` always holds the resolved ISO date that will actually be
+  // saved. `isCustomDate` just tracks which chip is visually selected —
+  // "Custom" doesn't get its own iso value until the typed field is valid,
+  // so `actionDate` stays whatever it last was (defaulting to today) until
+  // then, rather than saving with an empty/invalid date.
+  const [actionDate, setActionDate] = useState(todayIso());
+  const [isCustomDate, setIsCustomDate] = useState(false);
+  const [customDateText, setCustomDateText] = useState("");
 
   useEffect(() => {
     if (visible) {
@@ -110,19 +166,43 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
   const handleSheetClosed = useCallback(() => {
     setText("");
     setRecurrence("none");
+    setActionDate(todayIso());
+    setIsCustomDate(false);
+    setCustomDateText("");
     onClose();
   }, [onClose]);
 
-  const canSave = text.trim().length > 0;
+  const handlePresetPress = useCallback((iso: string) => {
+    setIsCustomDate(false);
+    setActionDate(iso);
+  }, []);
+
+  const handleCustomPress = useCallback(() => {
+    setIsCustomDate(true);
+    // Seed the field with whatever's already selected so switching to
+    // "Custom" from "Tomorrow" doesn't drop what the user already picked.
+    setCustomDateText(actionDate);
+  }, [actionDate]);
+
+  const handleCustomDateChange = useCallback((value: string) => {
+    setCustomDateText(value);
+    if (isValidIsoDate(value)) {
+      setActionDate(value);
+    }
+  }, []);
+
+  const isCustomDateInvalid = isCustomDate && customDateText.length > 0 && !isValidIsoDate(customDateText);
+
+  const canSave = text.trim().length > 0 && !isCustomDateInvalid;
 
   const handleSave = useCallback(() => {
     const trimmed = text.trim();
-    if (!trimmed) {
+    if (!trimmed || isCustomDateInvalid) {
       return;
     }
-    onSave(trimmed, recurrence);
+    onSave(trimmed, actionDate, recurrence);
     sheetRef.current?.close();
-  }, [text, recurrence, onSave]);
+  }, [text, actionDate, recurrence, isCustomDateInvalid, onSave]);
 
   const renderBackdrop = useCallback(
     (props: BottomSheetBackdropProps) => (
@@ -184,6 +264,45 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
             autoFocus
             returnKeyType="done"
           />
+
+          <Text style={styles.sectionLabel}>Remind me on</Text>
+          <View style={styles.recurrenceRow}>
+            {DATE_PRESETS.map((preset) => {
+              const iso = preset.getIso(todayIso());
+              const isActive = !isCustomDate && actionDate === iso;
+              return (
+                <Pressable
+                  key={preset.label}
+                  onPress={() => handlePresetPress(iso)}
+                  style={[styles.recurrenceOption, isActive && styles.recurrenceOptionActive]}
+                >
+                  <Text style={[styles.recurrenceText, isActive && styles.recurrenceTextActive]}>
+                    {preset.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+            <Pressable
+              onPress={handleCustomPress}
+              style={[styles.recurrenceOption, isCustomDate && styles.recurrenceOptionActive]}
+            >
+              <Text style={[styles.recurrenceText, isCustomDate && styles.recurrenceTextActive]}>Custom</Text>
+            </Pressable>
+          </View>
+          {isCustomDate && (
+            <>
+              <BottomSheetTextInput
+                value={customDateText}
+                onChangeText={handleCustomDateChange}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor="rgba(235,235,245,0.45)"
+                style={[styles.input, isCustomDateInvalid && styles.inputInvalid]}
+                keyboardType="numbers-and-punctuation"
+                maxLength={10}
+              />
+              {isCustomDateInvalid && <Text style={styles.errorText}>Enter a valid date as YYYY-MM-DD.</Text>}
+            </>
+          )}
 
           <Text style={styles.sectionLabel}>Repeats</Text>
           <View style={styles.recurrenceRow}>
@@ -255,6 +374,14 @@ const styles = StyleSheet.create({
     fontSize: 15,
     paddingHorizontal: spacing.base,
     paddingVertical: spacing.md,
+  },
+  inputInvalid: {
+    borderColor: colors.danger,
+  },
+  errorText: {
+    color: colors.danger,
+    fontSize: 12,
+    marginTop: -spacing.sm,
   },
   sectionLabel: {
     color: colors.textMuted,

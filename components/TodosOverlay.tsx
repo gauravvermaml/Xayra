@@ -13,13 +13,6 @@ import type { Recurrence } from "../db/schema";
 import { useToDos } from "../hooks/useToDos";
 import type { ToDo } from "../services/todos/todoManager";
 
-function todayIso(): string {
-  const now = new Date();
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  const day = String(now.getDate()).padStart(2, "0");
-  return `${now.getFullYear()}-${month}-${day}`;
-}
-
 /** How long the checked-off row stays gone-but-not-yet-really-completed
  * before its "Undo" window expires and the DB write actually happens. */
 const UNDO_WINDOW_MS = 3000;
@@ -135,8 +128,8 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
   );
 
   const handleAddTodo = useCallback(
-    (text: string, recurrence: Recurrence) => {
-      void addToDo(text, todayIso(), recurrence);
+    (text: string, actionDate: string, recurrence: Recurrence) => {
+      void addToDo(text, actionDate, recurrence);
     },
     [addToDo]
   );

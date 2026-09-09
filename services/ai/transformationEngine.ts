@@ -639,6 +639,16 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
     const rawOutput = result.text.trim();
     try {
       const parsed = parseExtractionOutput(rawOutput);
+      // Logs the model's raw (pre-resolveActionDate) date_phrase per item —
+      // added to diagnose a reported "to-dos always land on today regardless
+      // of what date the note actually said" issue. This is the one place
+      // that can tell apart the two very different failure modes: the model
+      // itself extracting an empty/wrong date_phrase (a prompt/model
+      // accuracy problem) vs. resolveActionDate/chrono-node failing to parse
+      // a date_phrase the model got right (a date-resolution bug) — normalize
+      // Extracted's return value only exposes the already-resolved
+      // actionDate, which collapses both cases to the same "today" result.
+      console.log("[transformationEngine] Raw extracted items (pre-date-resolution):", parsed);
       return normalizeExtracted(parsed, todayISO, trimmed);
     } catch (parseErr) {
       // Logged separately from the outer catch (which also covers
