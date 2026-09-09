@@ -51,6 +51,18 @@ export type UseToDosResult = {
  * actually re-triggered its useFocusEffect. The subscription closes that
  * gap: every addToDo/updateToDo/completeToDo call notifies every mounted
  * useToDos instance immediately, screen navigation or not.
+ *
+ * MAIN-THREAD-BLOCKING AUDIT (touch-freeze investigation): every write here
+ * (addToDo/updateToDo/completeToDo) and services/todos/todoManager.ts's own
+ * getPendingToDos() go through op-sqlite's `db.execute()`, whose own type
+ * signature returns `Promise<QueryResult>` (verified against
+ * node_modules/@op-engineering/op-sqlite's types) — the work happens off the
+ * JS thread on op-sqlite's native thread pool, not synchronously inside
+ * whatever gesture handler triggered it. Nothing in this hook or
+ * todoManager.ts calls op-sqlite's separate `executeSync` API. Every call
+ * site here is also `void asyncFn()` fire-and-forget, so a slow write
+ * delays this hook's own next `refreshToDos()`, never the tap handler that
+ * initiated it. Confirmed clean — not the source of the on-device freeze.
  */
 export function useToDos(): UseToDosResult {
   const [todos, setTodos] = useState<ToDo[]>([]);

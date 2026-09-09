@@ -95,55 +95,67 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
   );
 
   return (
-    <BottomSheet
-      ref={sheetRef}
-      index={-1}
-      enablePanDownToClose
-      onClose={handleSheetClosed}
-      backdropComponent={renderBackdrop}
-      backgroundStyle={styles.background}
-      handleIndicatorStyle={styles.handleIndicator}
-      keyboardBehavior="interactive"
-      keyboardBlurBehavior="restore"
-      android_keyboardInputMode="adjustResize"
-    >
-      <BottomSheetView style={styles.content}>
-        <Text style={styles.title}>New To-Do</Text>
+    // Defensive belt-and-suspenders on top of @gorhom/bottom-sheet's own
+    // internal pointerEvents toggling (BottomSheetBackdrop already flips
+    // itself to pointerEvents="none" via a useAnimatedReaction on
+    // animatedIndex reaching disappearsOnIndex, and BottomSheetHostingContainer
+    // itself is pointerEvents="box-none" — verified in the library's own
+    // source). This outer View makes the guarantee explicit and independent
+    // of the library's internal state: while this sheet is closed, NOTHING
+    // in this subtree — sheet, backdrop, handle — can intercept a touch
+    // meant for whatever's underneath (TodosOverlay's FlatList), regardless
+    // of whether the library's own animated reaction has settled yet.
+    <View pointerEvents={visible ? "auto" : "none"} style={StyleSheet.absoluteFill}>
+      <BottomSheet
+        ref={sheetRef}
+        index={-1}
+        enablePanDownToClose
+        onClose={handleSheetClosed}
+        backdropComponent={renderBackdrop}
+        backgroundStyle={styles.background}
+        handleIndicatorStyle={styles.handleIndicator}
+        keyboardBehavior="interactive"
+        keyboardBlurBehavior="restore"
+        android_keyboardInputMode="adjustResize"
+      >
+        <BottomSheetView style={styles.content}>
+          <Text style={styles.title}>New To-Do</Text>
 
-        <BottomSheetTextInput
-          value={text}
-          onChangeText={setText}
-          placeholder="What do you need to do?"
-          placeholderTextColor="rgba(235,235,245,0.45)"
-          style={styles.input}
-          autoFocus
-          returnKeyType="done"
-        />
+          <BottomSheetTextInput
+            value={text}
+            onChangeText={setText}
+            placeholder="What do you need to do?"
+            placeholderTextColor="rgba(235,235,245,0.45)"
+            style={styles.input}
+            autoFocus
+            returnKeyType="done"
+          />
 
-        <Text style={styles.sectionLabel}>Repeats</Text>
-        <View style={styles.recurrenceRow}>
-          {RECURRENCE_OPTIONS.map((option) => (
-            <Pressable
-              key={option}
-              onPress={() => setRecurrence(option)}
-              style={[styles.recurrenceOption, recurrence === option && styles.recurrenceOptionActive]}
-            >
-              <Text style={[styles.recurrenceText, recurrence === option && styles.recurrenceTextActive]}>
-                {RECURRENCE_PICKER_LABELS[option]}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
+          <Text style={styles.sectionLabel}>Repeats</Text>
+          <View style={styles.recurrenceRow}>
+            {RECURRENCE_OPTIONS.map((option) => (
+              <Pressable
+                key={option}
+                onPress={() => setRecurrence(option)}
+                style={[styles.recurrenceOption, recurrence === option && styles.recurrenceOptionActive]}
+              >
+                <Text style={[styles.recurrenceText, recurrence === option && styles.recurrenceTextActive]}>
+                  {RECURRENCE_PICKER_LABELS[option]}
+                </Text>
+              </Pressable>
+            ))}
+          </View>
 
-        <Pressable
-          onPress={handleSave}
-          disabled={!canSave}
-          style={[styles.saveButton, !canSave && styles.saveButtonDisabled]}
-        >
-          <Text style={styles.saveButtonText}>Save Task</Text>
-        </Pressable>
-      </BottomSheetView>
-    </BottomSheet>
+          <Pressable
+            onPress={handleSave}
+            disabled={!canSave}
+            style={[styles.saveButton, !canSave && styles.saveButtonDisabled]}
+          >
+            <Text style={styles.saveButtonText}>Save Task</Text>
+          </Pressable>
+        </BottomSheetView>
+      </BottomSheet>
+    </View>
   );
 }
 

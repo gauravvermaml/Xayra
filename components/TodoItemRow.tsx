@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Pressable, StyleSheet, Text, TextInput, View } from "react-native";
+import { StyleSheet, Text, TextInput, View } from "react-native";
+import { TouchableOpacity } from "react-native-gesture-handler";
 import Animated, { FadeOutDown, LinearTransition } from "react-native-reanimated";
 import { Feather } from "@expo/vector-icons";
 
@@ -79,6 +80,20 @@ export type TodoItemRowProps = {
  * date + optional source-note citation) and the main row (checkbox, task
  * text or its in-place editor, edit pen).
  *
+ * TOUCHABLE HARMONIZATION: every tappable element here is
+ * `TouchableOpacity` from `react-native-gesture-handler`, not plain
+ * `Pressable`/`TouchableOpacity` from `react-native`. This app's root layout
+ * (app/_layout.tsx) wraps everything in `GestureHandlerRootView`, and this
+ * screen also mounts `@gorhom/bottom-sheet` (components/AddTodoBottomSheet.tsx),
+ * which is itself built entirely on react-native-gesture-handler's native
+ * gesture recognizers. Mixing the plain-RN responder system (what
+ * `Pressable` uses) with RNGH's native touch-dispatch takeover in the same
+ * gesture-handler root is a known source of responder-negotiation issues on
+ * Android — using RNGH touchables everywhere under this root keeps every
+ * tap resolved through the same gesture arena as the bottom sheet's own
+ * pan/tap handlers, rather than two independent systems racing over the
+ * same touch stream.
+ *
  * `Animated.View`'s `exiting`/`layout` props are what make the "drop on
  * check" behavior in components/TodosOverlay.tsx actually visible: that screen filters a
  * checked item out of the list it passes to `FlatList` immediately (so the
@@ -107,18 +122,18 @@ export function TodoItemRow({ item, onCheck, onLongPressDelete, onOpenSourceNote
 
   return (
     <Animated.View exiting={FadeOutDown.duration(280)} layout={LinearTransition.duration(220)} style={styles.card}>
-      <Pressable onLongPress={() => onLongPressDelete(item)} delayLongPress={600}>
+      <TouchableOpacity onLongPress={() => onLongPressDelete(item)} delayLongPress={600} activeOpacity={1}>
         <View style={styles.metaRow}>
           <Text style={styles.metaText}>{formatCreatedDate(item.createdAt)}</Text>
           {item.noteId && (
-            <Pressable onPress={() => onOpenSourceNote(item.noteId as string)} hitSlop={8}>
+            <TouchableOpacity onPress={() => onOpenSourceNote(item.noteId as string)} hitSlop={8}>
               <Text style={styles.sourceLink}>🎙️ Source Note</Text>
-            </Pressable>
+            </TouchableOpacity>
           )}
         </View>
 
         <View style={styles.mainRow}>
-          <Pressable
+          <TouchableOpacity
             onPress={() => onCheck(item)}
             hitSlop={10}
             style={styles.checkbox}
@@ -140,16 +155,16 @@ export function TodoItemRow({ item, onCheck, onLongPressDelete, onOpenSourceNote
             <Text style={styles.taskText}>{item.text}</Text>
           )}
 
-          <Pressable onPress={() => setIsEditing(true)} hitSlop={10} style={styles.editButton}>
+          <TouchableOpacity onPress={() => setIsEditing(true)} hitSlop={10} style={styles.editButton}>
             <Feather name="edit-2" size={16} color={colors.textMuted} />
-          </Pressable>
+          </TouchableOpacity>
         </View>
 
         <Text style={styles.dueText}>
           {formatActionDate(item.actionDate)}
           {item.recurrence !== "none" ? ` · ${formatRecurrenceLabel(item.recurrence, item.recurrenceInterval)}` : ""}
         </Text>
-      </Pressable>
+      </TouchableOpacity>
     </Animated.View>
   );
 }

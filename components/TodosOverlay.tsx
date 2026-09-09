@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, FlatList, StyleSheet, Text, View } from "react-native";
+import { TouchableOpacity } from "react-native-gesture-handler";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
@@ -162,26 +163,23 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
     <View style={styles.overlay}>
       <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
         <View style={styles.header}>
-          <Pressable
-            onPress={onClose}
-            hitSlop={12}
-            style={({ pressed }) => [styles.headerButton, pressed && styles.headerButtonPressed]}
-          >
+          <TouchableOpacity onPress={onClose} hitSlop={12} activeOpacity={0.6} style={styles.headerButton}>
             <Feather name="chevron-left" size={24} color={colors.textPrimary} />
-          </Pressable>
+          </TouchableOpacity>
 
           <View style={styles.headerTitleWrap}>
             <Text style={styles.title}>Your To-Dos</Text>
             <Text style={styles.subtitle}>{pendingCount === 0 ? "Nothing pending" : `${pendingCount} pending`}</Text>
           </View>
 
-          <Pressable
+          <TouchableOpacity
             onPress={() => setIsAddVisible(true)}
             hitSlop={12}
-            style={({ pressed }) => [styles.headerButton, pressed && styles.headerButtonPressed]}
+            activeOpacity={0.6}
+            style={styles.headerButton}
           >
             <Feather name="plus" size={24} color={colors.textPrimary} />
-          </Pressable>
+          </TouchableOpacity>
         </View>
 
         <FlatList
@@ -202,9 +200,9 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
             <Text style={styles.snackbarText} numberOfLines={1}>
               Completed "{pendingText}"
             </Text>
-            <Pressable onPress={handleUndo} hitSlop={8}>
+            <TouchableOpacity onPress={handleUndo} hitSlop={8} activeOpacity={0.6}>
               <Text style={styles.snackbarUndo}>UNDO</Text>
-            </Pressable>
+            </TouchableOpacity>
           </View>
         )}
 
@@ -248,9 +246,6 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     alignItems: "center",
     justifyContent: "center",
-  },
-  headerButtonPressed: {
-    opacity: 0.6,
   },
   headerTitleWrap: {
     flex: 1,
