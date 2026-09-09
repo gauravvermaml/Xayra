@@ -122,8 +122,12 @@ function resolveActionDate(datePhrase: string, todayISO: string): string {
 function buildSystemPrompt(todayISO: string): string {
   return (
     "You are a task-extraction engine for a personal notes app. Read the note text the user " +
-    "provides and extract every actionable to-do item mentioned in it — an actionable item is " +
-    "something the user needs to DO, not just something they mentioned in passing.\n\n" +
+    "provides and extract EVERY actionable to-do item mentioned in it — an actionable item is " +
+    "something the user needs to DO, not just something they mentioned in passing. A note very " +
+    "often names several separate tasks run together in one sentence, joined by \"and\", \"also\", " +
+    "\"and also\", or just commas, with no sentence break between them — extract EACH one as its own " +
+    "array entry. Never stop after the first task you find; keep reading to the end of the note and " +
+    "list all of them, however many there are.\n\n" +
     `Today's Date: ${todayISO}\n\n` +
     "Respond with ONLY a raw JSON array — no prose, no markdown code fences, no explanation before " +
     "or after it. Each element must be an object with exactly these three fields:\n" +
@@ -140,9 +144,11 @@ function buildSystemPrompt(todayISO: string): string {
     '               "every evening", "every X hours", "a few times a day", "twice a day"\n' +
     '  → "weekly":  "every Monday" / "every Friday night" / any SPECIFIC weekday name — this always\n' +
     "               means once every 7 days, never daily. Also: \"every week\", \"weekly\", \"each\n" +
-    '               week", "every weekend", "every other week", "fortnightly", "biweekly" (these last\n' +
-    "               three are technically every 2 weeks, but weekly is the closest of the four\n" +
-    '               options, so use it).\n' +
+    '               week", "every weekend", "every other week", "every second week", "every second\n' +
+    '               Monday" (any weekday), "fortnightly", "biweekly" — all of these are technically\n' +
+    "               every 2 weeks, but weekly is the closest of the four options, so use it. The word\n" +
+    '               "second" in "every second Monday"/"every second week" means "every OTHER" — it is\n' +
+    "               NOT a unit of time and must never be read as \"frequently\"/\"daily\".\n" +
     '  → "monthly": "every month", "monthly", "each month", "the 1st/15th/etc. of every month",\n' +
     '               "every quarter", "quarterly", "every 3 months", "every year", "yearly",\n' +
     "               \"annually\" (yearly/quarterly have no exact match among the four options —\n" +
@@ -168,37 +174,61 @@ function buildSystemPrompt(todayISO: string): string {
 }
 
 /**
- * Four fixed one-shot examples, injected as real prior user/assistant turns
- * — same technique localLlama.ts's RAG prompt already relies on (see its own
+ * Six fixed one-shot examples, injected as real prior user/assistant turns —
+ * same technique localLlama.ts's RAG prompt already relies on (see its own
  * FEW_SHOT_* comment for why a demonstrated turn steers a small instruct
  * model far more reliably than the same instruction written as prose).
  *
- * Deliberately FOUR SEPARATE single-item turns rather than one combined
- * multi-item list (the original version of this fix). On-device testing
- * with the combined version found the model didn't apply per-item judgment
- * at all: a real 3-task note with no dates and no recurring language on any
- * task came back with task 1 correctly "none", but tasks 2 and 3 as "daily"
- * and "monthly" respectively — i.e. it seems to have pattern-matched the
- * combined example's fixed shape (item 2 always "monthly") rather than
- * reading each task's own words. Giving each recurrence value its own
- * dedicated turn removes that positional shape for the model to copy.
+ * Every entry except MULTI_TASK (see below) is deliberately a SEPARATE
+ * single-item turn rather than folded into one combined multi-item list —
+ * the original version of this fix used one combined 3-item example, and
+ * on-device testing found the model didn't apply per-item judgment at all:
+ * a real 3-task note with no dates and no recurring language on any task
+ * came back with task 1 correctly "none", but tasks 2 and 3 as "daily" and
+ * "monthly" respectively — i.e. it pattern-matched the combined example's
+ * fixed shape (item 2 always "monthly") rather than reading each task's own
+ * words. Giving each recurrence value its own dedicated single-item turn
+ * removes that positional shape for the model to copy.
  *
- * The second entry below also directly demonstrates the exact on-device
- * miss that prompted this fix: "every Monday night" was previously
- * misclassified as "daily" — this turn shows that precise phrasing
- * resolved to "weekly" instead.
+ * The bins/"every Monday night" entry directly demonstrates the exact
+ * on-device miss that prompted that fix: it was previously misclassified as
+ * "daily" — this turn shows that precise phrasing resolves to "weekly".
  *
- * The fifth entry demonstrates the other real confusion the recurrence
- * table above now calls out explicitly: a weekday mentioned WITHOUT
- * "every"/"each" ("call him this Friday") is a single one-off date, not a
- * recurring schedule — easy for a small model to conflate with the
- * "every Friday" example two entries above it, so it gets its own
- * side-by-side demonstration rather than relying on the prose rule alone.
+ * The "call him this Friday" entry demonstrates the other real confusion
+ * the recurrence table above calls out explicitly: a weekday mentioned
+ * WITHOUT "every"/"each" is a single one-off date, not a recurring
+ * schedule — easy for a small model to conflate with the "every Friday"
+ * example elsewhere in this list, so it gets its own side-by-side
+ * demonstration rather than relying on the prose rule alone.
+ *
+ * MULTI_TASK (second entry) fixes a regression the single-item rework
+ * above accidentally introduced: once every few-shot example showed
+ * exactly one output item, the model started treating "one item per note"
+ * as the pattern to copy — a genuinely multi-task voice note ("call the
+ * carpenter and also withdraw cash and also buy milk") came back with only
+ * the LAST task extracted, logged as "1/1 saved" (i.e. the model's own raw
+ * output only ever contained one item — this wasn't a parsing loss
+ * downstream). This example demonstrates pulling three tasks out of one
+ * run-on "and also" sentence, matching the exact shape of the real
+ * failure. It deliberately gives every item the SAME recurrence ("none")
+ * so there's no per-position value pattern here either — extraction
+ * completeness and per-item recurrence judgment are taught as two
+ * independent lessons, never blended into one example that could
+ * accidentally re-teach the original positional-copying bug.
  */
 const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
   {
     input: "Remind me to call the dentist tomorrow.",
     answer: JSON.stringify([{ task: "Call the dentist", date_phrase: "tomorrow", recurrence: "none" }]),
+  },
+  {
+    input:
+      "Remind me to call the carpenter and also withdraw cash using the FX card and also buy milk on the way back home.",
+    answer: JSON.stringify([
+      { task: "Call the carpenter", date_phrase: "", recurrence: "none" },
+      { task: "Withdraw cash using the FX card", date_phrase: "", recurrence: "none" },
+      { task: "Buy milk", date_phrase: "", recurrence: "none" },
+    ]),
   },
   {
     input: "I need to put the bins out every Monday night.",
