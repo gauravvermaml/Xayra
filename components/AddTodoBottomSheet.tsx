@@ -51,7 +51,22 @@ const RECURRENCE_PICKER_LABELS: Record<Recurrence, string> = {
 // that the real cause is fixed, reverting to fixed sizing is safe and is
 // what actually fixes the keyboard-avoidance conflict dynamic sizing
 // introduced.)
-const SNAP_POINTS = ["50%"];
+//
+// "90%", not "50%": `keyboardBehavior="interactive"` only translates the
+// SHEET as a whole — it has no way to scroll a specific focused field into
+// view within it, which is a separate concern `BottomSheetScrollView` alone
+// doesn't solve automatically either (confirmed on-device: the task input
+// stayed hidden behind the keyboard with a "50%" sheet + scrollable content,
+// even though the sheet's own title showed above the keyboard fine). A
+// keyboard on Android routinely covers ~40-50% of the screen, so a 50%-tall
+// sheet simply doesn't have the vertical budget for its own top content to
+// clear it without perfect interactive math this combination doesn't
+// reliably deliver. "90%" sidesteps needing that math to be exact at all:
+// the title and input sit near the top of a near-full-screen sheet, with
+// enough plain, unconditional headroom above any keyboard height this
+// device will ever show, independent of whatever `interactive` does or
+// doesn't do correctly.
+const SNAP_POINTS = ["90%"];
 
 /**
  * On-demand "Add a to-do" sheet — a plain `<BottomSheet>` (not
