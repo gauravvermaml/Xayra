@@ -169,7 +169,7 @@ function scheduleToDoExtraction(noteId: string, text: string): void {
     let added = 0;
     for (const item of extracted) {
       try {
-        await addToDo(item.task, item.actionDate, item.recurrence, item.recurrenceInterval);
+        await addToDo(item.task, item.actionDate, item.recurrence, item.recurrenceInterval, noteId);
         added += 1;
         // Logs each extracted item's actual fields, not just a count — a
         // misclassification (most commonly a one-off task incorrectly

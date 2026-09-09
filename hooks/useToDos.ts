@@ -17,7 +17,13 @@ export type UseToDosResult = {
   todos: ToDo[];
   pendingCount: number;
   refreshToDos: () => Promise<void>;
-  addToDo: (text: string, actionDate: string, recurrence?: Recurrence, recurrenceInterval?: number) => Promise<void>;
+  addToDo: (
+    text: string,
+    actionDate: string,
+    recurrence?: Recurrence,
+    recurrenceInterval?: number,
+    noteId?: string | null
+  ) => Promise<void>;
   updateToDo: (id: string, fields: ToDoUpdateFields) => Promise<void>;
   completeToDo: (id: string) => Promise<void>;
   deleteToDo: (id: string) => Promise<void>;
@@ -71,8 +77,14 @@ export function useToDos(): UseToDosResult {
   );
 
   const addToDo = useCallback(
-    async (text: string, actionDate: string, recurrence: Recurrence = "none", recurrenceInterval = 1) => {
-      await addToDoRecord(text, actionDate, recurrence, recurrenceInterval);
+    async (
+      text: string,
+      actionDate: string,
+      recurrence: Recurrence = "none",
+      recurrenceInterval = 1,
+      noteId: string | null = null
+    ) => {
+      await addToDoRecord(text, actionDate, recurrence, recurrenceInterval, noteId);
       await refreshToDos();
     },
     [refreshToDos]

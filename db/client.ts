@@ -159,6 +159,17 @@ async function createCoreTables(db: DB): Promise<void> {
       throw err;
     }
   }
+  // Phase 2 Step 3: source-note citation — see db/schema.ts's `noteId` doc
+  // comment. Nullable with no default, same duplicate-column-tolerant
+  // migration pattern as `recurrence_interval` above.
+  try {
+    await db.execute("ALTER TABLE todos ADD COLUMN note_id TEXT;");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/duplicate column/i.test(message)) {
+      throw err;
+    }
+  }
 }
 
 /**

@@ -78,6 +78,16 @@ export const todos = sqliteTable("todos", {
    */
   recurrenceInterval: integer("recurrence_interval").notNull().default(1),
   createdAt: text("created_at").notNull(),
+  /** The note this to-do was auto-extracted from (services/ai/
+   * transformationEngine.ts + noteManager.ts's `scheduleToDoExtraction`) —
+   * null for a to-do entered directly via the Add modal, which has no
+   * originating note. Deliberately no foreign-key/cascade-delete wiring to
+   * `notes.id`: a to-do citing a since-deleted note should keep existing
+   * (the task itself is still real) with its "Source Note" link simply
+   * resolving to nothing — see components/TodoItemRow.tsx and
+   * NoteDetailModal's own "this note could not be found" handling, which
+   * already covers exactly that case for other stale-note-id references. */
+  noteId: text("note_id"),
 });
 
 /**

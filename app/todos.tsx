@@ -1,98 +1,151 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
+import { Feather } from "@expo/vector-icons";
+import * as Haptics from "expo-haptics";
 
-import { colors, radius, spacing, typography } from "../constants/theme";
+import { AddTodoBottomSheet } from "../components/AddTodoBottomSheet";
+import { NoteDetailModal } from "../components/NoteDetailModal";
+import { TodoItemRow } from "../components/TodoItemRow";
+import { colors, spacing, typography } from "../constants/theme";
+import type { Recurrence } from "../db/schema";
 import { useToDos } from "../hooks/useToDos";
 import type { ToDo } from "../services/todos/todoManager";
 
-function formatActionDate(actionDate: string): string {
-  // actionDate is a plain YYYY-MM-DD string (see db/schema.ts's `todos` table
-  // doc comment) — parsed as local-time components, not `new Date(str)`,
-  // for the same UTC-off-by-one-day reason todoManager.ts's own date math
-  // avoids it.
-  const [year, month, day] = actionDate.split("-").map(Number);
-  return new Date(year, month - 1, day).toLocaleDateString(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-  });
+function todayIso(): string {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${now.getFullYear()}-${month}-${day}`;
 }
 
-const RECURRENCE_LABELS: Record<ToDo["recurrence"], string> = {
-  none: "",
-  daily: "Repeats daily",
-  weekly: "Repeats weekly",
-  monthly: "Repeats monthly",
-};
-
-const RECURRENCE_UNIT_NOUNS: Record<Exclude<ToDo["recurrence"], "none">, string> = {
-  daily: "day",
-  weekly: "week",
-  monthly: "month",
-};
-
-/** "Repeats weekly" at interval 1 (unchanged copy); "Repeats every 2 weeks"
- * etc. once `recurrenceInterval` (see db/schema.ts) is anything else. */
-function formatRecurrenceLabel(recurrence: ToDo["recurrence"], recurrenceInterval: number): string {
-  if (recurrence === "none") {
-    return "";
-  }
-  if (recurrenceInterval <= 1) {
-    return RECURRENCE_LABELS[recurrence];
-  }
-  return `Repeats every ${recurrenceInterval} ${RECURRENCE_UNIT_NOUNS[recurrence]}s`;
-}
+/** How long the checked-off row stays gone-but-not-yet-really-completed
+ * before its "Undo" window expires and the DB write actually happens. */
+const UNDO_WINDOW_MS = 3000;
 
 /**
- * Phase 2 Step 2: a minimal but fully functional list so the "To-Dos" pill's
- * navigation and the useToDos hook's reactive updates (including background
- * auto-extraction landing here on next focus) are testable end-to-end right
- * now. Richer editing/creation UI is Step 3's scope — this is deliberately
- * plain: tap a row's checkbox to complete it, long-press to delete.
+ * Production "Your To-Dos" screen (Phase 2 Step 3) — replaces the Step 2
+ * stub. New in this pass: a real header with an Add (+) entry point, source-
+ * note citations, in-place task editing, and drop-on-check completion with
+ * an undo window instead of an immediate, irreversible `completeToDo` call.
+ *
+ * DROP-ON-CHECK / UNDO DESIGN: only ONE completion is ever "pending" (mid
+ * undo-window) at a time, matching the common Gmail-archive-style pattern —
+ * checking a second item while the first's snackbar is still showing
+ * immediately commits the first (see `flushPending`) rather than trying to
+ * track multiple concurrent undo timers and stacking snackbars, which the
+ * spec never asked for and would add real complexity for a case (checking
+ * several items within the same 3-second window) that's rare in practice.
+ * The pending item is filtered out of the list handed to `FlatList`
+ * immediately on check (not after the undo window), which is what lets
+ * TodoItemRow's own `exiting` animation actually play — see that
+ * component's doc comment for why this works with a plain `FlatList`.
  */
 export default function TodosScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { todos, pendingCount, completeToDo, deleteToDo } = useToDos();
+  const { todos, pendingCount, addToDo, updateToDo, completeToDo, deleteToDo } = useToDos();
 
-  // Urgent on-device fix: the extraction model occasionally misclassifies a
-  // one-off task as recurring (see this screen's git history for the
-  // investigation). A recurring to-do respawns its next occurrence every
-  // time it's completed, so a plain checkbox tap can never actually get rid
-  // of one that was tagged recurring by mistake — this is the only way out
-  // for that case. Long-press (not a plain tap, and not a swipe, which this
-  // list doesn't otherwise use for anything) is the standard "reveal a
-  // destructive action" gesture across both platforms' own apps, always
-  // behind a confirmation since there's no undo.
-  const handleLongPressRow = (item: ToDo) => {
-    Alert.alert("Delete this to-do?", `"${item.text}"`, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: () => void deleteToDo(item.id) },
-    ]);
-  };
+  const [isAddVisible, setIsAddVisible] = useState(false);
+  const [viewingNoteId, setViewingNoteId] = useState<string | null>(null);
 
-  const renderItem = ({ item }: { item: ToDo }) => (
-    <Pressable
-      onLongPress={() => handleLongPressRow(item)}
-      delayLongPress={600}
-      style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
-    >
-      <Pressable
-        onPress={() => void completeToDo(item.id)}
-        hitSlop={8}
-        style={styles.checkbox}
+  const pendingRef = useRef<{ id: string; timeoutId: ReturnType<typeof setTimeout> } | null>(null);
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [pendingText, setPendingText] = useState("");
+
+  /** Commits whatever completion is currently mid-undo-window right away —
+   * called both when a new checkbox tap needs the previous one out of the
+   * way, and when this screen unmounts, so a pending completion can never
+   * be silently lost by navigating away inside the 3-second window. */
+  const flushPending = useCallback(() => {
+    const current = pendingRef.current;
+    if (!current) {
+      return;
+    }
+    clearTimeout(current.timeoutId);
+    pendingRef.current = null;
+    setPendingId(null);
+    void completeToDo(current.id);
+  }, [completeToDo]);
+
+  const handleCheck = useCallback(
+    (item: ToDo) => {
+      void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      flushPending();
+
+      const timeoutId = setTimeout(() => {
+        pendingRef.current = null;
+        setPendingId(null);
+        void completeToDo(item.id);
+      }, UNDO_WINDOW_MS);
+
+      pendingRef.current = { id: item.id, timeoutId };
+      setPendingId(item.id);
+      setPendingText(item.text);
+    },
+    [flushPending, completeToDo]
+  );
+
+  // Commits any still-pending completion if the user navigates away inside
+  // the 3-second undo window — otherwise the setTimeout above would still
+  // fire later and complete it silently off-screen, which is harmless
+  // functionally but means a completion the user never actually confirmed
+  // "stuck" could go through without them present to see or undo it.
+  useEffect(() => {
+    return () => flushPending();
+  }, [flushPending]);
+
+  const handleUndo = useCallback(() => {
+    const current = pendingRef.current;
+    if (!current) {
+      return;
+    }
+    clearTimeout(current.timeoutId);
+    pendingRef.current = null;
+    setPendingId(null);
+  }, []);
+
+  const handleLongPressDelete = useCallback(
+    (item: ToDo) => {
+      Alert.alert("Delete this to-do?", `"${item.text}"`, [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", style: "destructive", onPress: () => void deleteToDo(item.id) },
+      ]);
+    },
+    [deleteToDo]
+  );
+
+  const handleSaveText = useCallback(
+    (id: string, text: string) => {
+      void updateToDo(id, { text });
+    },
+    [updateToDo]
+  );
+
+  const handleAddTodo = useCallback(
+    (text: string, recurrence: Recurrence) => {
+      void addToDo(text, todayIso(), recurrence);
+    },
+    [addToDo]
+  );
+
+  // Filters the pending (mid-undo-window) item out immediately — see this
+  // screen's own doc comment above for why that's what makes the drop
+  // animation and the undo window independent of each other.
+  const visibleTodos = useMemo(() => todos.filter((item) => item.id !== pendingId), [todos, pendingId]);
+
+  const renderItem = useCallback(
+    ({ item }: { item: ToDo }) => (
+      <TodoItemRow
+        item={item}
+        onCheck={handleCheck}
+        onLongPressDelete={handleLongPressDelete}
+        onOpenSourceNote={setViewingNoteId}
+        onSaveText={handleSaveText}
       />
-      <View style={styles.rowText}>
-        <Text style={styles.rowTask}>{item.text}</Text>
-        <Text style={styles.rowMeta}>
-          {formatActionDate(item.actionDate)}
-          {item.recurrence !== "none"
-            ? ` · ${formatRecurrenceLabel(item.recurrence, item.recurrenceInterval)}`
-            : ""}
-        </Text>
-      </View>
-    </Pressable>
+    ),
+    [handleCheck, handleLongPressDelete, handleSaveText]
   );
 
   return (
@@ -101,27 +154,52 @@ export default function TodosScreen() {
         <Pressable
           onPress={() => router.back()}
           hitSlop={12}
-          style={({ pressed }) => [styles.backButton, pressed && styles.backButtonPressed]}
+          style={({ pressed }) => [styles.headerButton, pressed && styles.headerButtonPressed]}
         >
-          <Text style={styles.backButtonText}>‹ Back</Text>
+          <Feather name="chevron-left" size={24} color={colors.textPrimary} />
         </Pressable>
-        <Text style={styles.title}>Your To-Dos</Text>
-        <Text style={styles.subtitle}>
-          {pendingCount === 0 ? "Nothing pending" : `${pendingCount} pending`}
-        </Text>
+
+        <View style={styles.headerTitleWrap}>
+          <Text style={styles.title}>Your To-Dos</Text>
+          <Text style={styles.subtitle}>{pendingCount === 0 ? "Nothing pending" : `${pendingCount} pending`}</Text>
+        </View>
+
+        <Pressable
+          onPress={() => setIsAddVisible(true)}
+          hitSlop={12}
+          style={({ pressed }) => [styles.headerButton, pressed && styles.headerButtonPressed]}
+        >
+          <Feather name="plus" size={24} color={colors.textPrimary} />
+        </Pressable>
       </View>
 
       <FlatList
-        data={todos}
+        data={visibleTodos}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
-        contentContainerStyle={[styles.listContent, { paddingBottom: Math.max(insets.bottom + 40, 48) }]}
+        contentContainerStyle={styles.listContent}
+        ItemSeparatorComponent={() => <View style={styles.itemGap} />}
         ListEmptyComponent={
           <Text style={styles.emptyText}>
             To-dos extracted from your notes — or added directly — will show up here.
           </Text>
         }
       />
+
+      {pendingId && (
+        <View style={[styles.snackbar, { bottom: insets.bottom + spacing.lg }]}>
+          <Text style={styles.snackbarText} numberOfLines={1}>
+            Completed "{pendingText}"
+          </Text>
+          <Pressable onPress={handleUndo} hitSlop={8}>
+            <Text style={styles.snackbarUndo}>UNDO</Text>
+          </Pressable>
+        </View>
+      )}
+
+      <AddTodoBottomSheet visible={isAddVisible} onClose={() => setIsAddVisible(false)} onSave={handleAddTodo} />
+
+      <NoteDetailModal noteId={viewingNoteId} visible={viewingNoteId !== null} onClose={() => setViewingNoteId(null)} />
     </SafeAreaView>
   );
 }
@@ -132,67 +210,41 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
   header: {
-    paddingHorizontal: spacing.xl,
-    paddingTop: spacing.xxl,
-    marginBottom: spacing.lg,
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: spacing.base,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.lg,
   },
-  backButton: {
-    alignSelf: "flex-start",
-    marginBottom: spacing.md,
-    paddingVertical: spacing.xs,
+  headerButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  backButtonPressed: {
+  headerButtonPressed: {
     opacity: 0.6,
   },
-  backButtonText: {
-    color: colors.accent,
-    fontSize: 15,
-    fontWeight: "600",
+  headerTitleWrap: {
+    flex: 1,
+    alignItems: "center",
   },
   title: {
     color: colors.textPrimary,
-    ...typography.title,
+    ...typography.heading,
   },
   subtitle: {
     color: colors.textMuted,
     ...typography.caption,
-    marginTop: spacing.xs,
+    marginTop: 2,
   },
   listContent: {
-    paddingHorizontal: spacing.xl,
-    gap: spacing.sm,
+    paddingBottom: 120,
+    paddingHorizontal: 16,
   },
-  row: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: spacing.md,
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: spacing.base,
-  },
-  rowPressed: {
-    backgroundColor: colors.surfaceElevated,
-  },
-  checkbox: {
-    width: 22,
-    height: 22,
-    borderRadius: radius.sm,
-    borderWidth: 2,
-    borderColor: colors.borderStrong,
-  },
-  rowText: {
-    flex: 1,
-    gap: 2,
-  },
-  rowTask: {
-    color: colors.textPrimary,
-    ...typography.body,
-  },
-  rowMeta: {
-    color: colors.textMuted,
-    ...typography.caption,
+  itemGap: {
+    height: spacing.sm,
   },
   emptyText: {
     color: colors.textMuted,
@@ -200,5 +252,30 @@ const styles = StyleSheet.create({
     textAlign: "center",
     marginTop: spacing.xxl,
     paddingHorizontal: spacing.xl,
+  },
+  snackbar: {
+    position: "absolute",
+    left: spacing.xl,
+    right: spacing.xl,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(28, 28, 30, 0.96)",
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.12)",
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.base,
+    gap: spacing.base,
+  },
+  snackbarText: {
+    flex: 1,
+    color: colors.textPrimary,
+    fontSize: 14,
+  },
+  snackbarUndo: {
+    color: colors.accent,
+    fontSize: 14,
+    fontWeight: "700",
   },
 });

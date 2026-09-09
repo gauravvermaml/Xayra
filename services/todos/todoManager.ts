@@ -13,6 +13,9 @@ export type ToDo = {
    * the `recurrenceInterval` column. Always >= 1. */
   recurrenceInterval: number;
   createdAt: string; // ISO timestamp
+  /** The note this was auto-extracted from — see db/schema.ts's `noteId`
+   * doc comment. Null for a to-do entered directly via the Add modal. */
+  noteId: string | null;
 };
 
 function rowToToDo(row: Record<string, unknown>): ToDo {
@@ -29,6 +32,7 @@ function rowToToDo(row: Record<string, unknown>): ToDo {
     recurrence: row.recurrence as Recurrence,
     recurrenceInterval: Number.isFinite(interval) && interval >= 1 ? interval : 1,
     createdAt: row.created_at as string,
+    noteId: (row.note_id as string | null) ?? null,
   };
 }
 
@@ -63,16 +67,19 @@ function notifyToDosChanged(): void {
   changeListeners.forEach((listener) => listener());
 }
 
-/** Adds a single to-do, either entered directly or from a single extracted
- * item in services/ai/transformationEngine.ts's output. `recurrenceInterval`
- * is clamped to at least 1 — a 0 or negative value would either spawn the
- * next occurrence on the same day (0) or drift backward in time (negative)
- * in computeNextActionDate below. */
+/** Adds a single to-do, either entered directly (no `noteId`) or from a
+ * single extracted item in services/ai/transformationEngine.ts's output
+ * (`noteId` = the note it came from, wired through by noteManager.ts's
+ * `scheduleToDoExtraction`). `recurrenceInterval` is clamped to at least 1 —
+ * a 0 or negative value would either spawn the next occurrence on the same
+ * day (0) or drift backward in time (negative) in computeNextActionDate
+ * below. */
 export async function addToDo(
   text: string,
   actionDate: string,
   recurrence: Recurrence = "none",
-  recurrenceInterval = 1
+  recurrenceInterval = 1,
+  noteId: string | null = null
 ): Promise<ToDo> {
   const db = await getRawDatabase();
   const id = Crypto.randomUUID();
@@ -80,12 +87,12 @@ export async function addToDo(
   const interval = recurrenceInterval >= 1 ? Math.round(recurrenceInterval) : 1;
 
   await db.execute(
-    "INSERT INTO todos (id, text, action_date, is_completed, recurrence, recurrence_interval, created_at) VALUES (?, ?, ?, 0, ?, ?, ?)",
-    [id, text, actionDate, recurrence, interval, createdAt]
+    "INSERT INTO todos (id, text, action_date, is_completed, recurrence, recurrence_interval, created_at, note_id) VALUES (?, ?, ?, 0, ?, ?, ?, ?)",
+    [id, text, actionDate, recurrence, interval, createdAt, noteId]
   );
   notifyToDosChanged();
 
-  return { id, text, actionDate, isCompleted: false, recurrence, recurrenceInterval: interval, createdAt };
+  return { id, text, actionDate, isCompleted: false, recurrence, recurrenceInterval: interval, createdAt, noteId };
 }
 
 /** Lists every not-yet-completed to-do, soonest action date first. Used by
@@ -95,7 +102,7 @@ export async function getPendingToDos(): Promise<ToDo[]> {
 
   const result = await db.execute(
     `
-      SELECT id, text, action_date, is_completed, recurrence, recurrence_interval, created_at
+      SELECT id, text, action_date, is_completed, recurrence, recurrence_interval, created_at, note_id
       FROM todos
       WHERE is_completed = 0
       ORDER BY action_date ASC, created_at ASC
@@ -222,7 +229,7 @@ export async function completeToDo(id: string): Promise<void> {
   const db = await getRawDatabase();
 
   const lookup = await db.execute(
-    "SELECT text, action_date, recurrence, recurrence_interval FROM todos WHERE id = ?",
+    "SELECT text, action_date, recurrence, recurrence_interval, note_id FROM todos WHERE id = ?",
     [id]
   );
   const row = lookup.rows[0];
@@ -235,6 +242,7 @@ export async function completeToDo(id: string): Promise<void> {
   const recurrence = row.recurrence as Recurrence;
   const rawInterval = Number(row.recurrence_interval);
   const recurrenceInterval = Number.isFinite(rawInterval) && rawInterval >= 1 ? rawInterval : 1;
+  const noteId = (row.note_id as string | null) ?? null;
 
   await db.transaction(async (tx) => {
     // recurrence_interval is also reset to 1 alongside recurrence — a
@@ -249,9 +257,11 @@ export async function completeToDo(id: string): Promise<void> {
       const nextDate = computeNextActionDate(actionDate, recurrence, recurrenceInterval);
       const nextId = Crypto.randomUUID();
       const createdAt = new Date().toISOString();
+      // note_id carries forward too — the respawned occurrence is still the
+      // same recurring task traced back to the same original note.
       await tx.execute(
-        "INSERT INTO todos (id, text, action_date, is_completed, recurrence, recurrence_interval, created_at) VALUES (?, ?, ?, 0, ?, ?, ?)",
-        [nextId, text, nextDate, recurrence, recurrenceInterval, createdAt]
+        "INSERT INTO todos (id, text, action_date, is_completed, recurrence, recurrence_interval, created_at, note_id) VALUES (?, ?, ?, 0, ?, ?, ?, ?)",
+        [nextId, text, nextDate, recurrence, recurrenceInterval, createdAt, noteId]
       );
     }
   });
