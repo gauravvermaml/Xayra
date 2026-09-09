@@ -253,6 +253,43 @@ function resolveRecurrenceInterval(datePhrase: string, recurrence: Recurrence): 
 }
 
 /**
+ * Every phrase pattern that legitimately means "this task repeats," used as
+ * a deterministic cross-check on the model's own recurrence classification
+ * (see hasRecurrenceEvidence below) — deliberately the same vocabulary
+ * buildSystemPrompt's recurrence table teaches the model to recognize, kept
+ * here too so the check and the instruction never silently drift apart.
+ */
+const RECURRENCE_EVIDENCE_PATTERN =
+  /\bevery\s*(?:day|morning|night|evening|week|weekend|month|quarter|year)\b|\beach\s*(?:day|week|month)\b|\bevery\s+\d+\s*(?:day|week|month)s?\b|\bevery\s+(?:other|second|2nd|third|3rd|fourth|4th|fifth|5th)\s+(?:day|week|month|monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b|\bevery\s+(?:mon|tues?|wednes|thurs?|fri|satur|sun)day\b|\bdaily\b|\beveryday\b|\bweekly\b|\bmonthly\b|\bquarterly\b|\byearly\b|\bannually\b|\bfortnightly\b|\bbi-?weekly\b/i;
+
+/**
+ * Deterministic safety net for a distinct, repeated on-device failure mode
+ * from the date-phrase one resolveActionDate exists for: the model false-
+ * triggering a non-"none" recurrence with NO actual repeating language
+ * anywhere in the note, apparently from the TASK'S SUBJECT MATTER alone
+ * ("renew" reads as subscription-like) rather than its wording. Confirmed
+ * on-device, repeatedly, even after a dedicated few-shot example using this
+ * exact note and even under fully greedy (temperature: 0) decoding — a
+ * consistent wrong answer is still wrong, so at some point this stops being
+ * a prompt-engineering problem and becomes a case for the same principle
+ * resolveActionDate already applies to dates: don't trust the model's
+ * judgment on something a plain deterministic check can verify instead.
+ *
+ * This checks the FULL raw note text, not just the one task's date_phrase —
+ * a real recurring task's own trigger phrase might sit elsewhere in a
+ * multi-task note, so checking only the date_phrase would false-flag those.
+ * The trade-off: for a multi-task note where a DIFFERENT task genuinely
+ * recurs, this can't tell that task's language apart from this one's, so a
+ * false positive there would survive. That's an accepted, non-regressive
+ * gap — this check only ever moves a recurrence value TOWARD "none" for
+ * notes with zero recurring language anywhere, never away from a value a
+ * legitimate trigger phrase actually earned.
+ */
+function hasRecurrenceEvidence(rawNoteText: string): boolean {
+  return RECURRENCE_EVIDENCE_PATTERN.test(rawNoteText);
+}
+
+/**
  * System prompt for structured extraction, not conversation. Grammar-
  * constrained decoding (see TODO_EXTRACTION_GRAMMAR above) now guarantees
  * the OUTPUT FORMAT — valid JSON array, exact three keys, recurrence
@@ -500,16 +537,21 @@ function isRecurrence(value: unknown): value is Recurrence {
 /**
  * Defensive structural normalization on top of whatever the on-device model
  * actually returns, plus deterministic date resolution via resolveActionDate
- * above. A 1B/3B instruct model is not reliable enough at strict JSON
- * schemas to trust its output verbatim — any entry missing a task, or
- * carrying a malformed recurrence, is either coerced to a safe default or
- * dropped entirely (an empty/missing task), rather than throwing and
- * discarding every other item the model got right.
+ * above and a deterministic recurrence sanity check via hasRecurrenceEvidence
+ * (`rawNoteText` is the whole original note, needed for that check — see its
+ * own comment for why the full text, not just this one item's date_phrase).
+ * A 1B/3B instruct model is not reliable enough at strict JSON schemas to
+ * trust its output verbatim — any entry missing a task, or carrying a
+ * malformed recurrence, is either coerced to a safe default or dropped
+ * entirely (an empty/missing task), rather than throwing and discarding
+ * every other item the model got right.
  */
-function normalizeExtracted(raw: unknown, todayISO: string): ExtractedToDo[] {
+function normalizeExtracted(raw: unknown, todayISO: string, rawNoteText: string): ExtractedToDo[] {
   if (!Array.isArray(raw)) {
     return [];
   }
+
+  const noteHasRecurrenceEvidence = hasRecurrenceEvidence(rawNoteText);
 
   const results: ExtractedToDo[] = [];
   for (const entry of raw) {
@@ -526,7 +568,14 @@ function normalizeExtracted(raw: unknown, todayISO: string): ExtractedToDo[] {
     const datePhrase = typeof record.date_phrase === "string" ? record.date_phrase : "";
     const actionDate = resolveActionDate(datePhrase, todayISO);
 
-    const recurrence: Recurrence = isRecurrence(record.recurrence) ? record.recurrence : "none";
+    let recurrence: Recurrence = isRecurrence(record.recurrence) ? record.recurrence : "none";
+    if (recurrence !== "none" && !noteHasRecurrenceEvidence) {
+      console.warn(
+        `[transformationEngine] Model classified "${task}" as recurrence "${recurrence}" but the note ` +
+          "contains no actual repeating language — overriding to \"none\"."
+      );
+      recurrence = "none";
+    }
     const recurrenceInterval = resolveRecurrenceInterval(datePhrase, recurrence);
 
     results.push({ task, actionDate, recurrence, recurrenceInterval });
@@ -590,7 +639,7 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
     const rawOutput = result.text.trim();
     try {
       const parsed = parseExtractionOutput(rawOutput);
-      return normalizeExtracted(parsed, todayISO);
+      return normalizeExtracted(parsed, todayISO, trimmed);
     } catch (parseErr) {
       // Logged separately from the outer catch (which also covers
       // getContext()/completion failures) specifically so a parse failure
