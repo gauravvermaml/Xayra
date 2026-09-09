@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import BottomSheet, {
   BottomSheetBackdrop,
+  BottomSheetScrollView,
   BottomSheetTextInput,
   type BottomSheetBackdropProps,
 } from "@gorhom/bottom-sheet";
@@ -63,10 +64,10 @@ const SNAP_POINTS = ["50%"];
  * the same tap-outside-to-dismiss modal behavior without that extra global
  * wiring.
  *
- * Content is a plain `View`, not `BottomSheetView` — that wrapper exists for
- * dynamic sizing's own content measurement (see `SNAP_POINTS`'s doc comment
- * for why this sheet doesn't use dynamic sizing), and HistorySheet.tsx's own
- * fixed-snapPoint body uses a plain `View` for the same reason.
+ * Content is `BottomSheetScrollView`, not `BottomSheetView`/a plain `View` —
+ * see its own doc comment at the render site for why a scrollable content
+ * container, not a rigid block, is what actually lets the focused field
+ * clear the Android keyboard.
  *
  * Monochromatic Glass styling per spec: translucent near-black background,
  * a barely-there white border, no blur (this app never uses `expo-blur` —
@@ -141,7 +142,22 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
         keyboardBlurBehavior="restore"
         android_keyboardInputMode="adjustResize"
       >
-        <View style={styles.content}>
+        {/* BottomSheetScrollView, not a plain View — the sheet's fixed 50%
+            height plus the Android keyboard (itself routinely ~40-50% of
+            the screen) leaves no room for every field to be simultaneously
+            visible above the keyboard purely by shifting a rigid block; a
+            scrollable content container is what actually lets
+            keyboardBehavior="interactive" bring whichever field is focused
+            into view, the standard @gorhom/bottom-sheet pattern for a form
+            longer than "fits trivially above any keyboard." Confirmed
+            on-device that a plain `View` here left the task TextInput
+            hidden behind the keyboard even after the sheet itself
+            correctly showed its title above it — there was simply nowhere
+            left for the input to go without scrolling. */}
+        <BottomSheetScrollView
+          contentContainerStyle={styles.content}
+          keyboardShouldPersistTaps="handled"
+        >
           <Text style={styles.title}>New To-Do</Text>
 
           <BottomSheetTextInput
@@ -185,7 +201,7 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
               <Text style={styles.saveButtonText}>Save Task</Text>
             </Pressable>
           </View>
-        </View>
+        </BottomSheetScrollView>
       </BottomSheet>
     </View>
   );
@@ -203,7 +219,9 @@ const styles = StyleSheet.create({
     width: 36,
   },
   content: {
-    flex: 1,
+    // No `flex: 1` — this is a ScrollView content container now (see the
+    // BottomSheetScrollView doc comment at its render site), which should
+    // size to its own content, not stretch to fill the sheet.
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.sm,
     paddingBottom: spacing.xl,
