@@ -6,6 +6,7 @@ import BottomSheet, {
   BottomSheetView,
   type BottomSheetBackdropProps,
 } from "@gorhom/bottom-sheet";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { RECURRENCE_OPTIONS, type Recurrence } from "../db/schema";
@@ -54,6 +55,7 @@ const RECURRENCE_PICKER_LABELS: Record<Recurrence, string> = {
  * is a flat translucent color over the jet-black canvas, not a real blur).
  */
 export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSheetProps) {
+  const insets = useSafeAreaInsets();
   const sheetRef = useRef<BottomSheet>(null);
   const [text, setText] = useState("");
   const [recurrence, setRecurrence] = useState<Recurrence>("none");
@@ -118,7 +120,7 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
         keyboardBlurBehavior="restore"
         android_keyboardInputMode="adjustResize"
       >
-        <BottomSheetView style={styles.content}>
+        <BottomSheetView style={[styles.content, { paddingBottom: spacing.xl + insets.bottom }]}>
           <Text style={styles.title}>New To-Do</Text>
 
           <BottomSheetTextInput
@@ -174,7 +176,11 @@ const styles = StyleSheet.create({
     // No `flex: 1` — dynamic sizing (see this file's top-of-file doc
     // comment) measures this view's own natural content height to size the
     // sheet, which a flex:1 child (stretching to fill an as-yet-undefined
-    // available height) defeats.
+    // available height) defeats. `paddingBottom` here is just the base
+    // value; the actual bottom safe-area inset (Android's gesture/nav bar)
+    // is added on top of it inline at the render site — dynamic sizing has
+    // no notion of the device's system bars on its own, so without that the
+    // "Save Task" button sat half-hidden behind them (confirmed on-device).
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.sm,
     paddingBottom: spacing.xl,
