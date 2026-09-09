@@ -5,6 +5,7 @@ import type { Recurrence } from "../db/schema";
 import {
   addToDo as addToDoRecord,
   completeToDo as completeToDoRecord,
+  deleteToDo as deleteToDoRecord,
   getPendingToDos,
   subscribeToToDosChanged,
   updateToDo as updateToDoRecord,
@@ -19,6 +20,7 @@ export type UseToDosResult = {
   addToDo: (text: string, actionDate: string, recurrence?: Recurrence) => Promise<void>;
   updateToDo: (id: string, fields: ToDoUpdateFields) => Promise<void>;
   completeToDo: (id: string) => Promise<void>;
+  deleteToDo: (id: string) => Promise<void>;
 };
 
 /**
@@ -92,6 +94,14 @@ export function useToDos(): UseToDosResult {
     [refreshToDos]
   );
 
+  const deleteToDo = useCallback(
+    async (id: string) => {
+      await deleteToDoRecord(id);
+      await refreshToDos();
+    },
+    [refreshToDos]
+  );
+
   return {
     todos,
     pendingCount: todos.length,
@@ -99,5 +109,6 @@ export function useToDos(): UseToDosResult {
     addToDo,
     updateToDo,
     completeToDo,
+    deleteToDo,
   };
 }

@@ -1,4 +1,4 @@
-import { FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 
@@ -31,15 +31,35 @@ const RECURRENCE_LABELS: Record<ToDo["recurrence"], string> = {
  * navigation and the useToDos hook's reactive updates (including background
  * auto-extraction landing here on next focus) are testable end-to-end right
  * now. Richer editing/creation UI is Step 3's scope — this is deliberately
- * plain: tap a row's checkbox to complete it, nothing else yet.
+ * plain: tap a row's checkbox to complete it, long-press to delete.
  */
 export default function TodosScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { todos, pendingCount, completeToDo } = useToDos();
+  const { todos, pendingCount, completeToDo, deleteToDo } = useToDos();
+
+  // Urgent on-device fix: the extraction model occasionally misclassifies a
+  // one-off task as recurring (see this screen's git history for the
+  // investigation). A recurring to-do respawns its next occurrence every
+  // time it's completed, so a plain checkbox tap can never actually get rid
+  // of one that was tagged recurring by mistake — this is the only way out
+  // for that case. Long-press (not a plain tap, and not a swipe, which this
+  // list doesn't otherwise use for anything) is the standard "reveal a
+  // destructive action" gesture across both platforms' own apps, always
+  // behind a confirmation since there's no undo.
+  const handleLongPressRow = (item: ToDo) => {
+    Alert.alert("Delete this to-do?", `"${item.text}"`, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: () => void deleteToDo(item.id) },
+    ]);
+  };
 
   const renderItem = ({ item }: { item: ToDo }) => (
-    <View style={styles.row}>
+    <Pressable
+      onLongPress={() => handleLongPressRow(item)}
+      delayLongPress={600}
+      style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
+    >
       <Pressable
         onPress={() => void completeToDo(item.id)}
         hitSlop={8}
@@ -52,7 +72,7 @@ export default function TodosScreen() {
           {item.recurrence !== "none" ? ` · ${RECURRENCE_LABELS[item.recurrence]}` : ""}
         </Text>
       </View>
-    </View>
+    </Pressable>
   );
 
   return (
@@ -131,6 +151,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
     padding: spacing.base,
+  },
+  rowPressed: {
+    backgroundColor: colors.surfaceElevated,
   },
   checkbox: {
     width: 22,

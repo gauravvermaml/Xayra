@@ -134,9 +134,12 @@ function buildSystemPrompt(todayISO: string): string {
     "calendar date yourself.\n" +
     '  "recurrence": one of "none", "daily", "weekly", or "monthly"\n\n' +
     "Rules:\n" +
-    "- If a task describes something repeating (\"every day\", \"every Monday\", \"each week\", " +
-    "\"monthly\"), set recurrence to the matching value.\n" +
-    "- A task with no repeating language must always have recurrence set to \"none\".\n" +
+    "- Only set recurrence to something other than \"none\" if THAT SPECIFIC task itself repeats " +
+    "(\"every day\", \"every Monday\", \"each week\", \"monthly\") — repeating language attached to " +
+    "one task must never be applied to any other task in the same note. If a note has both a " +
+    "one-off task and a separate recurring task, only the recurring one gets a non-\"none\" value.\n" +
+    "- A task with no repeating language of its own must always have recurrence set to \"none\" — " +
+    "\"none\" is the default; only change it when the task's own wording clearly says it repeats.\n" +
     "- Never invent a date phrase that isn't actually in the note — leave date_phrase empty instead.\n\n" +
     "If the note contains no actionable to-do items at all, respond with exactly: []"
   );

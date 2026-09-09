@@ -171,6 +171,14 @@ function scheduleToDoExtraction(noteId: string, text: string): void {
       try {
         await addToDo(item.task, item.actionDate, item.recurrence);
         added += 1;
+        // Logs each extracted item's actual fields, not just a count — a
+        // misclassification (most commonly a one-off task incorrectly
+        // tagged recurring) is otherwise undiagnosable after the fact, since
+        // the model's raw completion text isn't persisted anywhere and the
+        // encrypted DB can't be inspected directly outside the app.
+        console.log(
+          `[Note] Extracted to-do for note ${noteId}: "${item.task}" on ${item.actionDate} (recurrence: ${item.recurrence})`
+        );
       } catch (err) {
         console.error("[Note] Failed to save an extracted to-do", noteId, item, err);
       }

@@ -135,6 +135,21 @@ export async function updateToDo(id: string, fields: ToDoUpdateFields): Promise<
   notifyToDosChanged();
 }
 
+/**
+ * Permanently removes a to-do — the escape hatch for a wrongly-extracted
+ * item (most commonly one the model incorrectly tagged as recurring, or
+ * invented from a note that wasn't actually a task) that a plain "complete"
+ * tap can't get rid of: completing a recurring to-do respawns its next
+ * occurrence by design, so it would keep coming back forever instead of
+ * going away. A no-op if the id no longer exists (already deleted from
+ * another screen, say) rather than throwing.
+ */
+export async function deleteToDo(id: string): Promise<void> {
+  const db = await getRawDatabase();
+  await db.execute("DELETE FROM todos WHERE id = ?", [id]);
+  notifyToDosChanged();
+}
+
 function formatIsoDate(date: Date): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
