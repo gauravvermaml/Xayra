@@ -3,7 +3,6 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 import BottomSheet, {
   BottomSheetBackdrop,
   BottomSheetTextInput,
-  BottomSheetView,
   type BottomSheetBackdropProps,
 } from "@gorhom/bottom-sheet";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -24,19 +23,34 @@ const RECURRENCE_PICKER_LABELS: Record<Recurrence, string> = {
   monthly: "Monthly",
 };
 
-// No fixed `snapPoints` array — this sheet uses dynamic sizing (the
-// library's default: `enableDynamicSizing` is `true` unless explicitly
-// turned off) so it sizes itself to its actual measured content instead of
-// a hardcoded percentage. A first attempt explicitly set
-// `enableDynamicSizing={false}` with `snapPoints={["50%"]}` to fix the (+)
-// button silently failing to open the sheet — that combination did open the
-// sheet, but also reproducibly froze the ENTIRE /todos screen (checkbox,
-// edit, back, scroll — everything) on-device, confirmed by reverting it and
-// retesting on a completely fresh install/Metro cache: the freeze followed
-// this prop combination, not any other code on the screen. Plain dynamic
-// sizing with no snapPoints is the standard "on-demand sheet sized to its
-// form" pattern and doesn't hit whatever native layout contention the fixed-
-// percentage + disabled-dynamic-sizing combination triggered on this device.
+// Fixed snap point, matching HistorySheet.tsx's own proven setup — NOT
+// dynamic sizing. Two earlier attempts both broke keyboardBehavior=
+// "interactive" once the task TextInput's autoFocus opened the keyboard
+// (first hiding the Save Task button behind it entirely, then still
+// covering the input after switching to BottomSheet's own `bottomInset`
+// prop) — confirmed on-device both times. Root cause: dynamic sizing
+// measures BottomSheetView's content height to pick the sheet's snap point,
+// and that measurement is a DIFFERENT calculation from the one
+// keyboardBehavior="interactive" does to keep a focused input above the
+// keyboard — anything that changes the measured content height (manual
+// padding, the bottomInset prop, both tried here) feeds into the former
+// without the latter accounting for it correctly, exactly the "three
+// mechanisms compensating for the same keyboard" trap ComposeBar.tsx's own
+// doc comment already documents from this app's Build 20 history. A FIXED
+// snap point sidesteps the conflict outright: there's no content
+// measurement for anything else to disagree with.
+//
+// (An earlier version of this file used dynamic sizing specifically to fix
+// the (+) button silently failing to open the sheet under
+// `enableDynamicSizing={false}` + `snapPoints={["50%"]}` — that combination
+// was blamed for a full-screen freeze at the time, but the freeze's actual
+// cause, found later, was an unrelated CPU-starvation bug in
+// services/ai/localLlama.ts (see that file's doc comment) that was almost
+// certainly what was actually observed, not this sizing combination. Now
+// that the real cause is fixed, reverting to fixed sizing is safe and is
+// what actually fixes the keyboard-avoidance conflict dynamic sizing
+// introduced.)
+const SNAP_POINTS = ["50%"];
 
 /**
  * On-demand "Add a to-do" sheet — a plain `<BottomSheet>` (not
@@ -48,6 +62,11 @@ const RECURRENCE_PICKER_LABELS: Record<Recurrence, string> = {
  * codebase uses yet — a plain `BottomSheet` with `backdropComponent` gets
  * the same tap-outside-to-dismiss modal behavior without that extra global
  * wiring.
+ *
+ * Content is a plain `View`, not `BottomSheetView` — that wrapper exists for
+ * dynamic sizing's own content measurement (see `SNAP_POINTS`'s doc comment
+ * for why this sheet doesn't use dynamic sizing), and HistorySheet.tsx's own
+ * fixed-snapPoint body uses a plain `View` for the same reason.
  *
  * Monochromatic Glass styling per spec: translucent near-black background,
  * a barely-there white border, no blur (this app never uses `expo-blur` —
@@ -111,6 +130,8 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
       <BottomSheet
         ref={sheetRef}
         index={-1}
+        snapPoints={SNAP_POINTS}
+        enableDynamicSizing={false}
         enablePanDownToClose
         onClose={handleSheetClosed}
         backdropComponent={renderBackdrop}
@@ -119,20 +140,8 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
         keyboardBehavior="interactive"
         keyboardBlurBehavior="restore"
         android_keyboardInputMode="adjustResize"
-        // The library's own prop for this, not manual content padding — a
-        // first attempt added `insets.bottom` straight to BottomSheetView's
-        // padding, which did clear the Save Task button at rest but then
-        // made the keyboard cover the task TextInput once it opened: that
-        // padding is folded into "content height" for dynamic sizing, which
-        // is a different, and apparently conflicting, calculation from the
-        // one keyboardBehavior="interactive" does to keep the focused input
-        // above the keyboard. `bottomInset` is what the library expects
-        // safe-area clearance to be reported through, so it stays part of
-        // the SAME geometry the keyboard-avoidance math already uses,
-        // instead of a second, competing source of "how tall is this sheet."
-        bottomInset={insets.bottom}
       >
-        <BottomSheetView style={styles.content}>
+        <View style={styles.content}>
           <Text style={styles.title}>New To-Do</Text>
 
           <BottomSheetTextInput
@@ -160,14 +169,23 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
             ))}
           </View>
 
-          <Pressable
-            onPress={handleSave}
-            disabled={!canSave}
-            style={[styles.saveButton, !canSave && styles.saveButtonDisabled]}
-          >
-            <Text style={styles.saveButtonText}>Save Task</Text>
-          </Pressable>
-        </BottomSheetView>
+          {/* Bottom safe-area (Android nav/gesture bar) clearance, applied
+              as plain padding on its own trailing wrapper — exactly
+              HistorySheet.tsx's own ModelDownloadCard pattern — rather than
+              folded into `content`'s or an ancestor's height. Nothing here
+              feeds into a content-height measurement that keyboard
+              avoidance also depends on, so it can't reintroduce the earlier
+              conflict. */}
+          <View style={{ paddingBottom: insets.bottom }}>
+            <Pressable
+              onPress={handleSave}
+              disabled={!canSave}
+              style={[styles.saveButton, !canSave && styles.saveButtonDisabled]}
+            >
+              <Text style={styles.saveButtonText}>Save Task</Text>
+            </Pressable>
+          </View>
+        </View>
       </BottomSheet>
     </View>
   );
@@ -185,14 +203,7 @@ const styles = StyleSheet.create({
     width: 36,
   },
   content: {
-    // No `flex: 1` — dynamic sizing (see this file's top-of-file doc
-    // comment) measures this view's own natural content height to size the
-    // sheet, which a flex:1 child (stretching to fill an as-yet-undefined
-    // available height) defeats. Bottom safe-area clearance (the Android
-    // nav/gesture bar) is handled by the `<BottomSheet>` element's own
-    // `bottomInset` prop, not padding here — see that prop's doc comment
-    // for why folding it into this view's own height broke keyboard
-    // avoidance instead.
+    flex: 1,
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.sm,
     paddingBottom: spacing.xl,
