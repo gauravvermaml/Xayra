@@ -491,6 +491,20 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
       { task: "Renew Shivanya's passport", date_phrase: "the first week of October", recurrence: "none" },
     ]),
   },
+  {
+    // Confirmed on-device miss: every other example above is a full
+    // sentence with "I need to"/"remind me to" framing, and the date phrase
+    // always has more words trailing after it ("...this Friday about the
+    // invoice"). A bare imperative note with NO framing verb, ending
+    // directly on the date with nothing after it — the exact shape a short
+    // voice-note transcript naturally takes — came back with date_phrase ""
+    // every time (temperature: 0, fully reproducible) despite the phrase
+    // being right there in the text. This turn demonstrates that shape
+    // specifically: no "I need to"/"remind me", date phrase as the very
+    // last words before the period.
+    input: "Pick up the dry cleaning this Saturday.",
+    answer: JSON.stringify([{ task: "Pick up the dry cleaning", date_phrase: "this Saturday", recurrence: "none" }]),
+  },
 ];
 
 function buildPrompt(rawText: string, todayISO: string): string {
