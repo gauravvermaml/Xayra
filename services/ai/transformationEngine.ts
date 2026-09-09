@@ -267,7 +267,7 @@ function buildSystemPrompt(todayISO: string): string {
 }
 
 /**
- * Six fixed one-shot examples, injected as real prior user/assistant turns —
+ * Seven fixed one-shot examples, injected as real prior user/assistant turns —
  * same technique localLlama.ts's RAG prompt already relies on (see its own
  * FEW_SHOT_* comment for why a demonstrated turn steers a small instruct
  * model far more reliably than the same instruction written as prose).
@@ -287,6 +287,20 @@ function buildSystemPrompt(todayISO: string): string {
  * on-device miss that prompted that fix: it was previously misclassified as
  * "daily" — this turn shows that precise phrasing resolves to "weekly".
  *
+ * The yellow-bins/"every second Monday" entry exists because the prose rule
+ * about "second" meaning "every other" (see buildSystemPrompt's weekly row)
+ * was not enough on its own — confirmed on-device, twice, with the model
+ * defaulting to recurrence "none" and an empty date phrase entirely rather
+ * than picking a wrong-but-present answer. "Every second Monday" is
+ * genuinely ambiguous English even to a human reader (it can mean "every
+ * OTHER Monday" — biweekly, this app's intended reading — or "the 2nd
+ * Monday of the month," an ordinal-position pattern this schema doesn't
+ * represent at all), and a small model facing real ambiguity with no
+ * worked example to anchor on appears to have punted rather than guessed
+ * either reading. A concrete demonstration, not more prose, is what
+ * actually resolves that kind of ambiguity for a model this size.
+ *
+
  * The "call him this Friday" entry demonstrates the other real confusion
  * the recurrence table above calls out explicitly: a weekday mentioned
  * WITHOUT "every"/"each" is a single one-off date, not a recurring
@@ -327,6 +341,12 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
     input: "I need to put the bins out every Monday night.",
     answer: JSON.stringify([
       { task: "Put the bins out", date_phrase: "every Monday night", recurrence: "weekly" },
+    ]),
+  },
+  {
+    input: "Remind me to put the yellow bins out every second Monday.",
+    answer: JSON.stringify([
+      { task: "Put the yellow bins out", date_phrase: "every second Monday", recurrence: "weekly" },
     ]),
   },
   {
