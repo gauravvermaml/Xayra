@@ -133,54 +133,81 @@ function buildSystemPrompt(todayISO: string): string {
     "no date mentioned at all. Copy the phrase as written; do NOT calculate or convert it into a " +
     "calendar date yourself.\n" +
     '  "recurrence": one of "none", "daily", "weekly", or "monthly"\n\n' +
+    "How to choose recurrence — match the task's OWN wording against this table, and nothing else:\n" +
+    '  "every day" / "each day" / "daily"                          → "daily"\n' +
+    '  "every Monday" / "every Friday night" / "every week" / "weekly" (ANY specific weekday,\n' +
+    '  not just Monday, means it happens once every 7 days)         → "weekly"\n' +
+    '  "every month" / "monthly" / "the 1st of every month"         → "monthly"\n' +
+    "  no repeating words at all                                    → \"none\"\n\n" +
     "Rules:\n" +
-    "- Only set recurrence to something other than \"none\" if THAT SPECIFIC task itself repeats " +
-    "(\"every day\", \"every Monday\", \"each week\", \"monthly\") — repeating language attached to " +
-    "one task must never be applied to any other task in the same note. If a note has both a " +
-    "one-off task and a separate recurring task, only the recurring one gets a non-\"none\" value.\n" +
-    "- A task with no repeating language of its own must always have recurrence set to \"none\" — " +
-    "\"none\" is the default; only change it when the task's own wording clearly says it repeats.\n" +
+    "- \"none\" is the default for every task. Only move off it when THAT task's own wording, read " +
+    "on its own, clearly says it repeats — never because a different task in the same note repeats, " +
+    "and never because an earlier example happened to use a non-\"none\" value. Judge every task by " +
+    "its own words alone.\n" +
+    "- A specific weekday (\"every Monday\", \"every Friday\") is WEEKLY, never daily — daily means " +
+    "literally every single day, not once a week on a named day.\n" +
     "- Never invent a date phrase that isn't actually in the note — leave date_phrase empty instead.\n\n" +
     "If the note contains no actionable to-do items at all, respond with exactly: []"
   );
 }
 
-const FEW_SHOT_INPUT =
-  "Remind me to call the dentist tomorrow. Also need to pay the rent on the 1st of every month. " +
-  "And I should water the plants.";
-
 /**
- * A fixed one-shot example, injected as a real prior user/assistant turn —
- * same technique localLlama.ts's RAG prompt already relies on (see its own
+ * Four fixed one-shot examples, injected as real prior user/assistant turns
+ * — same technique localLlama.ts's RAG prompt already relies on (see its own
  * FEW_SHOT_* comment for why a demonstrated turn steers a small instruct
  * model far more reliably than the same instruction written as prose).
- * On-device testing found the bare system-prompt instructions above were not
- * enough on their own: a single short voice transcript ("remind me to call
- * the plumber tomorrow") produced a plain-prose reply with no JSON array at
- * all, which extractJsonArray then had nothing to parse.
  *
- * Demonstrates all three date_phrase shapes: a relative phrase copied
- * verbatim ("tomorrow"), a recurring bare day-of-month copied verbatim
- * ("the 1st of every month" — the model is NOT asked to resolve this to a
- * real date, per buildSystemPrompt above), and no date mentioned at all
- * (empty string). Unlike the pre-fix version of this file, this example
- * needs no today-relative computation of its own — it's a fixed string,
- * since the model is only ever copying text now, never doing date math.
+ * Deliberately FOUR SEPARATE single-item turns rather than one combined
+ * multi-item list (the original version of this fix). On-device testing
+ * with the combined version found the model didn't apply per-item judgment
+ * at all: a real 3-task note with no dates and no recurring language on any
+ * task came back with task 1 correctly "none", but tasks 2 and 3 as "daily"
+ * and "monthly" respectively — i.e. it seems to have pattern-matched the
+ * combined example's fixed shape (item 2 always "monthly") rather than
+ * reading each task's own words. Giving each recurrence value its own
+ * dedicated turn removes that positional shape for the model to copy.
+ *
+ * The second entry below also directly demonstrates the exact on-device
+ * miss that prompted this fix: "every Monday night" was previously
+ * misclassified as "daily" — this turn shows that precise phrasing
+ * resolved to "weekly" instead.
  */
-const FEW_SHOT_ANSWER = JSON.stringify([
-  { task: "Call the dentist", date_phrase: "tomorrow", recurrence: "none" },
-  { task: "Pay the rent", date_phrase: "the 1st of every month", recurrence: "monthly" },
-  { task: "Water the plants", date_phrase: "", recurrence: "none" },
-]);
+const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
+  {
+    input: "Remind me to call the dentist tomorrow.",
+    answer: JSON.stringify([{ task: "Call the dentist", date_phrase: "tomorrow", recurrence: "none" }]),
+  },
+  {
+    input: "I need to put the bins out every Monday night.",
+    answer: JSON.stringify([
+      { task: "Put the bins out", date_phrase: "every Monday night", recurrence: "weekly" },
+    ]),
+  },
+  {
+    input: "Don't forget to pay the rent on the 1st of every month.",
+    answer: JSON.stringify([
+      { task: "Pay the rent", date_phrase: "the 1st of every month", recurrence: "monthly" },
+    ]),
+  },
+  {
+    input: "I should call mom.",
+    answer: JSON.stringify([{ task: "Call mom", date_phrase: "", recurrence: "none" }]),
+  },
+];
 
 function buildPrompt(rawText: string, todayISO: string): string {
+  const fewShotTurns = FEW_SHOT_EXAMPLES.map(
+    ({ input, answer }) =>
+      "<|start_header_id|>user<|end_header_id|>\n\n" +
+      `${input}${EOT_TOKEN}` +
+      "<|start_header_id|>assistant<|end_header_id|>\n\n" +
+      `${answer}${EOT_TOKEN}`
+  ).join("");
+
   return (
     "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" +
     `${buildSystemPrompt(todayISO)}${EOT_TOKEN}` +
-    "<|start_header_id|>user<|end_header_id|>\n\n" +
-    `${FEW_SHOT_INPUT}${EOT_TOKEN}` +
-    "<|start_header_id|>assistant<|end_header_id|>\n\n" +
-    `${FEW_SHOT_ANSWER}${EOT_TOKEN}` +
+    fewShotTurns +
     "<|start_header_id|>user<|end_header_id|>\n\n" +
     `${rawText}${EOT_TOKEN}` +
     "<|start_header_id|>assistant<|end_header_id|>\n\n"
