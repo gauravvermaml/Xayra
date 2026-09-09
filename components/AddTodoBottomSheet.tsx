@@ -82,6 +82,14 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
       ref={sheetRef}
       index={-1}
       snapPoints={SNAP_POINTS}
+      // Required whenever explicit `snapPoints` are given — v5 defaults this
+      // to `true`, which sizes the sheet from measured content height and
+      // ignores `snapPoints` entirely. Without it, `snapToIndex(0)` resolves
+      // against a height that was never established, so the sheet never
+      // visibly opens even though the (+) button's own onPress does fire
+      // (confirmed on-device: HistorySheet.tsx sets this same prop for the
+      // same reason).
+      enableDynamicSizing={false}
       enablePanDownToClose
       onClose={handleSheetClosed}
       backdropComponent={renderBackdrop}

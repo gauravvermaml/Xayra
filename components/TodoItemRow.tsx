@@ -19,6 +19,42 @@ function formatCreatedDate(createdAtIso: string): string {
   return `Created ${d.getDate()} ${MONTH_ABBREVIATIONS[d.getMonth()]}`;
 }
 
+// Reinstated from the Phase 2 Step 2 stub (see app/todos.tsx's git history)
+// after the user flagged its absence: Step 3's redesign replaced the whole
+// row and dropped this due-date/frequency line without an equivalent
+// replacement. `actionDate` is a plain YYYY-MM-DD string (db/schema.ts) —
+// parsed into local-time components, not `new Date(str)`, for the same
+// UTC-off-by-one-day reason todoManager.ts's own date math avoids it.
+function formatActionDate(actionDate: string): string {
+  const [year, month, day] = actionDate.split("-").map(Number);
+  return new Date(year, month - 1, day).toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+  });
+}
+
+const RECURRENCE_UNIT_LABELS: Record<Exclude<ToDo["recurrence"], "none">, string> = {
+  daily: "day",
+  weekly: "week",
+  monthly: "month",
+};
+
+/** "Repeats daily" for the plain interval-1 case (the common one), else
+ * "Every 2 weeks" — interval is only ever meaningfully > 1 via
+ * transformationEngine.ts's `resolveRecurrenceInterval` (e.g. "every second
+ * Monday", "quarterly"), so this only shows the more verbose phrasing when
+ * there's actually a real cadence to communicate. */
+function formatRecurrenceLabel(recurrence: ToDo["recurrence"], interval: number): string {
+  if (recurrence === "none") {
+    return "";
+  }
+  if (interval <= 1) {
+    return `Repeats ${recurrence}`;
+  }
+  return `Every ${interval} ${RECURRENCE_UNIT_LABELS[recurrence]}s`;
+}
+
 export type TodoItemRowProps = {
   item: ToDo;
   /** Checkbox tap — the parent owns the drop-animation/undo-snackbar
@@ -33,6 +69,10 @@ export type TodoItemRowProps = {
    * NoteDetailModal. */
   onOpenSourceNote: (noteId: string) => void;
   onSaveText: (id: string, text: string) => void;
+  /** Fired the instant this row's inline editor opens — lets app/todos.tsx
+   * scroll the row into view above the keyboard (see this component's
+   * `isEditing` state doc comment below for why that's needed at all). */
+  onStartEdit: (id: string) => void;
 };
 
 /**
@@ -53,9 +93,21 @@ export type TodoItemRowProps = {
  * (no `Animated.FlatList` needed) since it's this row's own mount/unmount
  * Reanimated is hooking into, not anything list-virtualization-specific.
  */
-export function TodoItemRow({ item, onCheck, onLongPressDelete, onOpenSourceNote, onSaveText }: TodoItemRowProps) {
+export function TodoItemRow({
+  item,
+  onCheck,
+  onLongPressDelete,
+  onOpenSourceNote,
+  onSaveText,
+  onStartEdit,
+}: TodoItemRowProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [draftText, setDraftText] = useState(item.text);
+
+  const startEditing = () => {
+    setIsEditing(true);
+    onStartEdit(item.id);
+  };
 
   const commitEdit = () => {
     setIsEditing(false);
@@ -104,10 +156,15 @@ export function TodoItemRow({ item, onCheck, onLongPressDelete, onOpenSourceNote
             <Text style={styles.taskText}>{item.text}</Text>
           )}
 
-          <Pressable onPress={() => setIsEditing(true)} hitSlop={10} style={styles.editButton}>
+          <Pressable onPress={startEditing} hitSlop={10} style={styles.editButton}>
             <Feather name="edit-2" size={16} color={colors.textMuted} />
           </Pressable>
         </View>
+
+        <Text style={styles.dueText}>
+          {formatActionDate(item.actionDate)}
+          {item.recurrence !== "none" ? ` · ${formatRecurrenceLabel(item.recurrence, item.recurrenceInterval)}` : ""}
+        </Text>
       </Pressable>
     </Animated.View>
   );
@@ -166,5 +223,10 @@ const styles = StyleSheet.create({
     height: 28,
     alignItems: "center",
     justifyContent: "center",
+  },
+  dueText: {
+    color: colors.textMuted,
+    ...typography.caption,
+    marginTop: spacing.sm,
   },
 });
