@@ -23,6 +23,37 @@ function rowToToDo(row: Record<string, unknown>): ToDo {
   };
 }
 
+/**
+ * Plain in-process pub/sub so every hooks/useToDos.ts instance across the app
+ * — the home screen's pill and the /todos screen's list are two separate
+ * instances — refreshes the moment ANY write happens, not just on its own
+ * next screen focus. Without this, a to-do added by
+ * services/notes/noteManager.ts's background extraction pipeline (which
+ * calls addToDo() directly, with nothing else on screen to trigger a
+ * re-render) left the home screen's pill count stale until the user
+ * navigated away and back — confirmed on-device: the count only updated
+ * after visiting /todos and returning, which is exactly what re-triggers
+ * useToDos' useFocusEffect. A plain module-level Set of listeners is enough
+ * here — this only ever runs within one JS context, never across processes,
+ * so there's no need for anything heavier (an EventEmitter import, a context
+ * provider) just to fan a "something changed" signal out to a handful of
+ * hook instances.
+ */
+type ToDosChangedListener = () => void;
+const changeListeners = new Set<ToDosChangedListener>();
+
+/** Subscribes to every todos write (add/update/complete). Returns an
+ * unsubscribe function — call it on unmount, same shape as any other
+ * addEventListener-style API in this codebase. */
+export function subscribeToToDosChanged(listener: ToDosChangedListener): () => void {
+  changeListeners.add(listener);
+  return () => changeListeners.delete(listener);
+}
+
+function notifyToDosChanged(): void {
+  changeListeners.forEach((listener) => listener());
+}
+
 /** Adds a single to-do, either entered directly or from a single extracted
  * item in services/ai/transformationEngine.ts's output. */
 export async function addToDo(
@@ -38,6 +69,7 @@ export async function addToDo(
     "INSERT INTO todos (id, text, action_date, is_completed, recurrence, created_at) VALUES (?, ?, ?, 0, ?, ?)",
     [id, text, actionDate, recurrence, createdAt]
   );
+  notifyToDosChanged();
 
   return { id, text, actionDate, isCompleted: false, recurrence, createdAt };
 }
@@ -100,6 +132,7 @@ export async function updateToDo(id: string, fields: ToDoUpdateFields): Promise<
   const db = await getRawDatabase();
   params.push(id);
   await db.execute(`UPDATE todos SET ${setClauses.join(", ")} WHERE id = ?`, params);
+  notifyToDosChanged();
 }
 
 function formatIsoDate(date: Date): string {
@@ -176,4 +209,5 @@ export async function completeToDo(id: string): Promise<void> {
       );
     }
   });
+  notifyToDosChanged();
 }

@@ -1,3 +1,5 @@
+import * as chrono from "chrono-node";
+
 import { RECURRENCE_OPTIONS, type Recurrence } from "../../db/schema";
 import { runQueuedLlamaCompletion } from "./localLlama";
 import { logDuration, nowMs } from "./perf";
@@ -15,8 +17,6 @@ export type ExtractedToDo = {
  * EOT_TOKEN for why this has to be in `stop`. */
 const EOT_TOKEN = "<|eot_id|>";
 
-const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
 function formatIsoDate(date: Date): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -28,16 +28,16 @@ function todayIso(): string {
   return formatIsoDate(new Date());
 }
 
-function addDays(date: Date, days: number): Date {
-  const result = new Date(date);
-  result.setDate(result.getDate() + days);
-  return result;
+function parseIsoDateLocal(iso: string): Date {
+  const [year, month, day] = iso.split("-").map(Number);
+  return new Date(year, month - 1, day);
 }
 
-/** Next calendar date landing on `dayOfMonth`, strictly after `from` — used
- * only to build the worked example below (buildFewShotAnswer), never for
- * real extraction (the model resolves those dates itself). Rolls to next
- * month whenever `from`'s day-of-month has already reached `dayOfMonth`. */
+/** Next calendar date landing on `dayOfMonth`, strictly after `from`. Rolls
+ * to next month whenever `from`'s day-of-month has already reached
+ * `dayOfMonth` this month. Used for the "the 1st"/"the 15th" style bare
+ * day-of-month phrasing that chrono-node can't reliably resolve on its own
+ * (see resolveActionDate's own comment for why this exists alongside it). */
 function nextDayOfMonth(from: Date, dayOfMonth: number): Date {
   const candidate = new Date(from.getFullYear(), from.getMonth(), dayOfMonth);
   if (candidate <= from) {
@@ -46,12 +46,78 @@ function nextDayOfMonth(from: Date, dayOfMonth: number): Date {
   return candidate;
 }
 
+/** Matches a bare day-of-month reference with no month attached — "the
+ * 1st", "1st of every month", "on the 15th", "day 1" — the one common
+ * phrasing chrono-node (see resolveActionDate) doesn't resolve to a sane
+ * future date on its own (tested on-device: it either returns null or
+ * silently adds a month while keeping today's day-of-month, e.g. "1st of
+ * the month" from Sep 9 came back Oct 9, not Oct 1). */
+const BARE_DAY_OF_MONTH_PATTERN = /\b(?:on\s+)?(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?\b(?!\s*(?:am|pm|:))/i;
+
+/**
+ * Resolves the model's extracted natural-language date reference into a
+ * concrete ISO date. This is the fix for a real on-device bug: the previous
+ * version of this file asked the LLM to compute the absolute action_date
+ * itself, and a 1B/3B instruct model is unreliable at date ARITHMETIC even
+ * when it correctly understands the note's language — confirmed on-device,
+ * "pay rent on the 1st of every month" (asked on Sep 9) came back as
+ * "2026-11-01" (one month too far) despite the model correctly identifying
+ * the task and recurrence.
+ *
+ * The fix moves arithmetic out of the model entirely: the model's only job
+ * (see buildSystemPrompt) is to extract the literal date phrase as it
+ * appears in the note (or "" if none is mentioned) — a much easier,
+ * near-copy-paste extraction task — and this function resolves that phrase
+ * deterministically:
+ *  1. Empty phrase → today (no date was mentioned).
+ *  2. A bare day-of-month with no month attached ("the 1st", "1st of every
+ *     month") → nextDayOfMonth() above, since chrono-node doesn't handle
+ *     this phrasing reliably on its own (tested — see BARE_DAY_OF_MONTH_PATTERN
+ *     doc comment for the exact failures observed).
+ *  3. Everything else (weekday names, "tomorrow", "March 3rd", full dates)
+ *     → chrono-node's `parseDate` with `forwardDate: true`, which resolves
+ *     an otherwise-past-implied date to its next future occurrence — exactly
+ *     the "next upcoming occurrence" rule this module needs, and something
+ *     chrono-node (a dedicated, battle-tested date-parsing library) is far
+ *     more reliable at than a 1B language model doing arithmetic by "feel."
+ *  4. Anything chrono-node can't parse at all → today, same safe fallback as
+ *     an empty phrase, rather than leaving the to-do dateless.
+ */
+function resolveActionDate(datePhrase: string, todayISO: string): string {
+  const trimmed = datePhrase.trim();
+  if (!trimmed) {
+    return todayISO;
+  }
+
+  const today = parseIsoDateLocal(todayISO);
+
+  const bareDayMatch = trimmed.match(BARE_DAY_OF_MONTH_PATTERN);
+  // Only treat this as a bare day-of-month if chrono itself finds no
+  // parseable date in the phrase — a phrase like "March 3rd" also matches
+  // the bare-day regex on its "3rd", but chrono correctly resolves the
+  // whole "March 3rd" and should win.
+  const chronoResult = chrono.parseDate(trimmed, today, { forwardDate: true });
+
+  if (!chronoResult && bareDayMatch) {
+    const day = Number(bareDayMatch[1]);
+    if (day >= 1 && day <= 31) {
+      return formatIsoDate(nextDayOfMonth(today, day));
+    }
+  }
+
+  return chronoResult ? formatIsoDate(chronoResult) : todayISO;
+}
+
 /**
  * System prompt for structured extraction, not conversation — deliberately
  * far shorter and stricter than localLlama.ts's RAG SYSTEM_PROMPT, since the
- * only acceptable output here is a bare JSON array. Today's date is baked in
- * fresh on every call (never memoized) so a task extracted at 11:58pm and one
- * extracted a minute later never disagree about what day "today" was.
+ * only acceptable output here is a bare JSON array. The model's job is
+ * deliberately limited to language understanding (what's the task, what date
+ * phrase — if any — is attached to it, does it repeat) with zero date
+ * arithmetic asked of it; resolveActionDate() above does all of the actual
+ * date math afterward. Today's date is still given for context (recurrence
+ * judgment and disambiguating relative task descriptions can use it), but
+ * the model is explicitly told to copy the date phrase, not resolve it.
  */
 function buildSystemPrompt(todayISO: string): string {
   return (
@@ -62,23 +128,23 @@ function buildSystemPrompt(todayISO: string): string {
     "Respond with ONLY a raw JSON array — no prose, no markdown code fences, no explanation before " +
     "or after it. Each element must be an object with exactly these three fields:\n" +
     '  "task": a short, clear description of the action item (string)\n' +
-    '  "action_date": the date the task should happen, as an ISO date in YYYY-MM-DD format\n' +
+    '  "date_phrase": the date/time reference exactly as it appears in the note (e.g. "tomorrow", ' +
+    '"next Friday", "the 1st of every month", "March 3rd") — or an empty string "" if the task has ' +
+    "no date mentioned at all. Copy the phrase as written; do NOT calculate or convert it into a " +
+    "calendar date yourself.\n" +
     '  "recurrence": one of "none", "daily", "weekly", or "monthly"\n\n' +
-    "Date rules:\n" +
-    `- If a task has no date mentioned at all, set action_date to today's date (${todayISO}).\n` +
-    "- If a task mentions a day or month without a year (e.g. \"March 3rd\", \"next Friday\", " +
-    "\"the 12th\"), resolve it to the NEXT upcoming occurrence of that date relative to today — " +
-    "never a date that has already passed.\n" +
+    "Rules:\n" +
     "- If a task describes something repeating (\"every day\", \"every Monday\", \"each week\", " +
-    "\"monthly\"), set recurrence to the matching value and set action_date to the next occurrence " +
-    "of it from today.\n" +
-    "- A task with no repeating language must always have recurrence set to \"none\".\n\n" +
+    "\"monthly\"), set recurrence to the matching value.\n" +
+    "- A task with no repeating language must always have recurrence set to \"none\".\n" +
+    "- Never invent a date phrase that isn't actually in the note — leave date_phrase empty instead.\n\n" +
     "If the note contains no actionable to-do items at all, respond with exactly: []"
   );
 }
 
 const FEW_SHOT_INPUT =
-  "Remind me to call the dentist tomorrow. Also need to pay the rent on the 1st of every month.";
+  "Remind me to call the dentist tomorrow. Also need to pay the rent on the 1st of every month. " +
+  "And I should water the plants.";
 
 /**
  * A fixed one-shot example, injected as a real prior user/assistant turn —
@@ -90,24 +156,19 @@ const FEW_SHOT_INPUT =
  * the plumber tomorrow") produced a plain-prose reply with no JSON array at
  * all, which extractJsonArray then had nothing to parse.
  *
- * The example's own dates are computed here in JS from the SAME `todayISO`
- * passed to the real system prompt, rather than hardcoded — so the worked
- * answer always resolves "tomorrow" and "the 1st of every month" against
- * whatever day this actually runs on, keeping the demonstrated turn
- * internally consistent with the "Today's Date" line the model is told
- * right above it, instead of teaching it two different definitions of today.
+ * Demonstrates all three date_phrase shapes: a relative phrase copied
+ * verbatim ("tomorrow"), a recurring bare day-of-month copied verbatim
+ * ("the 1st of every month" — the model is NOT asked to resolve this to a
+ * real date, per buildSystemPrompt above), and no date mentioned at all
+ * (empty string). Unlike the pre-fix version of this file, this example
+ * needs no today-relative computation of its own — it's a fixed string,
+ * since the model is only ever copying text now, never doing date math.
  */
-function buildFewShotAnswer(todayISO: string): string {
-  const [year, month, day] = todayISO.split("-").map(Number);
-  const today = new Date(year, month - 1, day);
-  const tomorrow = formatIsoDate(addDays(today, 1));
-  const nextFirstOfMonth = formatIsoDate(nextDayOfMonth(today, 1));
-
-  return JSON.stringify([
-    { task: "Call the dentist", action_date: tomorrow, recurrence: "none" },
-    { task: "Pay the rent", action_date: nextFirstOfMonth, recurrence: "monthly" },
-  ]);
-}
+const FEW_SHOT_ANSWER = JSON.stringify([
+  { task: "Call the dentist", date_phrase: "tomorrow", recurrence: "none" },
+  { task: "Pay the rent", date_phrase: "the 1st of every month", recurrence: "monthly" },
+  { task: "Water the plants", date_phrase: "", recurrence: "none" },
+]);
 
 function buildPrompt(rawText: string, todayISO: string): string {
   return (
@@ -116,7 +177,7 @@ function buildPrompt(rawText: string, todayISO: string): string {
     "<|start_header_id|>user<|end_header_id|>\n\n" +
     `${FEW_SHOT_INPUT}${EOT_TOKEN}` +
     "<|start_header_id|>assistant<|end_header_id|>\n\n" +
-    `${buildFewShotAnswer(todayISO)}${EOT_TOKEN}` +
+    `${FEW_SHOT_ANSWER}${EOT_TOKEN}` +
     "<|start_header_id|>user<|end_header_id|>\n\n" +
     `${rawText}${EOT_TOKEN}` +
     "<|start_header_id|>assistant<|end_header_id|>\n\n"
@@ -144,13 +205,13 @@ function isRecurrence(value: unknown): value is Recurrence {
 }
 
 /**
- * Defensive structural + date normalization on top of whatever the on-device
- * model actually returns. A 1B/3B instruct model is not reliable enough at
- * strict JSON schemas or date arithmetic to trust its output verbatim — any
- * entry missing a task, or carrying a malformed date/recurrence, is either
- * coerced to a safe default (today's date, recurrence "none") or dropped
- * entirely (an empty/missing task), rather than throwing and discarding
- * every other item the model got right.
+ * Defensive structural normalization on top of whatever the on-device model
+ * actually returns, plus deterministic date resolution via resolveActionDate
+ * above. A 1B/3B instruct model is not reliable enough at strict JSON
+ * schemas to trust its output verbatim — any entry missing a task, or
+ * carrying a malformed recurrence, is either coerced to a safe default or
+ * dropped entirely (an empty/missing task), rather than throwing and
+ * discarding every other item the model got right.
  */
 function normalizeExtracted(raw: unknown, todayISO: string): ExtractedToDo[] {
   if (!Array.isArray(raw)) {
@@ -169,10 +230,8 @@ function normalizeExtracted(raw: unknown, todayISO: string): ExtractedToDo[] {
       continue;
     }
 
-    const actionDate =
-      typeof record.action_date === "string" && ISO_DATE_PATTERN.test(record.action_date)
-        ? record.action_date
-        : todayISO;
+    const datePhrase = typeof record.date_phrase === "string" ? record.date_phrase : "";
+    const actionDate = resolveActionDate(datePhrase, todayISO);
 
     const recurrence: Recurrence = isRecurrence(record.recurrence) ? record.recurrence : "none";
 

@@ -6,6 +6,7 @@ import {
   addToDo as addToDoRecord,
   completeToDo as completeToDoRecord,
   getPendingToDos,
+  subscribeToToDosChanged,
   updateToDo as updateToDoRecord,
   type ToDo,
   type ToDoUpdateFields,
@@ -30,12 +31,18 @@ export type UseToDosResult = {
  * separate `getPendingCount()` round-trip needed for a consumer that's
  * already loaded the list.
  *
- * Refreshes automatically on every screen focus (not just on mount), since
- * services/notes/noteManager.ts's background auto-extraction pipeline can
- * populate new rows from a note saved on a completely different screen (or
- * while this one wasn't focused) — a mount-only fetch would go stale the
- * moment a voice note's extraction finishes after the To-Dos screen already
- * loaded once.
+ * Refreshes on mount, on every screen focus, AND on a live change-event
+ * subscription (subscribeToToDosChanged) — three overlapping triggers for
+ * what's really one requirement: a to-do added from anywhere should show up
+ * everywhere this hook is mounted. The focus-only version of this hook had a
+ * real on-device bug: services/notes/noteManager.ts's background
+ * auto-extraction pipeline calls addToDo() directly (there's no screen
+ * navigation involved in saving a note), so the home screen's pill —
+ * mounted the whole time, never re-focused — kept showing a stale count
+ * until the user happened to visit /todos and come back, which is what
+ * actually re-triggered its useFocusEffect. The subscription closes that
+ * gap: every addToDo/updateToDo/completeToDo call notifies every mounted
+ * useToDos instance immediately, screen navigation or not.
  */
 export function useToDos(): UseToDosResult {
   const [todos, setTodos] = useState<ToDo[]>([]);
@@ -47,6 +54,12 @@ export function useToDos(): UseToDosResult {
 
   useEffect(() => {
     void refreshToDos();
+  }, [refreshToDos]);
+
+  useEffect(() => {
+    return subscribeToToDosChanged(() => {
+      void refreshToDos();
+    });
   }, [refreshToDos]);
 
   useFocusEffect(
