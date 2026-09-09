@@ -24,6 +24,57 @@ export type ExtractedToDo = {
  * EOT_TOKEN for why this has to be in `stop`. */
 const EOT_TOKEN = "<|eot_id|>";
 
+/**
+ * GBNF grammar passed to llama.rn's `completion()` `grammar` option —
+ * constrains token sampling so the model is STRUCTURALLY INCAPABLE of
+ * producing anything other than a JSON array of objects matching this exact
+ * shape (fixed key order: task, date_phrase, recurrence; recurrence
+ * restricted to exactly the 4 enum strings). This is what finally closes
+ * the class of bug every one of this file's earlier fixes could only ever
+ * patch around one symptom at a time: a bare-prompt "please output ONLY
+ * JSON" instruction is persuasion, not enforcement — the model can still
+ * ignore it (confirmed on-device: a plain-prose reply with no JSON array at
+ * all) or emit an invalid recurrence value. Grammar-constrained decoding
+ * makes both of those impossible at the sampling level, for any model size,
+ * not just this device's 1B — see this file's own git history for the
+ * few-shot-patch approach this replaces for the STRUCTURAL half of the
+ * problem (extractJsonArray's old prose-stripping fallback is gone; see its
+ * own comment below for why it's no longer needed).
+ *
+ * Grammar can only enforce SYNTAX, never semantics — it guarantees every
+ * object has a `recurrence` that's one of the four valid strings, but not
+ * that the model chose the *correct* one for what the note actually said.
+ * The recurrence lookup table and worked examples in buildSystemPrompt/
+ * FEW_SHOT_EXAMPLES below are still doing real, distinct work (teaching
+ * "every second Monday" means weekly-interval-2, not daily; teaching a
+ * multi-task note needs every task extracted, not just the first) and
+ * are deliberately NOT removed just because the grammar exists — only the
+ * prose that was purely policing OUTPUT FORMAT (no prose, no code fences)
+ * was safe to cut, since grammar makes that impossible to violate.
+ *
+ * Field is named `date_phrase`, not the literal `action_date` originally
+ * specified for this step, to preserve a proven earlier fix: an LLM asked
+ * to compute an absolute `action_date` itself is unreliable at date
+ * arithmetic (confirmed on-device — see resolveActionDate's own comment),
+ * so the model still only ever extracts the raw date phrase as written;
+ * resolveActionDate() does the actual date math deterministically outside
+ * the model, same as before this refactor. Reverting to a computed
+ * `action_date` field here would silently undo that fix.
+ *
+ * Built from llama.cpp's own canonical JSON primitive rules (`string`/
+ * `char`, taken from its `json-schema-to-grammar.cpp`) rather than
+ * hand-rolled ones, since a subtly wrong string/escape rule is the easiest
+ * way for a hand-written grammar to misbehave.
+ */
+const TODO_EXTRACTION_GRAMMAR = String.raw`
+root       ::= "[" ws ( item ( "," ws item )* )? ws "]"
+item       ::= "{" ws "\"task\"" ws ":" ws string ws "," ws "\"date_phrase\"" ws ":" ws string ws "," ws "\"recurrence\"" ws ":" ws recurrence ws "}"
+string     ::= "\"" char* "\""
+char       ::= [^"\\\x7F\x00-\x1F] | "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4})
+recurrence ::= "\"none\"" | "\"daily\"" | "\"weekly\"" | "\"monthly\""
+ws         ::= [ \t\n]*
+`;
+
 function formatIsoDate(date: Date): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -202,15 +253,15 @@ function resolveRecurrenceInterval(datePhrase: string, recurrence: Recurrence): 
 }
 
 /**
- * System prompt for structured extraction, not conversation — deliberately
- * far shorter and stricter than localLlama.ts's RAG SYSTEM_PROMPT, since the
- * only acceptable output here is a bare JSON array. The model's job is
- * deliberately limited to language understanding (what's the task, what date
- * phrase — if any — is attached to it, does it repeat) with zero date
- * arithmetic asked of it; resolveActionDate() above does all of the actual
- * date math afterward. Today's date is still given for context (recurrence
- * judgment and disambiguating relative task descriptions can use it), but
- * the model is explicitly told to copy the date phrase, not resolve it.
+ * System prompt for structured extraction, not conversation. Grammar-
+ * constrained decoding (see TODO_EXTRACTION_GRAMMAR above) now guarantees
+ * the OUTPUT FORMAT — valid JSON array, exact three keys, recurrence
+ * restricted to the 4 valid strings — so this prompt no longer needs to
+ * police that ("respond with ONLY a raw JSON array, no prose, no code
+ * fences" and its variants are gone). What's left is everything grammar
+ * CAN'T enforce: what each field actually MEANS, and the semantic judgment
+ * calls behind recurrence classification — those are still entirely on the
+ * model, and still need real instruction, not just a schema.
  */
 function buildSystemPrompt(todayISO: string): string {
   return (
@@ -222,14 +273,13 @@ function buildSystemPrompt(todayISO: string): string {
     "array entry. Never stop after the first task you find; keep reading to the end of the note and " +
     "list all of them, however many there are.\n\n" +
     `Today's Date: ${todayISO}\n\n` +
-    "Respond with ONLY a raw JSON array — no prose, no markdown code fences, no explanation before " +
-    "or after it. Each element must be an object with exactly these three fields:\n" +
-    '  "task": a short, clear description of the action item (string)\n' +
+    "Each item has three fields:\n" +
+    '  "task": a short, clear description of the action item\n' +
     '  "date_phrase": the date/time reference exactly as it appears in the note (e.g. "tomorrow", ' +
     '"next Friday", "the 1st of every month", "March 3rd") — or an empty string "" if the task has ' +
     "no date mentioned at all. Copy the phrase as written; do NOT calculate or convert it into a " +
     "calendar date yourself.\n" +
-    '  "recurrence": one of "none", "daily", "weekly", or "monthly"\n\n' +
+    '  "recurrence": "none", "daily", "weekly", or "monthly"\n\n' +
     "How to choose recurrence — the schema only has FOUR values, so map whatever cadence the task " +
     "actually describes onto the CLOSEST one of these four. Match against every row below, not just " +
     "the first one that looks similar:\n" +
@@ -271,6 +321,14 @@ function buildSystemPrompt(todayISO: string): string {
  * same technique localLlama.ts's RAG prompt already relies on (see its own
  * FEW_SHOT_* comment for why a demonstrated turn steers a small instruct
  * model far more reliably than the same instruction written as prose).
+ * Deliberately KEPT after adding TODO_EXTRACTION_GRAMMAR above, not stripped
+ * as prompt bloat — every one of these teaches a semantic judgment call
+ * (which of 4 buckets a cadence maps to, whether a note has 1 task or 3,
+ * one-off vs. recurring) that grammar-constrained decoding cannot enforce;
+ * grammar only guarantees the OUTPUT is syntactically valid, never that the
+ * model chose semantically correctly. Only the format-policing PROSE
+ * ("respond with ONLY a raw JSON array...") was safe to cut for being made
+ * redundant by grammar — see TODO_EXTRACTION_GRAMMAR's own comment.
  *
  * Every entry except MULTI_TASK (see below) is deliberately a SEPARATE
  * single-item turn rather than folded into one combined multi-item list —
@@ -300,7 +358,6 @@ function buildSystemPrompt(todayISO: string): string {
  * either reading. A concrete demonstration, not more prose, is what
  * actually resolves that kind of ambiguity for a model this size.
  *
-
  * The "call him this Friday" entry demonstrates the other real confusion
  * the recurrence table above calls out explicitly: a weekday mentioned
  * WITHOUT "every"/"each" is a single one-off date, not a recurring
@@ -387,19 +444,21 @@ function buildPrompt(rawText: string, todayISO: string): string {
 }
 
 /**
- * Pulls the JSON array substring out of the model's raw completion. Small
- * instruct models frequently ignore the "ONLY a raw JSON array" instruction
- * and wrap it in a sentence ("Here's the list: [...]") or a markdown code
- * fence despite being told not to — slicing from the first "[" to the last
- * "]" recovers the array in both cases instead of failing the whole parse.
+ * Parses the model's completion as JSON directly — no more scanning for a
+ * "[" ... "]" substring. That scan existed only to recover a JSON array a
+ * small model had wrapped in a stray sentence or a markdown code fence
+ * despite being told not to (confirmed on-device pre-grammar); with
+ * TODO_EXTRACTION_GRAMMAR now constraining every sampled token, the model
+ * is structurally incapable of producing anything other than the bare
+ * array from the very first character, so a plain `JSON.parse` is both
+ * sufficient and a stricter check (a stray character anywhere would now
+ * correctly fail loudly instead of being silently sliced away). Still
+ * wrapped in try/catch by the caller — grammar guarantees well-FORMED
+ * output, not a complete one: hitting `n_predict` mid-array would still
+ * yield truncated, unparseable JSON.
  */
-function extractJsonArray(text: string): unknown {
-  const start = text.indexOf("[");
-  const end = text.lastIndexOf("]");
-  if (start === -1 || end === -1 || end < start) {
-    throw new Error("No JSON array found in model output.");
-  }
-  return JSON.parse(text.slice(start, end + 1));
+function parseExtractionOutput(text: string): unknown {
+  return JSON.parse(text);
 }
 
 function isRecurrence(value: unknown): value is Recurrence {
@@ -478,13 +537,20 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
       // localLlama.ts's RAG generation tunes for would only hurt here.
       temperature: 0.1,
       top_p: 0.9,
+      // Grammar-constrained decoding — see TODO_EXTRACTION_GRAMMAR's own
+      // comment for what this guarantees (and doesn't). `stop` is kept as a
+      // belt-and-suspenders backstop, though grammar sampling should already
+      // force EOS itself the moment the root rule's closing "]" is matched,
+      // since no further character is valid under the grammar past that
+      // point — this should rarely if ever actually trigger.
+      grammar: TODO_EXTRACTION_GRAMMAR,
       stop: [EOT_TOKEN, "<|end_of_text|>"],
     });
     logDuration("Llama to-do extraction", start);
 
     const rawOutput = result.text.trim();
     try {
-      const parsed = extractJsonArray(rawOutput);
+      const parsed = parseExtractionOutput(rawOutput);
       return normalizeExtracted(parsed, todayISO);
     } catch (parseErr) {
       // Logged separately from the outer catch (which also covers
