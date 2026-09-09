@@ -311,13 +311,21 @@ function buildSystemPrompt(todayISO: string): string {
     "literally every single day, not once a week on a named day. A single mention of a weekday with " +
     "no \"every\"/\"each\" attached (\"call him Friday\", \"next Monday\") is a one-off date, not " +
     "recurring at all — set recurrence to \"none\" for those.\n" +
+    "- A word describing what kind of task it is (\"renew\", \"expire\", \"expiring\", \"due\", " +
+    "\"subscription\", \"deadline\") does NOT by itself mean the task repeats, even though the real-world " +
+    "thing it's about (passports, memberships, licenses) often does. \"Renew the passport in October\" " +
+    "is a single one-off reminder to do that ONE renewal — recurrence is \"none\" — unless the note " +
+    "ALSO contains actual repeating language (\"every year\") separately.\n" +
+    "- A note may mention more than one date for context (e.g. when something expires) while only one " +
+    "of them is when the TASK itself should happen. Use the date attached to the action the user needs " +
+    "to DO, never a date that's only explaining why the task exists.\n" +
     "- Never invent a date phrase that isn't actually in the note — leave date_phrase empty instead.\n\n" +
     "If the note contains no actionable to-do items at all, respond with exactly: []"
   );
 }
 
 /**
- * Seven fixed one-shot examples, injected as real prior user/assistant turns —
+ * Eight fixed one-shot examples, injected as real prior user/assistant turns —
  * same technique localLlama.ts's RAG prompt already relies on (see its own
  * FEW_SHOT_* comment for why a demonstrated turn steers a small instruct
  * model far more reliably than the same instruction written as prose).
@@ -379,6 +387,23 @@ function buildSystemPrompt(todayISO: string): string {
  * completeness and per-item recurrence judgment are taught as two
  * independent lessons, never blended into one example that could
  * accidentally re-teach the original positional-copying bug.
+ *
+ * The Shivanya's-passport entry (last) fixes a third, distinct failure mode
+ * from the first two: a false-positive recurrence triggered by the TASK'S
+ * SUBJECT MATTER rather than any actual repeating language. On-device, this
+ * exact note (a one-off passport renewal, no repeating words anywhere in
+ * it) came back with recurrence "monthly" — almost certainly because
+ * "renew" is a word strongly associated with recurring things (subscriptions,
+ * memberships) in the model's training data, even though nothing in this
+ * particular note says it repeats. The note also contains TWO dates (the
+ * passport's December expiry, and the October date the reminder should
+ * actually fire on), which is its own trap: extract the wrong one and the
+ * reminder fires when the passport is *about to be already expired*
+ * instead of a month ahead of that. This example demonstrates both fixes
+ * at once — recurrence "none" despite "renew," and the October phrase
+ * (not December) as date_phrase — since they're two symptoms of the same
+ * note in the on-device report, not because they need to be taught
+ * together in general.
  */
 const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
   {
@@ -420,6 +445,13 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
     input: "I need to call him this Friday about the invoice.",
     answer: JSON.stringify([
       { task: "Call him about the invoice", date_phrase: "this Friday", recurrence: "none" },
+    ]),
+  },
+  {
+    input:
+      "Shivanya's passport is going to expire in December and so I need a reminder for getting it renewed in the first week of October.",
+    answer: JSON.stringify([
+      { task: "Renew Shivanya's passport", date_phrase: "the first week of October", recurrence: "none" },
     ]),
   },
 ];
