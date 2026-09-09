@@ -13,6 +13,7 @@ import { HistorySheet, SHEET_SNAP_POINTS, type HistoryTab } from "../components/
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { NotesSheetContent, type DisplayNote } from "../components/NotesSheetContent";
 import { showToast } from "../components/Toast";
+import { TodosOverlay } from "../components/TodosOverlay";
 import { colors } from "../constants/theme";
 import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
@@ -94,10 +95,16 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const recorder = useVoiceRecorder();
   const chatSession = useChatSession();
-  // Only the count is used on this screen (the pill's badge) — the To-Dos
-  // screen itself (app/todos.tsx) owns its own useToDos() instance for the
-  // full list, refetched independently on its own focus.
+  // Only the count is used on this screen (the pill's badge) — TodosOverlay
+  // owns its own useToDos() instance for the full list, refetched
+  // independently whenever it's mounted.
   const { pendingCount } = useToDos();
+  // The To-Dos screen is a full-screen overlay rendered as a sibling of this
+  // screen's own content (see components/TodosOverlay.tsx's doc comment for
+  // why it's deliberately NOT a pushed expo-router route) rather than
+  // navigation state — same conditional-mount pattern as
+  // `isTextBoxExpanded`/`ExpandedTextOverlay` below.
+  const [isTodosVisible, setIsTodosVisible] = useState(false);
 
   // Cold-start layout guard (Requirement 3): the header/compose bar/sheet
   // all depend on `insets` for correct placement — rendering them before
@@ -803,14 +810,20 @@ export default function HomeScreen() {
           controls during (they're browsing/reading, not recording, while
           expanded — the chip's own "x" is right there to get back), hiding
           the cluster removes the collision outright. */}
-      {!isTextBoxExpanded && (
+      {/* Also hidden while TodosOverlay is open (isTodosVisible) — plain
+          sibling paint order alone didn't reliably keep this Animated.View
+          (entering/exiting FadeIn/FadeOut) behind the overlay on-device;
+          not mounting it at all while the overlay is up is the same
+          defensive pattern already used for isTextBoxExpanded above,
+          applied for the same reason. */}
+      {!isTextBoxExpanded && !isTodosVisible && (
         <Animated.View
           entering={FadeIn.duration(150)}
           exiting={FadeOut.duration(120)}
           pointerEvents="box-none"
           style={[styles.drawerFloatingStack, { right: 24 }, drawerFloatingStackAnimatedStyle]}
         >
-          <Pressable onPress={() => router.push("/todos")} style={styles.todosPill}>
+          <Pressable onPress={() => setIsTodosVisible(true)} style={styles.todosPill}>
             <Text style={styles.todosPillText}>
               {pendingCount > 0 ? `To-Dos (${pendingCount})` : "To-Dos"}
             </Text>
@@ -949,6 +962,13 @@ export default function HomeScreen() {
         onClose={() => setSelectedNoteId(null)}
         onDeleted={(noteId) => setAllNotes((prev) => prev.filter((note) => note.id !== noteId))}
       />
+
+      {/* Rendered last so it paints above absolutely everything — header,
+          center button, floating pills, the sheet, even ExpandedTextOverlay
+          — matching that overlay's own z-order reasoning. See
+          components/TodosOverlay.tsx's doc comment for why this is a plain
+          sibling overlay rather than a pushed route. */}
+      {isTodosVisible && <TodosOverlay onClose={() => setIsTodosVisible(false)} />}
     </Pressable>
   );
 }

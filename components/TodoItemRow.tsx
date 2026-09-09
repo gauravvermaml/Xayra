@@ -19,7 +19,7 @@ function formatCreatedDate(createdAtIso: string): string {
   return `Created ${d.getDate()} ${MONTH_ABBREVIATIONS[d.getMonth()]}`;
 }
 
-// Reinstated from the Phase 2 Step 2 stub (see app/todos.tsx's git history)
+// Reinstated from the Phase 2 Step 2 stub (see components/TodosOverlay.tsx's git history)
 // after the user flagged its absence: Step 3's redesign replaced the whole
 // row and dropped this due-date/frequency line without an equivalent
 // replacement. `actionDate` is a plain YYYY-MM-DD string (db/schema.ts) —
@@ -58,14 +58,14 @@ function formatRecurrenceLabel(recurrence: ToDo["recurrence"], interval: number)
 export type TodoItemRowProps = {
   item: ToDo;
   /** Checkbox tap — the parent owns the drop-animation/undo-snackbar
-   * lifecycle (see app/todos.tsx's `handleCheck`); this component only ever
+   * lifecycle (see components/TodosOverlay.tsx's `handleCheck`); this component only ever
    * reports the intent, never calls completeToDo itself. */
   onCheck: (item: ToDo) => void;
   /** Long-press — unchanged escape hatch from Phase 2 Step 2 for a to-do a
    * plain "complete" tap can't get rid of (e.g. wrongly tagged recurring). */
   onLongPressDelete: (item: ToDo) => void;
   /** Only ever called when `item.noteId` is set (the citation link is only
-   * rendered in that case) — see app/todos.tsx for how it opens
+   * rendered in that case) — see components/TodosOverlay.tsx for how it opens
    * NoteDetailModal. */
   onOpenSourceNote: (noteId: string) => void;
   onSaveText: (id: string, text: string) => void;
@@ -80,7 +80,7 @@ export type TodoItemRowProps = {
  * text or its in-place editor, edit pen).
  *
  * `Animated.View`'s `exiting`/`layout` props are what make the "drop on
- * check" behavior in app/todos.tsx actually visible: that screen filters a
+ * check" behavior in components/TodosOverlay.tsx actually visible: that screen filters a
  * checked item out of the list it passes to `FlatList` immediately (so the
  * completion logic and undo timer are unaffected by animation timing), and
  * Reanimated intercepts this component's unmount to play `FadeOutDown`

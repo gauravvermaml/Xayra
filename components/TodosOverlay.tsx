@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 
-import { AddTodoBottomSheet } from "../components/AddTodoBottomSheet";
-import { TodoItemRow } from "../components/TodoItemRow";
+import { AddTodoBottomSheet } from "./AddTodoBottomSheet";
+import { NoteDetailModal } from "./NoteDetailModal";
+import { TodoItemRow } from "./TodoItemRow";
 import { colors, spacing, typography } from "../constants/theme";
 import type { Recurrence } from "../db/schema";
 import { useToDos } from "../hooks/useToDos";
@@ -23,30 +23,44 @@ function todayIso(): string {
  * before its "Undo" window expires and the DB write actually happens. */
 const UNDO_WINDOW_MS = 3000;
 
+export type TodosOverlayProps = {
+  onClose: () => void;
+};
+
 /**
- * Production "Your To-Dos" screen (Phase 2 Step 3) — replaces the Step 2
- * stub. New in this pass: a real header with an Add (+) entry point, source-
- * note citations, in-place task editing, and drop-on-check completion with
- * an undo window instead of an immediate, irreversible `completeToDo` call.
+ * Production "Your To-Dos" screen — a full-screen overlay on app/index.tsx
+ * (mounted only while its pill's tap has set the parent's visibility state
+ * true, same conditional-mount pattern as ExpandedTextOverlay.tsx), NOT a
+ * pushed expo-router route the way this used to be (app/todos.tsx, now
+ * deleted).
  *
- * DROP-ON-CHECK / UNDO DESIGN: only ONE completion is ever "pending" (mid
- * undo-window) at a time, matching the common Gmail-archive-style pattern —
- * checking a second item while the first's snackbar is still showing
- * immediately commits the first (see `flushPending`) rather than trying to
- * track multiple concurrent undo timers and stacking snackbars, which the
- * spec never asked for and would add real complexity for a case (checking
- * several items within the same 3-second window) that's rare in practice.
- * The pending item is filtered out of the list handed to `FlatList`
- * immediately on check (not after the undo window), which is what lets
- * TodoItemRow's own `exiting` animation actually play — see that
- * component's doc comment for why this works with a plain `FlatList`.
+ * WHY AN OVERLAY, NOT A ROUTE — this is the one load-bearing fact about this
+ * file's existence: a route reached via `router.push` is a *pushed* screen
+ * in this app's react-native-screens-backed stack, and on Android, any extra
+ * window (an IME popup, a native `<Modal>` — it doesn't matter which)
+ * gaining and then losing focus while a pushed screen is on top reproducibly
+ * left that screen's native Fragment never reclaiming touch input again —
+ * checkbox, edit, plus, back, scroll, all dead, confirmed via `adb logcat`
+ * showing raw touch events still dispatching at the OS level while nothing
+ * reached React. This was reproduced multiple independent ways on-device
+ * (opening/closing the source-note citation modal; even a stray OS keyboard
+ * suggestion strip appearing and being dismissed with the hardware back
+ * button) and confirmed absent on `/index` itself — the ROOT screen, never
+ * pushed onto itself — which uses this exact same NoteDetailModal in the
+ * exact same way with zero issue, all session. Rendering this screen as a
+ * plain sibling of the root screen's own content (this file), instead of a
+ * separate pushed route, sidesteps the whole bug class: there's no pushed
+ * Fragment for a keyboard or Modal to ever leave stranded. Local
+ * `NoteDetailModal` usage below (rather than the routed `/note/[id]` this
+ * app briefly used) is deliberately restored to plain local state for the
+ * same reason — it's exactly as safe here as it already is on `/index`.
  */
-export default function TodosScreen() {
-  const router = useRouter();
+export function TodosOverlay({ onClose }: TodosOverlayProps) {
   const insets = useSafeAreaInsets();
   const { todos, pendingCount, addToDo, updateToDo, completeToDo, deleteToDo } = useToDos();
 
   const [isAddVisible, setIsAddVisible] = useState(false);
+  const [viewingNoteId, setViewingNoteId] = useState<string | null>(null);
 
   const pendingRef = useRef<{ id: string; timeoutId: ReturnType<typeof setTimeout> } | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -55,7 +69,7 @@ export default function TodosScreen() {
   /** Commits whatever completion is currently mid-undo-window right away —
    * called both when a new checkbox tap needs the previous one out of the
    * way, and when this screen unmounts, so a pending completion can never
-   * be silently lost by navigating away inside the 3-second window. */
+   * be silently lost by closing the overlay inside the 3-second window. */
   const flushPending = useCallback(() => {
     const current = pendingRef.current;
     if (!current) {
@@ -85,11 +99,9 @@ export default function TodosScreen() {
     [flushPending, completeToDo]
   );
 
-  // Commits any still-pending completion if the user navigates away inside
-  // the 3-second undo window — otherwise the setTimeout above would still
-  // fire later and complete it silently off-screen, which is harmless
-  // functionally but means a completion the user never actually confirmed
-  // "stuck" could go through without them present to see or undo it.
+  // Commits any still-pending completion if this overlay closes inside the
+  // 3-second undo window — otherwise the setTimeout above would still fire
+  // later and complete it silently off-screen.
   useEffect(() => {
     return () => flushPending();
   }, [flushPending]);
@@ -121,7 +133,6 @@ export default function TodosScreen() {
     [updateToDo]
   );
 
-
   const handleAddTodo = useCallback(
     (text: string, recurrence: Recurrence) => {
       void addToDo(text, todayIso(), recurrence);
@@ -134,85 +145,92 @@ export default function TodosScreen() {
   // animation and the undo window independent of each other.
   const visibleTodos = useMemo(() => todos.filter((item) => item.id !== pendingId), [todos, pendingId]);
 
-  // Routes to a real screen presented as a native modal (app/note/[id].tsx)
-  // rather than toggling a local RN <Modal> — see that file's doc comment
-  // for the on-device touch-freeze this replaced, specific to opening RN's
-  // own Modal on top of a pushed (router.push-reached) screen like this one.
-  const handleOpenSourceNote = useCallback(
-    (noteId: string) => {
-      router.push(`/note/${noteId}`);
-    },
-    [router]
-  );
-
   const renderItem = useCallback(
     ({ item }: { item: ToDo }) => (
       <TodoItemRow
         item={item}
         onCheck={handleCheck}
         onLongPressDelete={handleLongPressDelete}
-        onOpenSourceNote={handleOpenSourceNote}
+        onOpenSourceNote={setViewingNoteId}
         onSaveText={handleSaveText}
       />
     ),
-    [handleCheck, handleLongPressDelete, handleOpenSourceNote, handleSaveText]
+    [handleCheck, handleLongPressDelete, handleSaveText]
   );
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
-      <View style={styles.header}>
-        <Pressable
-          onPress={() => router.back()}
-          hitSlop={12}
-          style={({ pressed }) => [styles.headerButton, pressed && styles.headerButtonPressed]}
-        >
-          <Feather name="chevron-left" size={24} color={colors.textPrimary} />
-        </Pressable>
+    <View style={styles.overlay}>
+      <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
+        <View style={styles.header}>
+          <Pressable
+            onPress={onClose}
+            hitSlop={12}
+            style={({ pressed }) => [styles.headerButton, pressed && styles.headerButtonPressed]}
+          >
+            <Feather name="chevron-left" size={24} color={colors.textPrimary} />
+          </Pressable>
 
-        <View style={styles.headerTitleWrap}>
-          <Text style={styles.title}>Your To-Dos</Text>
-          <Text style={styles.subtitle}>{pendingCount === 0 ? "Nothing pending" : `${pendingCount} pending`}</Text>
-        </View>
+          <View style={styles.headerTitleWrap}>
+            <Text style={styles.title}>Your To-Dos</Text>
+            <Text style={styles.subtitle}>{pendingCount === 0 ? "Nothing pending" : `${pendingCount} pending`}</Text>
+          </View>
 
-        <Pressable
-          onPress={() => setIsAddVisible(true)}
-          hitSlop={12}
-          style={({ pressed }) => [styles.headerButton, pressed && styles.headerButtonPressed]}
-        >
-          <Feather name="plus" size={24} color={colors.textPrimary} />
-        </Pressable>
-      </View>
-
-      <FlatList
-        data={visibleTodos}
-        keyExtractor={(item) => item.id}
-        renderItem={renderItem}
-        contentContainerStyle={styles.listContent}
-        ItemSeparatorComponent={() => <View style={styles.itemGap} />}
-        ListEmptyComponent={
-          <Text style={styles.emptyText}>
-            To-dos extracted from your notes — or added directly — will show up here.
-          </Text>
-        }
-      />
-
-      {pendingId && (
-        <View style={[styles.snackbar, { bottom: insets.bottom + spacing.lg }]}>
-          <Text style={styles.snackbarText} numberOfLines={1}>
-            Completed "{pendingText}"
-          </Text>
-          <Pressable onPress={handleUndo} hitSlop={8}>
-            <Text style={styles.snackbarUndo}>UNDO</Text>
+          <Pressable
+            onPress={() => setIsAddVisible(true)}
+            hitSlop={12}
+            style={({ pressed }) => [styles.headerButton, pressed && styles.headerButtonPressed]}
+          >
+            <Feather name="plus" size={24} color={colors.textPrimary} />
           </Pressable>
         </View>
-      )}
 
-      <AddTodoBottomSheet visible={isAddVisible} onClose={() => setIsAddVisible(false)} onSave={handleAddTodo} />
-    </SafeAreaView>
+        <FlatList
+          data={visibleTodos}
+          keyExtractor={(item) => item.id}
+          renderItem={renderItem}
+          contentContainerStyle={styles.listContent}
+          ItemSeparatorComponent={() => <View style={styles.itemGap} />}
+          ListEmptyComponent={
+            <Text style={styles.emptyText}>
+              To-dos extracted from your notes — or added directly — will show up here.
+            </Text>
+          }
+        />
+
+        {pendingId && (
+          <View style={[styles.snackbar, { bottom: insets.bottom + spacing.lg }]}>
+            <Text style={styles.snackbarText} numberOfLines={1}>
+              Completed "{pendingText}"
+            </Text>
+            <Pressable onPress={handleUndo} hitSlop={8}>
+              <Text style={styles.snackbarUndo}>UNDO</Text>
+            </Pressable>
+          </View>
+        )}
+
+        <AddTodoBottomSheet visible={isAddVisible} onClose={() => setIsAddVisible(false)} onSave={handleAddTodo} />
+
+        <NoteDetailModal
+          noteId={viewingNoteId}
+          visible={viewingNoteId !== null}
+          onClose={() => setViewingNoteId(null)}
+        />
+      </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  overlay: {
+    // Written out directly rather than via StyleSheet.absoluteFillObject —
+    // matching ExpandedTextOverlay.tsx's own note that this RN version's
+    // type declarations don't expose that helper.
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
   safeArea: {
     flex: 1,
     backgroundColor: colors.background,
