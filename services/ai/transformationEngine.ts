@@ -28,6 +28,24 @@ function todayIso(): string {
   return formatIsoDate(new Date());
 }
 
+function addDays(date: Date, days: number): Date {
+  const result = new Date(date);
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+/** Next calendar date landing on `dayOfMonth`, strictly after `from` — used
+ * only to build the worked example below (buildFewShotAnswer), never for
+ * real extraction (the model resolves those dates itself). Rolls to next
+ * month whenever `from`'s day-of-month has already reached `dayOfMonth`. */
+function nextDayOfMonth(from: Date, dayOfMonth: number): Date {
+  const candidate = new Date(from.getFullYear(), from.getMonth(), dayOfMonth);
+  if (candidate <= from) {
+    candidate.setMonth(candidate.getMonth() + 1);
+  }
+  return candidate;
+}
+
 /**
  * System prompt for structured extraction, not conversation — deliberately
  * far shorter and stricter than localLlama.ts's RAG SYSTEM_PROMPT, since the
@@ -59,10 +77,46 @@ function buildSystemPrompt(todayISO: string): string {
   );
 }
 
+const FEW_SHOT_INPUT =
+  "Remind me to call the dentist tomorrow. Also need to pay the rent on the 1st of every month.";
+
+/**
+ * A fixed one-shot example, injected as a real prior user/assistant turn —
+ * same technique localLlama.ts's RAG prompt already relies on (see its own
+ * FEW_SHOT_* comment for why a demonstrated turn steers a small instruct
+ * model far more reliably than the same instruction written as prose).
+ * On-device testing found the bare system-prompt instructions above were not
+ * enough on their own: a single short voice transcript ("remind me to call
+ * the plumber tomorrow") produced a plain-prose reply with no JSON array at
+ * all, which extractJsonArray then had nothing to parse.
+ *
+ * The example's own dates are computed here in JS from the SAME `todayISO`
+ * passed to the real system prompt, rather than hardcoded — so the worked
+ * answer always resolves "tomorrow" and "the 1st of every month" against
+ * whatever day this actually runs on, keeping the demonstrated turn
+ * internally consistent with the "Today's Date" line the model is told
+ * right above it, instead of teaching it two different definitions of today.
+ */
+function buildFewShotAnswer(todayISO: string): string {
+  const [year, month, day] = todayISO.split("-").map(Number);
+  const today = new Date(year, month - 1, day);
+  const tomorrow = formatIsoDate(addDays(today, 1));
+  const nextFirstOfMonth = formatIsoDate(nextDayOfMonth(today, 1));
+
+  return JSON.stringify([
+    { task: "Call the dentist", action_date: tomorrow, recurrence: "none" },
+    { task: "Pay the rent", action_date: nextFirstOfMonth, recurrence: "monthly" },
+  ]);
+}
+
 function buildPrompt(rawText: string, todayISO: string): string {
   return (
     "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" +
     `${buildSystemPrompt(todayISO)}${EOT_TOKEN}` +
+    "<|start_header_id|>user<|end_header_id|>\n\n" +
+    `${FEW_SHOT_INPUT}${EOT_TOKEN}` +
+    "<|start_header_id|>assistant<|end_header_id|>\n\n" +
+    `${buildFewShotAnswer(todayISO)}${EOT_TOKEN}` +
     "<|start_header_id|>user<|end_header_id|>\n\n" +
     `${rawText}${EOT_TOKEN}` +
     "<|start_header_id|>assistant<|end_header_id|>\n\n"
@@ -166,13 +220,26 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
     });
     logDuration("Llama to-do extraction", start);
 
-    const parsed = extractJsonArray(result.text.trim());
-    return normalizeExtracted(parsed, todayISO);
+    const rawOutput = result.text.trim();
+    try {
+      const parsed = extractJsonArray(rawOutput);
+      return normalizeExtracted(parsed, todayISO);
+    } catch (parseErr) {
+      // Logged separately from the outer catch (which also covers
+      // getContext()/completion failures) specifically so a parse failure
+      // shows the actual text that broke it — "no JSON array found" alone
+      // isn't diagnosable on its own, and this is a 1B/3B model, so it will
+      // happen again on some future input shape.
+      console.warn(
+        "[transformationEngine] Failed to parse to-do extraction output — skipping.",
+        parseErr,
+        "Raw output:",
+        rawOutput.slice(0, 500)
+      );
+      return [];
+    }
   } catch (err) {
-    console.warn(
-      "[transformationEngine] To-do extraction unavailable or failed to parse — skipping.",
-      err
-    );
+    console.warn("[transformationEngine] To-do extraction unavailable — skipping.", err);
     return [];
   }
 }
