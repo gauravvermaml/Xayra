@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, FlatList, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
@@ -123,27 +123,6 @@ export default function TodosScreen() {
     [updateToDo]
   );
 
-  const flatListRef = useRef<FlatList<ToDo>>(null);
-
-  // Fix for "the keyboard covers up the to-do I'm editing": a plain FlatList
-  // (unlike ComposeBar/AddTodoBottomSheet, both hosted inside a
-  // @gorhom/bottom-sheet with keyboardBehavior="interactive" doing this for
-  // free) has no built-in notion of scrolling its focused row above the
-  // keyboard — app.json's softwareKeyboardLayoutMode="resize" shrinks the
-  // window when the keyboard opens, but never moves content within it.
-  // Waiting for the OS's own `keyboardDidShow` event (rather than a fixed
-  // setTimeout) means this fires exactly when the keyboard has actually
-  // finished animating in, whatever that takes on a given device.
-  const handleStartEdit = useCallback((id: string) => {
-    const index = todos.findIndex((t) => t.id === id);
-    if (index === -1) {
-      return;
-    }
-    const subscription = Keyboard.addListener("keyboardDidShow", () => {
-      subscription.remove();
-      flatListRef.current?.scrollToIndex({ index, viewPosition: 0.3, animated: true });
-    });
-  }, [todos]);
 
   const handleAddTodo = useCallback(
     (text: string, recurrence: Recurrence) => {
@@ -165,10 +144,9 @@ export default function TodosScreen() {
         onLongPressDelete={handleLongPressDelete}
         onOpenSourceNote={setViewingNoteId}
         onSaveText={handleSaveText}
-        onStartEdit={handleStartEdit}
       />
     ),
-    [handleCheck, handleLongPressDelete, handleSaveText, handleStartEdit]
+    [handleCheck, handleLongPressDelete, handleSaveText]
   );
 
   return (
@@ -197,7 +175,6 @@ export default function TodosScreen() {
       </View>
 
       <FlatList
-        ref={flatListRef}
         data={visibleTodos}
         keyExtractor={(item) => item.id}
         renderItem={renderItem}
@@ -208,13 +185,6 @@ export default function TodosScreen() {
             To-dos extracted from your notes — or added directly — will show up here.
           </Text>
         }
-        // Rows have no fixed height (the optional "Source Note" line and the
-        // in-place editor both change it), so scrollToIndex can't measure
-        // ahead — this estimate-then-retry is the library's documented
-        // fallback for exactly that case.
-        onScrollToIndexFailed={(info) => {
-          flatListRef.current?.scrollToOffset({ offset: info.averageItemLength * info.index, animated: true });
-        }}
       />
 
       {pendingId && (

@@ -69,10 +69,6 @@ export type TodoItemRowProps = {
    * NoteDetailModal. */
   onOpenSourceNote: (noteId: string) => void;
   onSaveText: (id: string, text: string) => void;
-  /** Fired the instant this row's inline editor opens — lets app/todos.tsx
-   * scroll the row into view above the keyboard (see this component's
-   * `isEditing` state doc comment below for why that's needed at all). */
-  onStartEdit: (id: string) => void;
 };
 
 /**
@@ -93,21 +89,9 @@ export type TodoItemRowProps = {
  * (no `Animated.FlatList` needed) since it's this row's own mount/unmount
  * Reanimated is hooking into, not anything list-virtualization-specific.
  */
-export function TodoItemRow({
-  item,
-  onCheck,
-  onLongPressDelete,
-  onOpenSourceNote,
-  onSaveText,
-  onStartEdit,
-}: TodoItemRowProps) {
+export function TodoItemRow({ item, onCheck, onLongPressDelete, onOpenSourceNote, onSaveText }: TodoItemRowProps) {
   const [isEditing, setIsEditing] = useState(false);
   const [draftText, setDraftText] = useState(item.text);
-
-  const startEditing = () => {
-    setIsEditing(true);
-    onStartEdit(item.id);
-  };
 
   const commitEdit = () => {
     setIsEditing(false);
@@ -156,7 +140,7 @@ export function TodoItemRow({
             <Text style={styles.taskText}>{item.text}</Text>
           )}
 
-          <Pressable onPress={startEditing} hitSlop={10} style={styles.editButton}>
+          <Pressable onPress={() => setIsEditing(true)} hitSlop={10} style={styles.editButton}>
             <Feather name="edit-2" size={16} color={colors.textMuted} />
           </Pressable>
         </View>
