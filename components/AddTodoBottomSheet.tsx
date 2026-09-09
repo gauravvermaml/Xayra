@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
-import BottomSheet, { BottomSheetBackdrop, BottomSheetTextInput, type BottomSheetBackdropProps } from "@gorhom/bottom-sheet";
+import BottomSheet, {
+  BottomSheetBackdrop,
+  BottomSheetTextInput,
+  BottomSheetView,
+  type BottomSheetBackdropProps,
+} from "@gorhom/bottom-sheet";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { RECURRENCE_OPTIONS, type Recurrence } from "../db/schema";
@@ -18,7 +23,19 @@ const RECURRENCE_PICKER_LABELS: Record<Recurrence, string> = {
   monthly: "Monthly",
 };
 
-const SNAP_POINTS = ["50%"];
+// No fixed `snapPoints` array — this sheet uses dynamic sizing (the
+// library's default: `enableDynamicSizing` is `true` unless explicitly
+// turned off) so it sizes itself to its actual measured content instead of
+// a hardcoded percentage. A first attempt explicitly set
+// `enableDynamicSizing={false}` with `snapPoints={["50%"]}` to fix the (+)
+// button silently failing to open the sheet — that combination did open the
+// sheet, but also reproducibly froze the ENTIRE /todos screen (checkbox,
+// edit, back, scroll — everything) on-device, confirmed by reverting it and
+// retesting on a completely fresh install/Metro cache: the freeze followed
+// this prop combination, not any other code on the screen. Plain dynamic
+// sizing with no snapPoints is the standard "on-demand sheet sized to its
+// form" pattern and doesn't hit whatever native layout contention the fixed-
+// percentage + disabled-dynamic-sizing combination triggered on this device.
 
 /**
  * On-demand "Add a to-do" sheet — a plain `<BottomSheet>` (not
@@ -81,15 +98,6 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
     <BottomSheet
       ref={sheetRef}
       index={-1}
-      snapPoints={SNAP_POINTS}
-      // Required whenever explicit `snapPoints` are given — v5 defaults this
-      // to `true`, which sizes the sheet from measured content height and
-      // ignores `snapPoints` entirely. Without it, `snapToIndex(0)` resolves
-      // against a height that was never established, so the sheet never
-      // visibly opens even though the (+) button's own onPress does fire
-      // (confirmed on-device: HistorySheet.tsx sets this same prop for the
-      // same reason).
-      enableDynamicSizing={false}
       enablePanDownToClose
       onClose={handleSheetClosed}
       backdropComponent={renderBackdrop}
@@ -99,7 +107,7 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
       keyboardBlurBehavior="restore"
       android_keyboardInputMode="adjustResize"
     >
-      <View style={styles.content}>
+      <BottomSheetView style={styles.content}>
         <Text style={styles.title}>New To-Do</Text>
 
         <BottomSheetTextInput
@@ -134,7 +142,7 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
         >
           <Text style={styles.saveButtonText}>Save Task</Text>
         </Pressable>
-      </View>
+      </BottomSheetView>
     </BottomSheet>
   );
 }
@@ -151,7 +159,10 @@ const styles = StyleSheet.create({
     width: 36,
   },
   content: {
-    flex: 1,
+    // No `flex: 1` — dynamic sizing (see this file's top-of-file doc
+    // comment) measures this view's own natural content height to size the
+    // sheet, which a flex:1 child (stretching to fill an as-yet-undefined
+    // available height) defeats.
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.sm,
     paddingBottom: spacing.xl,

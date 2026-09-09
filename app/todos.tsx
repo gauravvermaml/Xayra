@@ -6,7 +6,6 @@ import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 
 import { AddTodoBottomSheet } from "../components/AddTodoBottomSheet";
-import { NoteDetailModal } from "../components/NoteDetailModal";
 import { TodoItemRow } from "../components/TodoItemRow";
 import { colors, spacing, typography } from "../constants/theme";
 import type { Recurrence } from "../db/schema";
@@ -48,7 +47,6 @@ export default function TodosScreen() {
   const { todos, pendingCount, addToDo, updateToDo, completeToDo, deleteToDo } = useToDos();
 
   const [isAddVisible, setIsAddVisible] = useState(false);
-  const [viewingNoteId, setViewingNoteId] = useState<string | null>(null);
 
   const pendingRef = useRef<{ id: string; timeoutId: ReturnType<typeof setTimeout> } | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -136,17 +134,28 @@ export default function TodosScreen() {
   // animation and the undo window independent of each other.
   const visibleTodos = useMemo(() => todos.filter((item) => item.id !== pendingId), [todos, pendingId]);
 
+  // Routes to a real screen presented as a native modal (app/note/[id].tsx)
+  // rather than toggling a local RN <Modal> — see that file's doc comment
+  // for the on-device touch-freeze this replaced, specific to opening RN's
+  // own Modal on top of a pushed (router.push-reached) screen like this one.
+  const handleOpenSourceNote = useCallback(
+    (noteId: string) => {
+      router.push(`/note/${noteId}`);
+    },
+    [router]
+  );
+
   const renderItem = useCallback(
     ({ item }: { item: ToDo }) => (
       <TodoItemRow
         item={item}
         onCheck={handleCheck}
         onLongPressDelete={handleLongPressDelete}
-        onOpenSourceNote={setViewingNoteId}
+        onOpenSourceNote={handleOpenSourceNote}
         onSaveText={handleSaveText}
       />
     ),
-    [handleCheck, handleLongPressDelete, handleSaveText]
+    [handleCheck, handleLongPressDelete, handleOpenSourceNote, handleSaveText]
   );
 
   return (
@@ -199,8 +208,6 @@ export default function TodosScreen() {
       )}
 
       <AddTodoBottomSheet visible={isAddVisible} onClose={() => setIsAddVisible(false)} onSave={handleAddTodo} />
-
-      <NoteDetailModal noteId={viewingNoteId} visible={viewingNoteId !== null} onClose={() => setViewingNoteId(null)} />
     </SafeAreaView>
   );
 }

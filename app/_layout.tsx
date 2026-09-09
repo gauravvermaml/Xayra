@@ -38,6 +38,13 @@ export default function RootLayout() {
             it reads as a dismissible overlay over the jet-black canvas
             underneath instead of navigating away from it. */}
         <Stack.Screen name="settings" options={{ presentation: "modal" }} />
+        {/* Source-note citation from a to-do (components/TodoItemRow.tsx),
+            deliberately a routed native modal rather than a locally-toggled
+            RN <Modal> (which is what components/NoteDetailModal.tsx uses,
+            fine on this root "/" screen but NOT safe to open from a screen
+            reached via router.push — see app/note/[id].tsx's doc comment for
+            the on-device freeze this replaced). */}
+        <Stack.Screen name="note/[id]" options={{ presentation: "modal" }} />
       </Stack>
       {/* Mounted once at the root so every screen's copy-to-clipboard
           feedback (see utils/clipboard.ts) renders on the same overlay,
