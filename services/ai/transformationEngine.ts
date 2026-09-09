@@ -133,19 +133,35 @@ function buildSystemPrompt(todayISO: string): string {
     "no date mentioned at all. Copy the phrase as written; do NOT calculate or convert it into a " +
     "calendar date yourself.\n" +
     '  "recurrence": one of "none", "daily", "weekly", or "monthly"\n\n' +
-    "How to choose recurrence — match the task's OWN wording against this table, and nothing else:\n" +
-    '  "every day" / "each day" / "daily"                          → "daily"\n' +
-    '  "every Monday" / "every Friday night" / "every week" / "weekly" (ANY specific weekday,\n' +
-    '  not just Monday, means it happens once every 7 days)         → "weekly"\n' +
-    '  "every month" / "monthly" / "the 1st of every month"         → "monthly"\n' +
-    "  no repeating words at all                                    → \"none\"\n\n" +
+    "How to choose recurrence — the schema only has FOUR values, so map whatever cadence the task " +
+    "actually describes onto the CLOSEST one of these four. Match against every row below, not just " +
+    "the first one that looks similar:\n" +
+    '  → "daily":   "every day", "each day", "daily", "everyday", "every morning", "every night",\n' +
+    '               "every evening", "every X hours", "a few times a day", "twice a day"\n' +
+    '  → "weekly":  "every Monday" / "every Friday night" / any SPECIFIC weekday name — this always\n' +
+    "               means once every 7 days, never daily. Also: \"every week\", \"weekly\", \"each\n" +
+    '               week", "every weekend", "every other week", "fortnightly", "biweekly" (these last\n' +
+    "               three are technically every 2 weeks, but weekly is the closest of the four\n" +
+    '               options, so use it).\n' +
+    '  → "monthly": "every month", "monthly", "each month", "the 1st/15th/etc. of every month",\n' +
+    '               "every quarter", "quarterly", "every 3 months", "every year", "yearly",\n' +
+    "               \"annually\" (yearly/quarterly have no exact match among the four options —\n" +
+    '               monthly is the closest, so use it).\n' +
+    '  → "none":    the task has NO repeating language at all — this is the default; also use "none" ' +
+    "for a task tied to a SINGLE specific occurrence (\"this Monday\", \"next Monday\", \"on Friday\", " +
+    "\"this weekend\") — those are one-off dates that happen to fall on a named day, not a repeating " +
+    "schedule, and must never be confused with \"every Monday\" wording. Also use \"none\" for a task " +
+    "that repeats only in response to an event rather than a time interval (\"every time I see the " +
+    "dentist\", \"whenever it rains\") — there's no calendar cadence to schedule there.\n\n" +
     "Rules:\n" +
     "- \"none\" is the default for every task. Only move off it when THAT task's own wording, read " +
-    "on its own, clearly says it repeats — never because a different task in the same note repeats, " +
-    "and never because an earlier example happened to use a non-\"none\" value. Judge every task by " +
-    "its own words alone.\n" +
+    "on its own, clearly says it repeats on a time-based schedule — never because a different task in " +
+    "the same note repeats, and never because an earlier example happened to use a non-\"none\" " +
+    "value. Judge every task by its own words alone.\n" +
     "- A specific weekday (\"every Monday\", \"every Friday\") is WEEKLY, never daily — daily means " +
-    "literally every single day, not once a week on a named day.\n" +
+    "literally every single day, not once a week on a named day. A single mention of a weekday with " +
+    "no \"every\"/\"each\" attached (\"call him Friday\", \"next Monday\") is a one-off date, not " +
+    "recurring at all — set recurrence to \"none\" for those.\n" +
     "- Never invent a date phrase that isn't actually in the note — leave date_phrase empty instead.\n\n" +
     "If the note contains no actionable to-do items at all, respond with exactly: []"
   );
@@ -171,6 +187,13 @@ function buildSystemPrompt(todayISO: string): string {
  * miss that prompted this fix: "every Monday night" was previously
  * misclassified as "daily" — this turn shows that precise phrasing
  * resolved to "weekly" instead.
+ *
+ * The fifth entry demonstrates the other real confusion the recurrence
+ * table above now calls out explicitly: a weekday mentioned WITHOUT
+ * "every"/"each" ("call him this Friday") is a single one-off date, not a
+ * recurring schedule — easy for a small model to conflate with the
+ * "every Friday" example two entries above it, so it gets its own
+ * side-by-side demonstration rather than relying on the prose rule alone.
  */
 const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
   {
@@ -192,6 +215,12 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
   {
     input: "I should call mom.",
     answer: JSON.stringify([{ task: "Call mom", date_phrase: "", recurrence: "none" }]),
+  },
+  {
+    input: "I need to call him this Friday about the invoice.",
+    answer: JSON.stringify([
+      { task: "Call him about the invoice", date_phrase: "this Friday", recurrence: "none" },
+    ]),
   },
 ];
 
