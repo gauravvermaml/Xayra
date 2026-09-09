@@ -564,11 +564,18 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
     const result = await runQueuedLlamaCompletion({
       prompt,
       n_predict: 512,
-      // Near-deterministic: this is structured extraction against a fixed
-      // schema, not open-ended conversation, so the warmth/variety
-      // localLlama.ts's RAG generation tunes for would only hurt here.
-      temperature: 0.1,
-      top_p: 0.9,
+      // Fully greedy, not just "near-deterministic" — this is structured
+      // extraction against a fixed schema, not open-ended conversation, so
+      // there's no warmth/variety worth preserving the way localLlama.ts's
+      // RAG generation tunes for. On-device testing found even temperature
+      // 0.1 let the same exact note produce two DIFFERENT wrong answers
+      // across two runs (one got the date right and recurrence wrong, the
+      // other the reverse) — confusing on its own regardless of which run
+      // happened to be more correct. temperature: 0 removes that source of
+      // run-to-run inconsistency entirely; whatever the model's single best
+      // read of a hard case is, it now gives the same answer to it every
+      // time, which is itself worth having independent of raw accuracy.
+      temperature: 0,
       // Grammar-constrained decoding — see TODO_EXTRACTION_GRAMMAR's own
       // comment for what this guarantees (and doesn't). `stop` is kept as a
       // belt-and-suspenders backstop, though grammar sampling should already
