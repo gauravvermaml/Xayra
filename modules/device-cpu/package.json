@@ -1,0 +1,9 @@
+{
+  "name": "expo-device-cpu",
+  "version": "1.0.0",
+  "description": "Local Expo module exposing the device's real CPU core count (Runtime.getRuntime().availableProcessors()), so on-device inference (services/ai/localLlama.ts) can size its thread pool to the actual hardware instead of a fixed number tuned for one test device.",
+  "main": "index.ts",
+  "types": "index.ts",
+  "license": "UNLICENSED",
+  "private": true
+}

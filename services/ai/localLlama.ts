@@ -1,7 +1,52 @@
+import { getCpuCoreCount } from "expo-device-cpu";
 import * as FileSystem from "expo-file-system/legacy";
 import { initLlama, LlamaContext, type CompletionParams, type NativeCompletionResult, type TokenData } from "llama.rn";
 
 import { logDuration, nowMs } from "./perf";
+
+/**
+ * Sizes the inference thread pool to the ACTUAL device, not a number tuned
+ * for whichever phone happened to be on the test bench. This replaces a
+ * flat `n_threads: 4` whose own doc comment assumed the Galaxy A50 this
+ * project has been testing on "has 4 usable cores" — wrong: `getCpuCoreCount()`
+ * (modules/device-cpu, backed by Android's `Runtime.getRuntime().availableProcessors()`)
+ * confirms it's actually an 8-core chip (Exynos 9610, 4×Cortex-A73 +
+ * 4×Cortex-A53). That "4" was coincidentally already only half the device's
+ * cores, and it was STILL enough for a GBNF-grammar-constrained to-do
+ * extraction to run 140+ seconds and starve the OS's own input-dispatch and
+ * render threads of CPU time for that entire stretch — an "everything is
+ * frozen, no crash, no exception" symptom that survived a long series of
+ * UI-layer fixes, because the real cause was never in the UI at all.
+ *
+ * This context is shared by both interactive RAG chat and the background
+ * to-do extraction (services/ai/transformationEngine.ts), via one
+ * serialized completion queue (runQueuedLlamaCompletion below) — llama.rn's
+ * thread pool is attached once when the context loads and is NOT
+ * reconfigurable per completion call (confirmed against llama.rn's own
+ * native source: a per-call `n_threads` in CompletionParams updates a
+ * stored params struct that nothing ever re-applies to the live threadpool
+ * via `llama_set_n_threads`, so it's silently a no-op — an earlier version
+ * of this fix tried exactly that, tuned for extraction alone, before this
+ * was discovered). One shared value has to be conservative enough to cover
+ * BOTH — including a background task nobody's watching a spinner for — so a
+ * FIXED PROPORTION of the device's cores, not a fixed thread count, is what
+ * generalizes: even reserving half (this device's actual real-world
+ * behavior for months) already froze the whole app, so this reserves three
+ * quarters of the device's cores for the OS/UI, using at most a quarter for
+ * inference — 1 thread on a 4-core device, 2 on this 8-core one, 4 on a
+ * 16-core device, and so on. This does trade some completion speed (both
+ * chat and extraction genuinely run slower) for the one property that
+ * actually matters more: the app staying responsive while either runs. If
+ * the native call ever fails, 2 threads is a safe floor for an unknown
+ * device.
+ */
+function computeInferenceThreadCount(): number {
+  const cores = getCpuCoreCount();
+  if (!cores) {
+    return 2;
+  }
+  return Math.max(1, Math.floor(cores / 4));
+}
 
 /**
  * Not bundled — hundreds of MB to ~2GB — same resolution pattern as
@@ -254,10 +299,11 @@ async function getContext(): Promise<LlamaContext> {
         // faster to reload since the pages are often still resident. (Named
         // `use_mmap`, not `useMmap` — llama.rn's option names mirror
         // llama.cpp's own C API snake_case, same as n_ctx/n_threads below.)
-        // `n_threads: 4` matches this project's target devices (the Galaxy
-        // A50 this project tests on has 4 usable cores after reserving the
-        // rest for the OS/foreground UI thread).
-        return initLlama({ model: path, n_ctx: 4096, n_threads: 4, use_mmap: true });
+        // n_threads is sized to this actual device's core count — see
+        // computeInferenceThreadCount()'s doc comment above for why a flat
+        // number here was the real cause of a much bigger bug than slow
+        // extraction.
+        return initLlama({ model: path, n_ctx: 4096, n_threads: computeInferenceThreadCount(), use_mmap: true });
       })
       .then((context) => {
         logDuration("Llama cold-start (GGUF model load from disk)", coldStart);
