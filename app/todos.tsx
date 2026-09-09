@@ -26,6 +26,24 @@ const RECURRENCE_LABELS: Record<ToDo["recurrence"], string> = {
   monthly: "Repeats monthly",
 };
 
+const RECURRENCE_UNIT_NOUNS: Record<Exclude<ToDo["recurrence"], "none">, string> = {
+  daily: "day",
+  weekly: "week",
+  monthly: "month",
+};
+
+/** "Repeats weekly" at interval 1 (unchanged copy); "Repeats every 2 weeks"
+ * etc. once `recurrenceInterval` (see db/schema.ts) is anything else. */
+function formatRecurrenceLabel(recurrence: ToDo["recurrence"], recurrenceInterval: number): string {
+  if (recurrence === "none") {
+    return "";
+  }
+  if (recurrenceInterval <= 1) {
+    return RECURRENCE_LABELS[recurrence];
+  }
+  return `Repeats every ${recurrenceInterval} ${RECURRENCE_UNIT_NOUNS[recurrence]}s`;
+}
+
 /**
  * Phase 2 Step 2: a minimal but fully functional list so the "To-Dos" pill's
  * navigation and the useToDos hook's reactive updates (including background
@@ -69,7 +87,9 @@ export default function TodosScreen() {
         <Text style={styles.rowTask}>{item.text}</Text>
         <Text style={styles.rowMeta}>
           {formatActionDate(item.actionDate)}
-          {item.recurrence !== "none" ? ` · ${RECURRENCE_LABELS[item.recurrence]}` : ""}
+          {item.recurrence !== "none"
+            ? ` · ${formatRecurrenceLabel(item.recurrence, item.recurrenceInterval)}`
+            : ""}
         </Text>
       </View>
     </Pressable>

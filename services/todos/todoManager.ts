@@ -9,16 +9,25 @@ export type ToDo = {
   actionDate: string; // ISO YYYY-MM-DD
   isCompleted: boolean;
   recurrence: Recurrence;
+  /** Multiplier on `recurrence`'s unit — see db/schema.ts's doc comment on
+   * the `recurrenceInterval` column. Always >= 1. */
+  recurrenceInterval: number;
   createdAt: string; // ISO timestamp
 };
 
 function rowToToDo(row: Record<string, unknown>): ToDo {
+  // `?? 1` covers a row written before this column existed reaching here
+  // between the ALTER TABLE migration and any backfill — op-sqlite returns
+  // the column's own DEFAULT 1 for those anyway, so this is a belt-and-
+  // suspenders fallback, not the primary path.
+  const interval = Number(row.recurrence_interval);
   return {
     id: row.id as string,
     text: row.text as string,
     actionDate: row.action_date as string,
     isCompleted: Boolean(row.is_completed),
     recurrence: row.recurrence as Recurrence,
+    recurrenceInterval: Number.isFinite(interval) && interval >= 1 ? interval : 1,
     createdAt: row.created_at as string,
   };
 }
@@ -55,23 +64,28 @@ function notifyToDosChanged(): void {
 }
 
 /** Adds a single to-do, either entered directly or from a single extracted
- * item in services/ai/transformationEngine.ts's output. */
+ * item in services/ai/transformationEngine.ts's output. `recurrenceInterval`
+ * is clamped to at least 1 — a 0 or negative value would either spawn the
+ * next occurrence on the same day (0) or drift backward in time (negative)
+ * in computeNextActionDate below. */
 export async function addToDo(
   text: string,
   actionDate: string,
-  recurrence: Recurrence = "none"
+  recurrence: Recurrence = "none",
+  recurrenceInterval = 1
 ): Promise<ToDo> {
   const db = await getRawDatabase();
   const id = Crypto.randomUUID();
   const createdAt = new Date().toISOString();
+  const interval = recurrenceInterval >= 1 ? Math.round(recurrenceInterval) : 1;
 
   await db.execute(
-    "INSERT INTO todos (id, text, action_date, is_completed, recurrence, created_at) VALUES (?, ?, ?, 0, ?, ?)",
-    [id, text, actionDate, recurrence, createdAt]
+    "INSERT INTO todos (id, text, action_date, is_completed, recurrence, recurrence_interval, created_at) VALUES (?, ?, ?, 0, ?, ?, ?)",
+    [id, text, actionDate, recurrence, interval, createdAt]
   );
   notifyToDosChanged();
 
-  return { id, text, actionDate, isCompleted: false, recurrence, createdAt };
+  return { id, text, actionDate, isCompleted: false, recurrence, recurrenceInterval: interval, createdAt };
 }
 
 /** Lists every not-yet-completed to-do, soonest action date first. Used by
@@ -81,7 +95,7 @@ export async function getPendingToDos(): Promise<ToDo[]> {
 
   const result = await db.execute(
     `
-      SELECT id, text, action_date, is_completed, recurrence, created_at
+      SELECT id, text, action_date, is_completed, recurrence, recurrence_interval, created_at
       FROM todos
       WHERE is_completed = 0
       ORDER BY action_date ASC, created_at ASC
@@ -104,6 +118,7 @@ export type ToDoUpdateFields = Partial<{
   text: string;
   actionDate: string;
   recurrence: Recurrence;
+  recurrenceInterval: number;
 }>;
 
 /** Patches one or more editable fields on an existing to-do (e.g. a user
@@ -111,7 +126,7 @@ export type ToDoUpdateFields = Partial<{
  * rather than issuing a no-column `UPDATE ... SET WHERE`. */
 export async function updateToDo(id: string, fields: ToDoUpdateFields): Promise<void> {
   const setClauses: string[] = [];
-  const params: string[] = [];
+  const params: (string | number)[] = [];
 
   if (fields.text !== undefined) {
     setClauses.push("text = ?");
@@ -124,6 +139,10 @@ export async function updateToDo(id: string, fields: ToDoUpdateFields): Promise<
   if (fields.recurrence !== undefined) {
     setClauses.push("recurrence = ?");
     params.push(fields.recurrence);
+  }
+  if (fields.recurrenceInterval !== undefined) {
+    setClauses.push("recurrence_interval = ?");
+    params.push(fields.recurrenceInterval >= 1 ? Math.round(fields.recurrenceInterval) : 1);
   }
   if (setClauses.length === 0) {
     return;
@@ -158,25 +177,29 @@ function formatIsoDate(date: Date): string {
 }
 
 /**
- * Advances a recurring to-do's `action_date` by one interval. Parses
- * `action_date` into local-time year/month/day components (rather than
- * `new Date(actionDate)`, which JS parses as UTC midnight) and reconstructs
- * it as a local `Date` before adding the interval — otherwise a device west
- * of UTC would see the date roll back a day on every respawn.
+ * Advances a recurring to-do's `action_date` by `interval` units of
+ * `recurrence` — `("weekly", 2)` means 2 weeks, matching the standard
+ * iCalendar RRULE FREQ+INTERVAL pattern (see db/schema.ts's doc comment on
+ * `recurrenceInterval`). Parses `action_date` into local-time year/month/day
+ * components (rather than `new Date(actionDate)`, which JS parses as UTC
+ * midnight) and reconstructs it as a local `Date` before adding the
+ * interval — otherwise a device west of UTC would see the date roll back a
+ * day on every respawn.
  */
-function computeNextActionDate(actionDate: string, recurrence: Recurrence): string {
+function computeNextActionDate(actionDate: string, recurrence: Recurrence, interval: number): string {
   const [year, month, day] = actionDate.split("-").map(Number);
   const next = new Date(year, month - 1, day);
+  const step = interval >= 1 ? interval : 1;
 
   switch (recurrence) {
     case "daily":
-      next.setDate(next.getDate() + 1);
+      next.setDate(next.getDate() + step);
       break;
     case "weekly":
-      next.setDate(next.getDate() + 7);
+      next.setDate(next.getDate() + step * 7);
       break;
     case "monthly":
-      next.setMonth(next.getMonth() + 1);
+      next.setMonth(next.getMonth() + step);
       break;
     case "none":
       return actionDate;
@@ -199,7 +222,7 @@ export async function completeToDo(id: string): Promise<void> {
   const db = await getRawDatabase();
 
   const lookup = await db.execute(
-    "SELECT text, action_date, recurrence FROM todos WHERE id = ?",
+    "SELECT text, action_date, recurrence, recurrence_interval FROM todos WHERE id = ?",
     [id]
   );
   const row = lookup.rows[0];
@@ -210,17 +233,25 @@ export async function completeToDo(id: string): Promise<void> {
   const text = row.text as string;
   const actionDate = row.action_date as string;
   const recurrence = row.recurrence as Recurrence;
+  const rawInterval = Number(row.recurrence_interval);
+  const recurrenceInterval = Number.isFinite(rawInterval) && rawInterval >= 1 ? rawInterval : 1;
 
   await db.transaction(async (tx) => {
-    await tx.execute("UPDATE todos SET is_completed = 1, recurrence = 'none' WHERE id = ?", [id]);
+    // recurrence_interval is also reset to 1 alongside recurrence — a
+    // completed row is done for good, so its interval no longer means
+    // anything; only the freshly-spawned row below carries it forward.
+    await tx.execute(
+      "UPDATE todos SET is_completed = 1, recurrence = 'none', recurrence_interval = 1 WHERE id = ?",
+      [id]
+    );
 
     if (recurrence !== "none") {
-      const nextDate = computeNextActionDate(actionDate, recurrence);
+      const nextDate = computeNextActionDate(actionDate, recurrence, recurrenceInterval);
       const nextId = Crypto.randomUUID();
       const createdAt = new Date().toISOString();
       await tx.execute(
-        "INSERT INTO todos (id, text, action_date, is_completed, recurrence, created_at) VALUES (?, ?, ?, 0, ?, ?)",
-        [nextId, text, nextDate, recurrence, createdAt]
+        "INSERT INTO todos (id, text, action_date, is_completed, recurrence, recurrence_interval, created_at) VALUES (?, ?, ?, 0, ?, ?, ?)",
+        [nextId, text, nextDate, recurrence, recurrenceInterval, createdAt]
       );
     }
   });

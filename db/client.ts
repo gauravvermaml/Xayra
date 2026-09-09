@@ -147,6 +147,18 @@ async function createCoreTables(db: DB): Promise<void> {
       created_at TEXT NOT NULL
     );
   `);
+  // `CREATE TABLE IF NOT EXISTS` above is a no-op against a todos table that
+  // already existed before `recurrence_interval` was introduced (see
+  // db/schema.ts's doc comment on it) — same ALTER-and-catch-duplicate-column
+  // pattern as `notes`' own migrations above.
+  try {
+    await db.execute("ALTER TABLE todos ADD COLUMN recurrence_interval INTEGER NOT NULL DEFAULT 1;");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/duplicate column/i.test(message)) {
+      throw err;
+    }
+  }
 }
 
 /**

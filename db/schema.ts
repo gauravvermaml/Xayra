@@ -63,6 +63,20 @@ export const todos = sqliteTable("todos", {
   actionDate: text("action_date").notNull(),
   isCompleted: integer("is_completed").notNull().default(0),
   recurrence: text("recurrence").notNull().default("none"),
+  /**
+   * Multiplier on `recurrence`'s base unit — `recurrence: "weekly"` +
+   * `recurrenceInterval: 2` means "every 2 weeks", matching the standard
+   * iCalendar RRULE FREQ+INTERVAL pattern rather than inventing a bespoke
+   * one. Added after on-device testing showed the bare 4-value enum
+   * silently mis-rounding "every second week"/"every second Monday" to a
+   * plain weekly respawn — see services/ai/transformationEngine.ts's
+   * `resolveRecurrenceInterval()` for how this is derived (deterministically
+   * from the extracted date phrase, never asked of the LLM itself) and
+   * services/todos/todoManager.ts's `computeNextActionDate()` for how it's
+   * applied. Always >= 1; 1 means "every single occurrence of the unit",
+   * i.e. the exact previous (interval-less) behavior.
+   */
+  recurrenceInterval: integer("recurrence_interval").notNull().default(1),
   createdAt: text("created_at").notNull(),
 });
 

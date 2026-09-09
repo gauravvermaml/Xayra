@@ -11,6 +11,13 @@ export type ExtractedToDo = {
   task: string;
   actionDate: string; // ISO YYYY-MM-DD
   recurrence: Recurrence;
+  /** Multiplier on `recurrence`'s unit — see db/schema.ts's doc comment on
+   * `recurrenceInterval`. Derived deterministically from the same date
+   * phrase the model extracts (see resolveRecurrenceInterval below), never
+   * asked of the LLM itself as a separate field — a numeric interval is one
+   * more thing a 1B model would get wrong, on top of everything else this
+   * file already had to move out of its hands. */
+  recurrenceInterval: number;
 };
 
 /** Llama-3.2's instruct template stop marker — see localLlama.ts's own
@@ -106,6 +113,92 @@ function resolveActionDate(datePhrase: string, todayISO: string): string {
   }
 
   return chronoResult ? formatIsoDate(chronoResult) : todayISO;
+}
+
+/** Ordinal/relative words meaning "every OTHER occurrence" or beyond —
+ * "every second Monday"/"every other week" both mean interval 2, same as
+ * the standard iCalendar RRULE INTERVAL semantics this whole scheme mirrors
+ * (see db/schema.ts's `recurrenceInterval` doc comment). Deliberately
+ * excludes "first"/"1st" — "every first Monday of the month" is a distinct,
+ * more complex pattern (nth-weekday-of-month) this schema doesn't attempt
+ * to represent; it falls through to the interval-1 default below instead of
+ * being misread as interval 1 with false confidence. */
+const ORDINAL_WORD_TO_INTERVAL: Record<string, number> = {
+  other: 2,
+  second: 2,
+  "2nd": 2,
+  two: 2,
+  third: 3,
+  "3rd": 3,
+  three: 3,
+  fourth: 4,
+  "4th": 4,
+  four: 4,
+  fifth: 5,
+  "5th": 5,
+  five: 5,
+};
+
+/**
+ * Derives the recurrence interval multiplier from the SAME date phrase
+ * resolveActionDate already reads — never a separate field asked of the
+ * model (see ExtractedToDo's doc comment on why). Three cases, in order:
+ *
+ *  1. An explicit number ("every 2 weeks", "every 3 months") — used as-is.
+ *  2. An ordinal/relative word ("every second Monday", "every other week",
+ *     "every third day") — looked up in ORDINAL_WORD_TO_INTERVAL above.
+ *     This is the direct fix for an on-device bug: "every second Monday"
+ *     was previously classified as recurrence "daily" with no interval
+ *     concept to fall back on at all; it's now "weekly" + interval 2, i.e.
+ *     an exact "every 2 weeks" schedule instead of a wrong one.
+ *  3. A named calendar unit the 4-value `recurrence` enum has no exact
+ *     bucket for ("quarterly", "yearly") — expressed as a multiple of the
+ *     closest bucket buildSystemPrompt already maps it to (monthly), so
+ *     what used to be a lossy approximation (quarterly rounded down to
+ *     plain monthly) is now exact: quarterly → monthly × 3, yearly →
+ *     monthly × 12. `recurrence` itself doesn't change; only how many
+ *     months to add each time does.
+ *
+ * Returns 1 (i.e. "every single occurrence of the unit", the pre-interval
+ * behavior) when nothing above matches, or when `recurrence` is "none"
+ * (an interval is meaningless on a task that doesn't repeat at all).
+ */
+function resolveRecurrenceInterval(datePhrase: string, recurrence: Recurrence): number {
+  if (recurrence === "none") {
+    return 1;
+  }
+
+  const lower = datePhrase.trim().toLowerCase();
+  if (!lower) {
+    return 1;
+  }
+
+  const numericMatch = lower.match(/every\s+(\d+)\s*(?:day|week|month)/);
+  if (numericMatch) {
+    const n = Number(numericMatch[1]);
+    if (n >= 1) {
+      return n;
+    }
+  }
+
+  const wordMatch = lower.match(/every\s+(other|second|2nd|two|third|3rd|three|fourth|4th|four|fifth|5th|five)\b/);
+  if (wordMatch) {
+    return ORDINAL_WORD_TO_INTERVAL[wordMatch[1]] ?? 1;
+  }
+
+  if (recurrence === "weekly" && /fortnight|bi-?weekly/.test(lower)) {
+    return 2;
+  }
+  if (recurrence === "monthly") {
+    if (/quarter(ly)?/.test(lower)) {
+      return 3;
+    }
+    if (/\b(year|annual)/.test(lower)) {
+      return 12;
+    }
+  }
+
+  return 1;
 }
 
 /**
@@ -323,8 +416,9 @@ function normalizeExtracted(raw: unknown, todayISO: string): ExtractedToDo[] {
     const actionDate = resolveActionDate(datePhrase, todayISO);
 
     const recurrence: Recurrence = isRecurrence(record.recurrence) ? record.recurrence : "none";
+    const recurrenceInterval = resolveRecurrenceInterval(datePhrase, recurrence);
 
-    results.push({ task, actionDate, recurrence });
+    results.push({ task, actionDate, recurrence, recurrenceInterval });
   }
   return results;
 }
