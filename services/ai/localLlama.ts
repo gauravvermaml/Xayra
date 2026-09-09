@@ -1,5 +1,5 @@
 import * as FileSystem from "expo-file-system/legacy";
-import { initLlama, LlamaContext } from "llama.rn";
+import { initLlama, LlamaContext, type CompletionParams, type NativeCompletionResult, type TokenData } from "llama.rn";
 
 import { logDuration, nowMs } from "./perf";
 
@@ -315,6 +315,51 @@ export async function getSharedLlamaContext(): Promise<LlamaContext> {
 }
 
 /**
+ * A native llama.cpp context allows exactly one in-flight `completion()` at
+ * a time — a second call while one is already running throws natively
+ * ("context is busy"). That was a non-issue back when RAG generation was the
+ * only caller (one answer requested at a time, by definition), but
+ * transformationEngine.ts's background to-do extraction changed that: saving
+ * several notes in quick succession fires several `extractToDosFromText`
+ * calls concurrently, all racing on this one shared context.
+ *
+ * Confirmed on-device (Phase 2 Step 2 testing): saving 5 notes back-to-back
+ * (4 text, 1 voice) produced only 1 extracted to-do — the other 4 each hit
+ * "context is busy" mid-completion, which transformationEngine.ts's own
+ * catch-and-return-[] swallowed silently (correctly, per its own
+ * never-block-note-saving contract) with no visible symptom beyond the
+ * missing to-dos themselves.
+ *
+ * Fixed by queuing every completion through this one chain rather than
+ * calling `context.completion()` directly from more than one place — both
+ * generateLocalRAGAnswer() and runQueuedLlamaCompletion()'s callers now
+ * always wait their turn instead of racing. `.catch(() => undefined)` on the
+ * chain link (not on `run` itself, which callers still await and handle
+ * their own errors on) keeps one failed completion from poisoning every
+ * later queued call.
+ */
+let completionQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Runs a completion against the shared context, serialized against every
+ * other queued completion (see completionQueue above). Exported so
+ * transformationEngine.ts's to-do extraction shares the same queue as RAG
+ * generation below rather than calling `context.completion()` directly.
+ */
+export async function runQueuedLlamaCompletion(
+  params: CompletionParams,
+  onToken?: (data: TokenData) => void
+): Promise<NativeCompletionResult> {
+  const context = await getContext();
+  const run = completionQueue.then(() => context.completion(params, onToken));
+  completionQueue = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+/**
  * Generates a RAG answer entirely on-device via a local GGUF model — no
  * network round-trip, no OpenAI API key. Streams each token to `onToken` as
  * it's produced (for live UI updates) and resolves with the full text once
@@ -326,7 +371,7 @@ export async function generateLocalRAGAnswer(
   onToken: (token: string) => void
 ): Promise<string> {
   const contextReadyStart = nowMs();
-  const context = await getContext();
+  await getContext();
   logDuration("Llama context ready (warm reuse if already loaded)", contextReadyStart);
 
   const fullPrompt = buildPrompt(prompt, noteContext);
@@ -334,7 +379,7 @@ export async function generateLocalRAGAnswer(
   const generationStart = nowMs();
   let firstTokenLogged = false;
 
-  const result = await context.completion(
+  const result = await runQueuedLlamaCompletion(
     {
       prompt: fullPrompt,
       n_predict: 512,
@@ -407,8 +452,7 @@ let warmupPromise: Promise<void> | null = null;
 export async function prewarmLocalLlama(): Promise<void> {
   if (!warmupPromise) {
     warmupPromise = (async () => {
-      const context = await getContext();
-      await context.completion({ prompt: WARMUP_PROMPT, n_predict: 1 }, () => {});
+      await runQueuedLlamaCompletion({ prompt: WARMUP_PROMPT, n_predict: 1 }, () => {});
     })();
     // Same reset-on-failure as getContext()'s own contextPromise — a failed
     // warm-up (model not downloaded yet, a corrupt file) shouldn't poison

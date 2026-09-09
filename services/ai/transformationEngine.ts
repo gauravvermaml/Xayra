@@ -1,5 +1,5 @@
 import { RECURRENCE_OPTIONS, type Recurrence } from "../../db/schema";
-import { getSharedLlamaContext } from "./localLlama";
+import { runQueuedLlamaCompletion } from "./localLlama";
 import { logDuration, nowMs } from "./perf";
 
 /** One task pulled out of a note's raw text by extractToDosFromText(). Shape
@@ -144,11 +144,17 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
   const todayISO = todayIso();
 
   try {
-    const context = await getSharedLlamaContext();
     const prompt = buildPrompt(trimmed, todayISO);
 
     const start = nowMs();
-    const result = await context.completion({
+    // Routed through localLlama.ts's shared completion queue, not a direct
+    // context.completion() call — extraction and RAG answers share one
+    // native llama.cpp context, which allows only one in-flight completion
+    // at a time. Several notes saved in quick succession used to fire
+    // several of these concurrently and silently lose every one but the
+    // first to "context is busy" (see runQueuedLlamaCompletion's own doc
+    // comment for the on-device repro).
+    const result = await runQueuedLlamaCompletion({
       prompt,
       n_predict: 512,
       // Near-deterministic: this is structured extraction against a fixed
