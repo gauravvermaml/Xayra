@@ -119,8 +119,20 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
         keyboardBehavior="interactive"
         keyboardBlurBehavior="restore"
         android_keyboardInputMode="adjustResize"
+        // The library's own prop for this, not manual content padding — a
+        // first attempt added `insets.bottom` straight to BottomSheetView's
+        // padding, which did clear the Save Task button at rest but then
+        // made the keyboard cover the task TextInput once it opened: that
+        // padding is folded into "content height" for dynamic sizing, which
+        // is a different, and apparently conflicting, calculation from the
+        // one keyboardBehavior="interactive" does to keep the focused input
+        // above the keyboard. `bottomInset` is what the library expects
+        // safe-area clearance to be reported through, so it stays part of
+        // the SAME geometry the keyboard-avoidance math already uses,
+        // instead of a second, competing source of "how tall is this sheet."
+        bottomInset={insets.bottom}
       >
-        <BottomSheetView style={[styles.content, { paddingBottom: spacing.xl + insets.bottom }]}>
+        <BottomSheetView style={styles.content}>
           <Text style={styles.title}>New To-Do</Text>
 
           <BottomSheetTextInput
@@ -176,11 +188,11 @@ const styles = StyleSheet.create({
     // No `flex: 1` — dynamic sizing (see this file's top-of-file doc
     // comment) measures this view's own natural content height to size the
     // sheet, which a flex:1 child (stretching to fill an as-yet-undefined
-    // available height) defeats. `paddingBottom` here is just the base
-    // value; the actual bottom safe-area inset (Android's gesture/nav bar)
-    // is added on top of it inline at the render site — dynamic sizing has
-    // no notion of the device's system bars on its own, so without that the
-    // "Save Task" button sat half-hidden behind them (confirmed on-device).
+    // available height) defeats. Bottom safe-area clearance (the Android
+    // nav/gesture bar) is handled by the `<BottomSheet>` element's own
+    // `bottomInset` prop, not padding here — see that prop's doc comment
+    // for why folding it into this view's own height broke keyboard
+    // avoidance instead.
     paddingHorizontal: spacing.xl,
     paddingTop: spacing.sm,
     paddingBottom: spacing.xl,
