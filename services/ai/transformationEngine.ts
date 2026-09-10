@@ -362,7 +362,14 @@ function buildSystemPrompt(todayISO: string, detectedPhrases: string[]): string 
         "from this list — never write it slightly differently, never invent a phrase that isn't in this " +
         "list, and never leave date_phrase empty if one of these phrases clearly belongs to that task. If " +
         "a task genuinely has no date of its own, still use \"\" even though other phrases were detected " +
-        "elsewhere in the note.\n\n"
+        "elsewhere in the note." +
+        (detectedPhrases.length > 1
+          ? " More than one phrase is listed here because the note mentions more than one date — pick " +
+            "ONLY the one that says when the task ITSELF must be done, never one that's just explaining " +
+            "why the task exists (an expiry date is context, not a due date; see the rule below about " +
+            "this exact trap)."
+          : "") +
+        "\n\n"
       : "";
 
   return (
@@ -570,6 +577,44 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
     input: "Pick up the dry cleaning this Saturday.",
     answer: JSON.stringify([{ task: "Pick up the dry cleaning", date_phrase: "this Saturday", recurrence: "none" }]),
   },
+  {
+    // Confirmed on-device miss, found via the numeric-interval edge case:
+    // "Water the plants every 3 days." classified recurrence "daily"
+    // correctly but left date_phrase empty — with nowhere for the "every 3
+    // days" text to live, resolveRecurrenceInterval's numeric-match regex
+    // (which reads FROM date_phrase, see its own comment) had nothing to
+    // find and silently fell back to interval 1, losing the "every 3" part
+    // entirely. No prior example demonstrated a purely NUMERIC cadence
+    // ("every N days/weeks/months") being retained in date_phrase at all —
+    // only word-based ordinals ("every second Monday") had one. This also
+    // matters structurally: chrono-node has no concept of a recurrence
+    // cadence (it only finds one-off calendar dates), so unlike a one-off
+    // date phrase, a recurring cadence phrase can ONLY ever reach
+    // date_phrase via the model itself getting it right — there's no
+    // deterministic detection layer backing this one up.
+    input: "Water the plants every 3 days.",
+    answer: JSON.stringify([{ task: "Water the plants", date_phrase: "every 3 days", recurrence: "daily" }]),
+  },
+  {
+    // Confirmed on-device miss: a genuinely multi-task note where only the
+    // LAST-mentioned task carries a trailing date came back with EVERY
+    // task's date_phrase empty, even with that date listed in the prompt's
+    // detected-phrases hint — the model didn't attach it to any of them.
+    // Assigning it correctly here is a task-to-date ASSIGNMENT judgment call
+    // (which of several tasks does this one date belong to), a different
+    // problem from copying a phrase verbatim — chrono-node's detection pass
+    // has no notion of "task" at all, so this one is squarely on the model,
+    // same as recurrence classification. This demonstrates the common
+    // English pattern the miss came from: a comma/"and also"-joined list of
+    // tasks with one trailing date at the very end modifying only the task
+    // immediately before it, not the earlier ones.
+    input: "Pick up the dry cleaning, call the plumber, and also finish the tax return by Monday.",
+    answer: JSON.stringify([
+      { task: "Pick up the dry cleaning", date_phrase: "", recurrence: "none" },
+      { task: "Call the plumber", date_phrase: "", recurrence: "none" },
+      { task: "Finish the tax return", date_phrase: "Monday", recurrence: "none" },
+    ]),
+  },
 ];
 
 function buildPrompt(rawText: string, todayISO: string, detectedPhrases: string[]): string {
@@ -650,13 +695,27 @@ function normalizeExtracted(
   for (const record of validEntries) {
     const task = (record.task as string).trim();
 
+    // Recurrence is resolved BEFORE date_phrase reconciliation below, not
+    // after (as an earlier version of this function did) — the single-
+    // candidate auto-fill needs to know whether this task is recurring
+    // before deciding whether chrono's candidate is even the right KIND of
+    // thing to fill in. See that check's own comment for why.
+    let recurrence: Recurrence = isRecurrence(record.recurrence) ? record.recurrence : "none";
+    if (recurrence !== "none" && !noteHasRecurrenceEvidence) {
+      console.warn(
+        `[transformationEngine] Model classified "${task}" as recurrence "${recurrence}" but the note ` +
+          "contains no actual repeating language — overriding to \"none\"."
+      );
+      recurrence = "none";
+    }
+
     let datePhrase = typeof record.date_phrase === "string" ? record.date_phrase.trim() : "";
 
     // Reconciles the model's claim against chrono's own deterministic
     // detection (see detectDatePhrases's doc comment) — the model's raw
     // date_phrase is treated as a claim, not ground truth, the same
     // "don't trust the model on something a plain check can verify"
-    // principle hasRecurrenceEvidence below already applies to recurrence.
+    // principle hasRecurrenceEvidence above already applies to recurrence.
     if (datePhrase) {
       const matchesDetected = detectedPhrases.some((phrase) => phrase.toLowerCase() === datePhrase.toLowerCase());
       if (!matchesDetected && !lowerNoteText.includes(datePhrase.toLowerCase())) {
@@ -671,31 +730,43 @@ function normalizeExtracted(
         );
         datePhrase = "";
       }
-    } else if (validEntries.length === 1 && detectedPhrases.length === 1) {
-      // The one case that's genuinely safe to auto-fill: a single-task note
-      // where chrono found exactly one date candidate and the model still
-      // came back empty — no ambiguity about which task it belongs to. This
-      // is the deterministic fix for the exact on-device miss ("Book a
-      // movie ticket this Friday." -> date_phrase "") that motivated this
-      // whole reconciliation step, generalized to any phrasing chrono can
-      // detect rather than one more few-shot example for one more shape.
+    } else if (validEntries.length === 1 && detectedPhrases.length === 1 && recurrence === "none") {
+      // The one case that's genuinely safe to auto-fill: a single-task,
+      // NON-recurring note where chrono found exactly one date candidate
+      // and the model still came back empty — no ambiguity about which
+      // task it belongs to. This is the deterministic fix for the exact
+      // on-device miss ("Book a movie ticket this Friday." -> date_phrase
+      // "") that motivated this whole reconciliation step.
+      //
+      // The `recurrence === "none"` guard is required, not optional — a
+      // real on-device regression this introduced without it: "Water the
+      // plants every 3 days." classified recurrence "daily" correctly, but
+      // chrono detected the fragment "3 days" (from within "every 3 days")
+      // as its own one-off relative date ("3 days from today"). Without
+      // this guard, that got auto-filled into date_phrase as if it were a
+      // real action date, producing a wrong one-off actionDate ~3 days out
+      // instead of the recurring schedule the task actually describes.
+      // chrono only ever detects calendar DATES, never recurrence CADENCES
+      // ("every N days" isn't a date, it's a repeat rule) — so its
+      // candidates are only trustworthy fill-ins for non-recurring tasks.
       datePhrase = detectedPhrases[0];
     }
     // Multi-task, multi-candidate notes are deliberately left alone here —
     // matching the right date to the right task is a genuine semantic
     // judgment call still squarely on the model; a count-based heuristic
     // guessing wrong there would be a worse bug than the one being fixed.
+    // Confirmed on-device to still be a real gap even with the hint list
+    // (see buildSystemPrompt's detectedPhrasesBlock): a 3-task note with
+    // one trailing date attached only to the last task came back with all
+    // three empty, and a 2-candidate-date note came back with a hallucinated
+    // phrase instead of picking the right one of the two. Mitigated (not
+    // solved) via FEW_SHOT_EXAMPLES below, since this is a task-to-date
+    // ASSIGNMENT judgment call, not a phrase-copying one — a different
+    // problem from the one detectDatePhrases fixes, and one few-shot
+    // examples remain the right tool for (same as recurrence
+    // classification), not something a heuristic here can safely guess.
 
     const actionDate = resolveActionDate(datePhrase, todayISO);
-
-    let recurrence: Recurrence = isRecurrence(record.recurrence) ? record.recurrence : "none";
-    if (recurrence !== "none" && !noteHasRecurrenceEvidence) {
-      console.warn(
-        `[transformationEngine] Model classified "${task}" as recurrence "${recurrence}" but the note ` +
-          "contains no actual repeating language — overriding to \"none\"."
-      );
-      recurrence = "none";
-    }
     const recurrenceInterval = resolveRecurrenceInterval(datePhrase, recurrence);
 
     results.push({ task, actionDate, recurrence, recurrenceInterval });
