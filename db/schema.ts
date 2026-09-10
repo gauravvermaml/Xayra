@@ -47,6 +47,18 @@ export const NOTE_EMBEDDINGS_TABLE_SQL = `
 export const RECURRENCE_OPTIONS = ["none", "daily", "weekly", "monthly"] as const;
 export type Recurrence = (typeof RECURRENCE_OPTIONS)[number];
 
+/** Phase 2 Step 4: a to-do with no explicitly spoken/typed reminder time
+ * fires its local notification at 5 AM on `actionDate` — an early, out-of-
+ * the-way default that's still guaranteed to land before a normal day
+ * starts, rather than an arbitrary daytime hour that might already have
+ * passed by the time the to-do is saved. Exported as a single named
+ * constant (not a literal duplicated at every call site) so
+ * services/ai/transformationEngine.ts, services/todos/todoManager.ts, and
+ * components/TodoItemRow.tsx's "only show a time badge when it's NOT the
+ * default" check can never drift out of sync with the column's own default
+ * below. */
+export const DEFAULT_NOTIFICATION_TIME = "05:00";
+
 /**
  * A single actionable to-do, either entered directly or extracted from a
  * note's text by services/ai/transformationEngine.ts's local Llama pass.
@@ -61,6 +73,33 @@ export const todos = sqliteTable("todos", {
   id: text("id").primaryKey(),
   text: text("text").notNull(),
   actionDate: text("action_date").notNull(),
+  /**
+   * Phase 2 Step 4: end of a date span ("from 27th Sep to 10th Oct"),
+   * nullable — most to-dos are a single day, so this is null far more often
+   * than not. Deliberately still a plain ISO string, not a computed
+   * duration/interval, for the same reason `actionDate` is: a calendar day
+   * a user reasons about directly, not an instant to round-trip through
+   * `Date`. See services/ai/transformationEngine.ts's `resolveDateAndTime()`
+   * for how this is derived — via chrono-node's own native range detection
+   * on the SAME extracted phrase `actionDate` comes from, never a second
+   * field asked of the LLM itself (a small model splitting one range
+   * mention into two independently-copied substrings is exactly the kind of
+   * task this codebase has repeatedly found small models unreliable at —
+   * see that file's own doc comments for the history of why date arithmetic/
+   * splitting stays out of the model's hands).
+   */
+  toDate: text("to_date"),
+  /**
+   * Phase 2 Step 4: 24-hour "HH:MM" local time-of-day the to-do's local
+   * notification fires on `actionDate` (or `toDate` when a range's time was
+   * stated relative to its end — see `resolveDateAndTime()`). Defaults to
+   * `DEFAULT_NOTIFICATION_TIME` (see its own doc comment above) when no time
+   * was explicitly spoken/typed, matching notification_time's SQL-level
+   * `DEFAULT '05:00'` in db/client.ts's migration — keep both in sync with
+   * the exported constant, never a bare literal, if this default ever
+   * changes.
+   */
+  notificationTime: text("notification_time").notNull().default(DEFAULT_NOTIFICATION_TIME),
   isCompleted: integer("is_completed").notNull().default(0),
   recurrence: text("recurrence").notNull().default("none"),
   /**

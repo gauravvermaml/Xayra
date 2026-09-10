@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useFocusEffect } from "expo-router";
 
-import type { Recurrence } from "../db/schema";
 import {
   addToDo as addToDoRecord,
   completeToDo as completeToDoRecord,
@@ -9,6 +8,7 @@ import {
   getPendingToDos,
   subscribeToToDosChanged,
   updateToDo as updateToDoRecord,
+  type AddToDoInput,
   type ToDo,
   type ToDoUpdateFields,
 } from "../services/todos/todoManager";
@@ -17,13 +17,7 @@ export type UseToDosResult = {
   todos: ToDo[];
   pendingCount: number;
   refreshToDos: () => Promise<void>;
-  addToDo: (
-    text: string,
-    actionDate: string,
-    recurrence?: Recurrence,
-    recurrenceInterval?: number,
-    noteId?: string | null
-  ) => Promise<void>;
+  addToDo: (input: AddToDoInput) => Promise<void>;
   updateToDo: (id: string, fields: ToDoUpdateFields) => Promise<void>;
   completeToDo: (id: string) => Promise<void>;
   deleteToDo: (id: string) => Promise<void>;
@@ -89,14 +83,8 @@ export function useToDos(): UseToDosResult {
   );
 
   const addToDo = useCallback(
-    async (
-      text: string,
-      actionDate: string,
-      recurrence: Recurrence = "none",
-      recurrenceInterval = 1,
-      noteId: string | null = null
-    ) => {
-      await addToDoRecord(text, actionDate, recurrence, recurrenceInterval, noteId);
+    async (input: AddToDoInput) => {
+      await addToDoRecord(input);
       await refreshToDos();
     },
     [refreshToDos]

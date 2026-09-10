@@ -128,8 +128,8 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
   );
 
   const handleAddTodo = useCallback(
-    (text: string, actionDate: string, recurrence: Recurrence) => {
-      void addToDo(text, actionDate, recurrence);
+    (text: string, actionDate: string, toDate: string | null, notificationTime: string, recurrence: Recurrence) => {
+      void addToDo({ text, actionDate, toDate, notificationTime, recurrence });
     },
     [addToDo]
   );

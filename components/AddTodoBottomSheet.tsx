@@ -9,12 +9,12 @@ import BottomSheet, {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
-import { RECURRENCE_OPTIONS, type Recurrence } from "../db/schema";
+import { DEFAULT_NOTIFICATION_TIME, RECURRENCE_OPTIONS, type Recurrence } from "../db/schema";
 
 export type AddTodoBottomSheetProps = {
   visible: boolean;
   onClose: () => void;
-  onSave: (text: string, actionDate: string, recurrence: Recurrence) => void;
+  onSave: (text: string, actionDate: string, toDate: string | null, notificationTime: string, recurrence: Recurrence) => void;
 };
 
 const RECURRENCE_PICKER_LABELS: Record<Recurrence, string> = {
@@ -71,6 +71,49 @@ const DATE_PRESETS: { label: string; getIso: (today: string) => string }[] = [
   { label: "Tomorrow", getIso: (today) => addDays(today, 1) },
   { label: "Next week", getIso: (today) => addDays(today, 7) },
 ];
+
+/** Phase 2 Step 4: optional end-of-range date, relative to whatever
+ * `actionDate` is currently selected (not to today) — "+3 days" from a
+ * to-do already set for "Next week" should land 3 days past THAT date, not
+ * back near today. "None" (the default) means a plain single-day to-do,
+ * the common case. */
+const TO_DATE_PRESETS: { label: string; getIso: (fromIso: string) => string | null }[] = [
+  { label: "None", getIso: () => null },
+  { label: "+3 days", getIso: (fromIso) => addDays(fromIso, 3) },
+  { label: "+1 week", getIso: (fromIso) => addDays(fromIso, 7) },
+];
+
+/** Phase 2 Step 4: same quick-pick-plus-custom pattern as the date presets
+ * above, for the reminder's time-of-day. "5:00 AM" is
+ * DEFAULT_NOTIFICATION_TIME itself, included as a preset so a user who
+ * opened "Custom" by mistake (or wants to explicitly confirm the default)
+ * has a one-tap way back to it. */
+const TIME_PRESETS: { label: string; value: string }[] = [
+  { label: "5:00 AM", value: DEFAULT_NOTIFICATION_TIME },
+  { label: "9:00 AM", value: "09:00" },
+  { label: "6:00 PM", value: "18:00" },
+];
+
+/** Manual-entry validation for the "Custom" time field: exactly HH:MM,
+ * 24-hour, with real hour/minute ranges (00–23 / 00–59) — mirrors
+ * isValidIsoDate's shape-plus-range approach above rather than trusting the
+ * regex alone. */
+function isValidTime(value: string): boolean {
+  const match = value.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
+  return match !== null;
+}
+
+/** "15:30" -> "3:30 PM" — this file's own display format for the time
+ * picker's preview text; components/TodoItemRow.tsx has its own identical
+ * formatter for the saved badge (kept separate rather than shared, same
+ * "small enough to duplicate, not worth a cross-component util for" call as
+ * this file's other small formatters). */
+function formatTime12h(hhmm: string): string {
+  const [hour, minute] = hhmm.split(":").map(Number);
+  const period = hour >= 12 ? "PM" : "AM";
+  const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+  return `${hour12}:${String(minute).padStart(2, "0")} ${period}`;
+}
 
 // Fixed snap point, matching HistorySheet.tsx's own proven setup — NOT
 // dynamic sizing. Two earlier attempts both broke keyboardBehavior=
@@ -151,6 +194,20 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
   const [isCustomDate, setIsCustomDate] = useState(false);
   const [customDateText, setCustomDateText] = useState("");
 
+  // Phase 2 Step 4: optional end-of-range date. `toDate` is null by default
+  // (plain single-day to-do) — unlike `actionDate`, "no value selected" is
+  // itself a valid, common, default state here, not just a transient one
+  // before a chip is tapped.
+  const [toDate, setToDate] = useState<string | null>(null);
+  const [isCustomToDate, setIsCustomToDate] = useState(false);
+  const [customToDateText, setCustomToDateText] = useState("");
+
+  // Phase 2 Step 4: reminder time-of-day, same quick-pick-plus-custom shape
+  // as the date fields above.
+  const [notificationTime, setNotificationTime] = useState(DEFAULT_NOTIFICATION_TIME);
+  const [isCustomTime, setIsCustomTime] = useState(false);
+  const [customTimeText, setCustomTimeText] = useState("");
+
   useEffect(() => {
     if (visible) {
       sheetRef.current?.snapToIndex(0);
@@ -169,6 +226,12 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
     setActionDate(todayIso());
     setIsCustomDate(false);
     setCustomDateText("");
+    setToDate(null);
+    setIsCustomToDate(false);
+    setCustomToDateText("");
+    setNotificationTime(DEFAULT_NOTIFICATION_TIME);
+    setIsCustomTime(false);
+    setCustomTimeText("");
     onClose();
   }, [onClose]);
 
@@ -193,16 +256,76 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
 
   const isCustomDateInvalid = isCustomDate && customDateText.length > 0 && !isValidIsoDate(customDateText);
 
-  const canSave = text.trim().length > 0 && !isCustomDateInvalid;
+  const handleToDatePresetPress = useCallback(
+    (iso: string | null) => {
+      setIsCustomToDate(false);
+      setToDate(iso);
+    },
+    []
+  );
+
+  const handleCustomToDatePress = useCallback(() => {
+    setIsCustomToDate(true);
+    setCustomToDateText(toDate ?? "");
+  }, [toDate]);
+
+  const handleCustomToDateChange = useCallback((value: string) => {
+    setCustomToDateText(value);
+    if (isValidIsoDate(value)) {
+      setToDate(value);
+    }
+  }, []);
+
+  // Shape-valid AND not before the start date — a range ending before it
+  // begins is nonsensical regardless of whether "2026-09-05" is itself a
+  // real calendar date. Only checked while "Custom" is active and non-empty
+  // (an empty field mid-typing isn't an error yet, same convention as the
+  // action-date field's own `isCustomDateInvalid`).
+  const isCustomToDateInvalid =
+    isCustomToDate &&
+    customToDateText.length > 0 &&
+    (!isValidIsoDate(customToDateText) || customToDateText < actionDate);
+
+  const handleTimePresetPress = useCallback((value: string) => {
+    setIsCustomTime(false);
+    setNotificationTime(value);
+  }, []);
+
+  const handleCustomTimePress = useCallback(() => {
+    setIsCustomTime(true);
+    setCustomTimeText(notificationTime);
+  }, [notificationTime]);
+
+  const handleCustomTimeChange = useCallback((value: string) => {
+    setCustomTimeText(value);
+    if (isValidTime(value)) {
+      setNotificationTime(value);
+    }
+  }, []);
+
+  const isCustomTimeInvalid = isCustomTime && customTimeText.length > 0 && !isValidTime(customTimeText);
+
+  const canSave =
+    text.trim().length > 0 && !isCustomDateInvalid && !isCustomToDateInvalid && !isCustomTimeInvalid;
 
   const handleSave = useCallback(() => {
     const trimmed = text.trim();
-    if (!trimmed || isCustomDateInvalid) {
+    if (!trimmed || isCustomDateInvalid || isCustomToDateInvalid || isCustomTimeInvalid) {
       return;
     }
-    onSave(trimmed, actionDate, recurrence);
+    onSave(trimmed, actionDate, toDate, notificationTime, recurrence);
     sheetRef.current?.close();
-  }, [text, actionDate, recurrence, isCustomDateInvalid, onSave]);
+  }, [
+    text,
+    actionDate,
+    toDate,
+    notificationTime,
+    recurrence,
+    isCustomDateInvalid,
+    isCustomToDateInvalid,
+    isCustomTimeInvalid,
+    onSave,
+  ]);
 
   const renderBackdrop = useCallback(
     (props: BottomSheetBackdropProps) => (
@@ -304,6 +427,101 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
             </>
           )}
 
+          {/* Phase 2 Step 4: optional end-of-range date. "None" is the
+              active chip whenever `toDate` is null, covering both "never
+              touched this section" and "picked None explicitly" — there's
+              no third state to distinguish. */}
+          <Text style={styles.sectionLabel}>To Date (optional)</Text>
+          <View style={styles.recurrenceRow}>
+            {TO_DATE_PRESETS.map((preset) => {
+              const iso = preset.getIso(actionDate);
+              const isActive = !isCustomToDate && toDate === iso;
+              return (
+                <Pressable
+                  key={preset.label}
+                  onPress={() => handleToDatePresetPress(iso)}
+                  style={[styles.recurrenceOption, isActive && styles.recurrenceOptionActive]}
+                >
+                  <Text style={[styles.recurrenceText, isActive && styles.recurrenceTextActive]}>
+                    {preset.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+            <Pressable
+              onPress={handleCustomToDatePress}
+              style={[styles.recurrenceOption, isCustomToDate && styles.recurrenceOptionActive]}
+            >
+              <Text style={[styles.recurrenceText, isCustomToDate && styles.recurrenceTextActive]}>Custom</Text>
+            </Pressable>
+          </View>
+          {isCustomToDate && (
+            <>
+              <BottomSheetTextInput
+                value={customToDateText}
+                onChangeText={handleCustomToDateChange}
+                placeholder="YYYY-MM-DD"
+                placeholderTextColor="rgba(235,235,245,0.45)"
+                style={[styles.input, isCustomToDateInvalid && styles.inputInvalid]}
+                keyboardType="numbers-and-punctuation"
+                maxLength={10}
+              />
+              {isCustomToDateInvalid && (
+                <Text style={styles.errorText}>Enter a valid date on or after the start date.</Text>
+              )}
+            </>
+          )}
+
+          {/* Phase 2 Step 4: reminder time-of-day. Only shown as a badge on
+              the saved row (components/TodoItemRow.tsx) when it's NOT the
+              5 AM default — see that file's own DEFAULT_NOTIFICATION_TIME
+              check — so leaving this untouched is a deliberate, silent
+              "use the default" rather than something that needs its own
+              explicit confirmation here. */}
+          <Text style={styles.sectionLabel}>Notification Time</Text>
+          <View style={styles.recurrenceRow}>
+            {TIME_PRESETS.map((preset) => {
+              const isActive = !isCustomTime && notificationTime === preset.value;
+              return (
+                <Pressable
+                  key={preset.label}
+                  onPress={() => handleTimePresetPress(preset.value)}
+                  style={[styles.recurrenceOption, isActive && styles.recurrenceOptionActive]}
+                >
+                  <Text style={[styles.recurrenceText, isActive && styles.recurrenceTextActive]}>
+                    {preset.label}
+                  </Text>
+                </Pressable>
+              );
+            })}
+            <Pressable
+              onPress={handleCustomTimePress}
+              style={[styles.recurrenceOption, isCustomTime && styles.recurrenceOptionActive]}
+            >
+              <Text style={[styles.recurrenceText, isCustomTime && styles.recurrenceTextActive]}>Custom</Text>
+            </Pressable>
+          </View>
+          {isCustomTime && (
+            <>
+              <BottomSheetTextInput
+                value={customTimeText}
+                onChangeText={handleCustomTimeChange}
+                placeholder="HH:MM (24-hour)"
+                placeholderTextColor="rgba(235,235,245,0.45)"
+                style={[styles.input, isCustomTimeInvalid && styles.inputInvalid]}
+                keyboardType="numbers-and-punctuation"
+                maxLength={5}
+              />
+              {isCustomTimeInvalid ? (
+                <Text style={styles.errorText}>Enter a valid 24-hour time as HH:MM.</Text>
+              ) : (
+                customTimeText.length > 0 && (
+                  <Text style={styles.timePreviewText}>{formatTime12h(notificationTime)}</Text>
+                )
+              )}
+            </>
+          )}
+
           <Text style={styles.sectionLabel}>Repeats</Text>
           <View style={styles.recurrenceRow}>
             {RECURRENCE_OPTIONS.map((option) => (
@@ -380,6 +598,11 @@ const styles = StyleSheet.create({
   },
   errorText: {
     color: colors.danger,
+    fontSize: 12,
+    marginTop: -spacing.sm,
+  },
+  timePreviewText: {
+    color: colors.textMuted,
     fontSize: 12,
     marginTop: -spacing.sm,
   },

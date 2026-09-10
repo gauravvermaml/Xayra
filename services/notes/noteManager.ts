@@ -169,7 +169,15 @@ function scheduleToDoExtraction(noteId: string, text: string): void {
     let added = 0;
     for (const item of extracted) {
       try {
-        await addToDo(item.task, item.actionDate, item.recurrence, item.recurrenceInterval, noteId);
+        await addToDo({
+          text: item.task,
+          actionDate: item.actionDate,
+          toDate: item.toDate,
+          notificationTime: item.notificationTime,
+          recurrence: item.recurrence,
+          recurrenceInterval: item.recurrenceInterval,
+          noteId,
+        });
         added += 1;
         // Logs each extracted item's actual fields, not just a count — a
         // misclassification (most commonly a one-off task incorrectly
@@ -177,7 +185,8 @@ function scheduleToDoExtraction(noteId: string, text: string): void {
         // the model's raw completion text isn't persisted anywhere and the
         // encrypted DB can't be inspected directly outside the app.
         console.log(
-          `[Note] Extracted to-do for note ${noteId}: "${item.task}" on ${item.actionDate} ` +
+          `[Note] Extracted to-do for note ${noteId}: "${item.task}" on ${item.actionDate}` +
+            `${item.toDate ? ` to ${item.toDate}` : ""} at ${item.notificationTime} ` +
             `(recurrence: ${item.recurrence}, interval: ${item.recurrenceInterval})`
         );
       } catch (err) {

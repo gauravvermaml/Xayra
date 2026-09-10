@@ -1,15 +1,26 @@
 import * as chrono from "chrono-node";
 
-import { RECURRENCE_OPTIONS, type Recurrence } from "../../db/schema";
+import { DEFAULT_NOTIFICATION_TIME, RECURRENCE_OPTIONS, type Recurrence } from "../../db/schema";
 import { runQueuedLlamaCompletion } from "./localLlama";
 import { logDuration, nowMs } from "./perf";
 
 /** One task pulled out of a note's raw text by extractToDosFromText(). Shape
- * matches services/todos/todoManager.ts's `addToDo()` params 1:1 so the
- * caller (Phase 2's UI/save flow) can pass an item straight through. */
+ * matches services/todos/todoManager.ts's `AddToDoInput` 1:1 so the caller
+ * (Phase 2's UI/save flow) can pass an item straight through. */
 export type ExtractedToDo = {
   task: string;
   actionDate: string; // ISO YYYY-MM-DD
+  /** Phase 2 Step 4: end of a date span ("from 27th Sep to 10th Oct"), or
+   * null for a single-day to-do. See resolveDateAndTime's doc comment for
+   * how this is derived — via chrono-node's own native range detection on
+   * the SAME extracted phrase `actionDate` comes from, never a second field
+   * asked of the model itself. */
+  toDate: string | null;
+  /** Phase 2 Step 4: 24-hour "HH:MM" local reminder time, extracted from an
+   * explicitly spoken/typed clock time in the SAME phrase ("at 3:30 PM") —
+   * see resolveDateAndTime's doc comment. Defaults to
+   * DEFAULT_NOTIFICATION_TIME (05:00) when no time was mentioned. */
+  notificationTime: string;
   recurrence: Recurrence;
   /** Multiplier on `recurrence`'s unit — see db/schema.ts's doc comment on
    * `recurrenceInterval`. Derived deterministically from the same date
@@ -55,11 +66,30 @@ const EOT_TOKEN = "<|eot_id|>";
  * Field is named `date_phrase`, not the literal `action_date` originally
  * specified for this step, to preserve a proven earlier fix: an LLM asked
  * to compute an absolute `action_date` itself is unreliable at date
- * arithmetic (confirmed on-device — see resolveActionDate's own comment),
+ * arithmetic (confirmed on-device — see resolveDateAndTime's own comment),
  * so the model still only ever extracts the raw date phrase as written;
- * resolveActionDate() does the actual date math deterministically outside
+ * resolveDateAndTime() does the actual date math deterministically outside
  * the model, same as before this refactor. Reverting to a computed
  * `action_date` field here would silently undo that fix.
+ *
+ * Phase 2 Step 4 (date ranges, spoken times, notifications) deliberately
+ * did NOT add separate `from_date`/`to_date`/`notification_time` fields to
+ * this grammar, even though the feature spec that requested it asked for
+ * exactly that shape. Doing so would have meant asking the model to split
+ * ONE range/time mention ("from 27th Sep to 10th Oct at 3:30 PM") into two
+ * or three independently-copied substrings and, for the date fields,
+ * compute/normalize them into `YYYY-MM-DD` itself — reintroducing the
+ * precise date-arithmetic-and-splitting unreliability the `date_phrase`
+ * redesign above already exists to avoid (see commit `ca66581`'s history:
+ * "pay rent on the 1st of every month" asked on Sep 9 came back as
+ * "2026-11-01", one month too far, when the model computed it directly).
+ * Instead, `date_phrase` alone now also carries a range or a time when the
+ * note mentions one — the model's job stays "copy the whole span verbatim,"
+ * unchanged in kind, and resolveDateAndTime() below does the actual
+ * range/time extraction deterministically via chrono-node's own native
+ * support for exactly this ("from X to Y" ranges, explicit clock times),
+ * the same pre-pass-and-reconcile architecture the whole date_phrase
+ * pipeline already uses (see detectDatePhrases's doc comment).
  *
  * Built from llama.cpp's own canonical JSON primitive rules (`string`/
  * `char`, taken from its `json-schema-to-grammar.cpp`) rather than
@@ -95,7 +125,7 @@ function parseIsoDateLocal(iso: string): Date {
  * to next month whenever `from`'s day-of-month has already reached
  * `dayOfMonth` this month. Used for the "the 1st"/"the 15th" style bare
  * day-of-month phrasing that chrono-node can't reliably resolve on its own
- * (see resolveActionDate's own comment for why this exists alongside it). */
+ * (see resolveDateAndTime's own comment for why this exists alongside it). */
 function nextDayOfMonth(from: Date, dayOfMonth: number): Date {
   const candidate = new Date(from.getFullYear(), from.getMonth(), dayOfMonth);
   if (candidate <= from) {
@@ -106,7 +136,7 @@ function nextDayOfMonth(from: Date, dayOfMonth: number): Date {
 
 /** Matches a bare day-of-month reference with no month attached — "the
  * 1st", "1st of every month", "on the 15th", "day 1" — the one common
- * phrasing chrono-node (see resolveActionDate) doesn't resolve to a sane
+ * phrasing chrono-node (see resolveDateAndTime) doesn't resolve to a sane
  * future date on its own (tested on-device: it either returns null or
  * silently adds a month while keeping today's day-of-month, e.g. "1st of
  * the month" from Sep 9 came back Oct 9, not Oct 1). */
@@ -157,14 +187,14 @@ const BARE_DAY_OF_MONTH_PATTERN = /\b(?:on\s+)?(?:the\s+)?(\d{1,2})(?:st|nd|rd|t
  * and covers whatever phrasing chrono itself can parse, not just phrasings
  * this file has a dedicated example for.
  *
- * `{ forwardDate: true }` matches resolveActionDate's own chrono options —
+ * `{ forwardDate: true }` matches resolveDateAndTime's own chrono options —
  * a bare "Friday" should be treated as the NEXT Friday, and detection
  * should agree with resolution about what counts as a valid reference.
  *
  * Returns unique, trimmed `.text` substrings only (not parsed Date
  * objects) — normalizeExtracted only needs to know what substrings are
  * legitimate to hand back as a task's date_phrase; the actual date
- * arithmetic still happens exactly once, in resolveActionDate, unchanged.
+ * arithmetic still happens exactly once, in resolveDateAndTime, unchanged.
  */
 function detectDatePhrases(rawText: string, todayISO: string): string[] {
   const referenceDate = parseIsoDateLocal(todayISO);
@@ -183,29 +213,130 @@ function detectDatePhrases(rawText: string, todayISO: string): string[] {
   return phrases;
 }
 
-function resolveActionDate(datePhrase: string, todayISO: string): string {
+/** Matches "every 3 days"/"every 2 weeks"/"every 6 months" — shared between
+ * resolveRecurrenceInterval (where it reads off the interval number) and
+ * resolveDateAndTime below (where it flags a phrase chrono-node would
+ * otherwise misread — see that function's own doc comment for the
+ * confirmed on-device bug this guards against). Kept as one exported-within-
+ * file constant specifically so the two can never drift into checking
+ * subtly different things. */
+const NUMERIC_RECURRENCE_INTERVAL_PATTERN = /every\s+(\d+)\s*(?:day|week|month)/;
+
+function formatHHMM(date: Date): string {
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+  return `${hours}:${minutes}`;
+}
+
+/** Resolved shape of a date_phrase — see ExtractedToDo's own doc comments
+ * on `toDate`/`notificationTime` for what each field means. */
+type ResolvedDateInfo = {
+  actionDate: string;
+  toDate: string | null;
+  notificationTime: string;
+};
+
+/**
+ * Resolves the model's extracted natural-language date_phrase into concrete
+ * `actionDate`/`toDate`/`notificationTime` values — deterministically,
+ * outside the model, for the exact same reason this file has never asked
+ * the model to compute dates itself (see this function's own history: "pay
+ * rent on the 1st of every month" asked on Sep 9 once came back as
+ * "2026-11-01" when a 1B model tried the arithmetic directly).
+ *
+ * Phase 2 Step 4 extends this beyond a single date: chrono-node has native
+ * support for BOTH date ranges ("27th Sep to 10th Oct" parses as one result
+ * with a `.start` AND a `.end`) and explicit clock times attached to either
+ * end (`.start`/`.end` each expose `.isCertain('hour')`, true only when a
+ * time was actually stated, never chrono's own default fill-in) — so asking
+ * the model for a single `date_phrase` covering the whole span, same as
+ * before this step, is enough; chrono does the actual splitting.
+ *
+ * Time-of-day resolution deliberately checks `end` before `start`: for a
+ * range phrase, an explicit time reads as describing the range's END
+ * ("...to 10th Oct at 3:30 PM" — confirmed via chrono itself: parsing that
+ * exact phrase puts `isCertain('hour')` on `.end`, not `.start`) — a single-
+ * date phrase has no `.end` at all, so `.start` is always what's checked in
+ * that case regardless of this ordering.
+ *
+ *  1. Empty phrase → today, no range, default notification time.
+ *  2. A bare day-of-month with no month attached ("the 1st", "1st of every
+ *     month") → nextDayOfMonth() below, since chrono-node doesn't handle
+ *     this phrasing reliably on its own (see BARE_DAY_OF_MONTH_PATTERN's own
+ *     doc comment) — no range/time information is available on this path.
+ *  3. Everything else → chrono-node's `parse()` (not just `parseDate()`, so
+ *     `.end`/`.isCertain()` are available) with `forwardDate: true`.
+ *  4. Anything chrono-node can't parse at all → today, same safe fallback as
+ *     an empty phrase, rather than leaving the to-do dateless.
+ *
+ * `recurrence` is a required third argument, not an afterthought — a real
+ * bug confirmed on-device (and still present, unaffected by this file's
+ * earlier `ae2f8ac`/`6e59636` fixes, since those only ever gated the
+ * chrono-based single-candidate AUTO-FILL, not this function itself): a
+ * numeric interval cadence like "every 3 days" contains a bare number
+ * chrono-node reads as a RELATIVE OFFSET ("3 days from today") rather than
+ * recognizing it's part of a repeat rule with no specific start date at
+ * all — confirmed directly, `chrono.parse("every 3 days", ...)` matches
+ * just the fragment "3 days" and resolves it to 3 days from now. The exact
+ * same trap catches "every second Monday"/"every Monday night" (chrono
+ * resolves those to the next actual Monday). For any task whose recurrence
+ * isn't "none" AND whose phrase matches NUMERIC_RECURRENCE_INTERVAL_PATTERN
+ * specifically (a bare digit, the one shape that's unambiguously a
+ * cadence-internal number rather than a real calendar reference — "every
+ * Monday" is deliberately left alone below, since chrono resolving that to
+ * "the next Monday" is a reasonable, arguably CORRECT default start date
+ * for a weekly reminder, not a confirmed bug the way the numeric case is),
+ * the chrono-derived DATE is discarded in favor of today — recurring
+ * to-dos already start "today" by default everywhere else in this app's
+ * model (see todoManager.ts's `computeNextActionDate`). An explicit TIME
+ * mentioned in the same phrase ("every day at 6am") is still honored,
+ * since chrono's time-of-day detection isn't part of this same trap
+ * (confirmed: `chrono.parse("every day at 6am", ...)` correctly returns
+ * `isCertain('hour') === true` with hour 6).
+ */
+function resolveDateAndTime(datePhrase: string, todayISO: string, recurrence: Recurrence): ResolvedDateInfo {
   const trimmed = datePhrase.trim();
   if (!trimmed) {
-    return todayISO;
+    return { actionDate: todayISO, toDate: null, notificationTime: DEFAULT_NOTIFICATION_TIME };
   }
 
   const today = parseIsoDateLocal(todayISO);
 
   const bareDayMatch = trimmed.match(BARE_DAY_OF_MONTH_PATTERN);
+  const results = chrono.parse(trimmed, today, { forwardDate: true });
+  const result = results[0];
+
   // Only treat this as a bare day-of-month if chrono itself finds no
   // parseable date in the phrase — a phrase like "March 3rd" also matches
   // the bare-day regex on its "3rd", but chrono correctly resolves the
   // whole "March 3rd" and should win.
-  const chronoResult = chrono.parseDate(trimmed, today, { forwardDate: true });
-
-  if (!chronoResult && bareDayMatch) {
+  if (!result && bareDayMatch) {
     const day = Number(bareDayMatch[1]);
     if (day >= 1 && day <= 31) {
-      return formatIsoDate(nextDayOfMonth(today, day));
+      return {
+        actionDate: formatIsoDate(nextDayOfMonth(today, day)),
+        toDate: null,
+        notificationTime: DEFAULT_NOTIFICATION_TIME,
+      };
     }
   }
 
-  return chronoResult ? formatIsoDate(chronoResult) : todayISO;
+  if (!result) {
+    return { actionDate: todayISO, toDate: null, notificationTime: DEFAULT_NOTIFICATION_TIME };
+  }
+
+  const timeComponent = result.end?.isCertain("hour") ? result.end : result.start;
+  const notificationTime = timeComponent.isCertain("hour") ? formatHHMM(timeComponent.date()) : DEFAULT_NOTIFICATION_TIME;
+
+  if (recurrence !== "none" && NUMERIC_RECURRENCE_INTERVAL_PATTERN.test(trimmed.toLowerCase())) {
+    return { actionDate: todayISO, toDate: null, notificationTime };
+  }
+
+  return {
+    actionDate: formatIsoDate(result.start.date()),
+    toDate: result.end ? formatIsoDate(result.end.date()) : null,
+    notificationTime,
+  };
 }
 
 /** Ordinal/relative words meaning "every OTHER occurrence" or beyond —
@@ -234,7 +365,7 @@ const ORDINAL_WORD_TO_INTERVAL: Record<string, number> = {
 
 /**
  * Derives the recurrence interval multiplier from the SAME date phrase
- * resolveActionDate already reads — never a separate field asked of the
+ * resolveDateAndTime already reads — never a separate field asked of the
  * model (see ExtractedToDo's doc comment on why). Three cases, in order:
  *
  *  1. An explicit number ("every 2 weeks", "every 3 months") — used as-is.
@@ -266,7 +397,7 @@ function resolveRecurrenceInterval(datePhrase: string, recurrence: Recurrence): 
     return 1;
   }
 
-  const numericMatch = lower.match(/every\s+(\d+)\s*(?:day|week|month)/);
+  const numericMatch = lower.match(NUMERIC_RECURRENCE_INTERVAL_PATTERN);
   if (numericMatch) {
     const n = Number(numericMatch[1]);
     if (n >= 1) {
@@ -306,7 +437,7 @@ const RECURRENCE_EVIDENCE_PATTERN =
 
 /**
  * Deterministic safety net for a distinct, repeated on-device failure mode
- * from the date-phrase one resolveActionDate exists for: the model false-
+ * from the date-phrase one resolveDateAndTime exists for: the model false-
  * triggering a non-"none" recurrence with NO actual repeating language
  * anywhere in the note, apparently from the TASK'S SUBJECT MATTER alone
  * ("renew" reads as subscription-like) rather than its wording. Confirmed
@@ -314,7 +445,7 @@ const RECURRENCE_EVIDENCE_PATTERN =
  * exact note and even under fully greedy (temperature: 0) decoding — a
  * consistent wrong answer is still wrong, so at some point this stops being
  * a prompt-engineering problem and becomes a case for the same principle
- * resolveActionDate already applies to dates: don't trust the model's
+ * resolveDateAndTime already applies to dates: don't trust the model's
  * judgment on something a plain deterministic check can verify instead.
  *
  * This checks the FULL raw note text, not just the one task's date_phrase —
@@ -387,7 +518,11 @@ function buildSystemPrompt(todayISO: string, detectedPhrases: string[]): string 
     '  "date_phrase": the date/time reference exactly as it appears in the note (e.g. "tomorrow", ' +
     '"next Friday", "the 1st of every month", "March 3rd") — or an empty string "" if the task has ' +
     "no date mentioned at all. Copy the phrase as written; do NOT calculate or convert it into a " +
-    "calendar date yourself.\n" +
+    "calendar date yourself. If the note gives a DATE RANGE for the task (\"from the 27th to the " +
+    "3rd\", \"27th Sep to 10th Oct\") or an explicit CLOCK TIME (\"at 3:30 PM\", \"at 9am\"), copy " +
+    "the WHOLE span into this one field exactly as written, including the range's \"to\" and the " +
+    "time's \"at\" — never split a range or a time off into a separate answer, and never invent a " +
+    "time that isn't actually stated.\n" +
     '  "recurrence": "none", "daily", "weekly", or "monthly"\n\n' +
     "How to choose recurrence — the schema only has FOUR values, so map whatever cadence the task " +
     "actually describes onto the CLOSEST one of these four. Match against every row below, not just " +
@@ -615,6 +750,19 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
       { task: "Finish the tax return", date_phrase: "Monday", recurrence: "none" },
     ]),
   },
+  {
+    // Phase 2 Step 4: date ranges + explicit clock times. Demonstrates the
+    // new buildSystemPrompt rule ("copy the WHOLE span... including the
+    // range's 'to' and the time's 'at'") with a shape chrono-node's own
+    // native range/time detection can then split deterministically — see
+    // resolveDateAndTime's doc comment. The model's job is unchanged in
+    // kind from every other example here (copy verbatim, don't compute);
+    // only the span being copied is now allowed to be longer than one date.
+    input: "Submit the tax report from 27th September to 10th October at 3:30 PM.",
+    answer: JSON.stringify([
+      { task: "Submit the tax report", date_phrase: "27th September to 10th October at 3:30 PM", recurrence: "none" },
+    ]),
+  },
 ];
 
 function buildPrompt(rawText: string, todayISO: string, detectedPhrases: string[]): string {
@@ -660,7 +808,7 @@ function isRecurrence(value: unknown): value is Recurrence {
 
 /**
  * Defensive structural normalization on top of whatever the on-device model
- * actually returns, plus deterministic date resolution via resolveActionDate
+ * actually returns, plus deterministic date resolution via resolveDateAndTime
  * above and a deterministic recurrence sanity check via hasRecurrenceEvidence
  * (`rawNoteText` is the whole original note, needed for that check — see its
  * own comment for why the full text, not just this one item's date_phrase).
@@ -766,10 +914,10 @@ function normalizeExtracted(
     // examples remain the right tool for (same as recurrence
     // classification), not something a heuristic here can safely guess.
 
-    const actionDate = resolveActionDate(datePhrase, todayISO);
+    const { actionDate, toDate, notificationTime } = resolveDateAndTime(datePhrase, todayISO, recurrence);
     const recurrenceInterval = resolveRecurrenceInterval(datePhrase, recurrence);
 
-    results.push({ task, actionDate, recurrence, recurrenceInterval });
+    results.push({ task, actionDate, toDate, notificationTime, recurrence, recurrenceInterval });
   }
   return results;
 }
@@ -836,12 +984,12 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
     const rawOutput = result.text.trim();
     try {
       const parsed = parseExtractionOutput(rawOutput);
-      // Logs the model's raw (pre-resolveActionDate) date_phrase per item —
+      // Logs the model's raw (pre-resolveDateAndTime) date_phrase per item —
       // added to diagnose a reported "to-dos always land on today regardless
       // of what date the note actually said" issue. This is the one place
       // that can tell apart the two very different failure modes: the model
       // itself extracting an empty/wrong date_phrase (a prompt/model
-      // accuracy problem) vs. resolveActionDate/chrono-node failing to parse
+      // accuracy problem) vs. resolveDateAndTime/chrono-node failing to parse
       // a date_phrase the model got right (a date-resolution bug) — normalize
       // Extracted's return value only exposes the already-resolved
       // actionDate, which collapses both cases to the same "today" result.

@@ -20,6 +20,10 @@ import { asrRouter } from "../services/ai/asrRouter";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
 import { useChatSession } from "../services/ai/useChatSession";
 import { containsWakeWord, useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
+import {
+  initializeToDoNotifications,
+  subscribeToToDoNotificationTap,
+} from "../services/notifications/todoNotifications";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakTextAndWait } from "../services/audio/tts";
 import { isAudioTooShort } from "../services/audio/wav";
@@ -119,6 +123,24 @@ export default function HomeScreen() {
 
   useEffect(() => {
     prewarmEngines();
+  }, []);
+
+  // Phase 2 Step 4: requests the Android notification permission and primes
+  // the reminder channel/tap-listener up front at app startup, rather than
+  // only lazily the first time a to-do happens to be saved (see
+  // services/notifications/todoNotifications.ts's own doc comment).
+  useEffect(() => {
+    void initializeToDoNotifications();
+  }, []);
+
+  // Tapping a to-do reminder notification opens Xayra directly to the
+  // To-Dos overlay — there's no per-item deep view yet (see
+  // subscribeToToDoNotificationTap's own doc comment), so every tap just
+  // opens the overlay, same as tapping the To-Dos pill would.
+  useEffect(() => {
+    return subscribeToToDoNotificationTap(() => {
+      setIsTodosVisible(true);
+    });
   }, []);
 
   const [historyTab, setHistoryTab] = useState<HistoryTab>("notes");

@@ -5,6 +5,7 @@ import Animated, { FadeOutDown, LinearTransition } from "react-native-reanimated
 import { Feather } from "@expo/vector-icons";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
+import { DEFAULT_NOTIFICATION_TIME } from "../db/schema";
 import type { ToDo } from "../services/todos/todoManager";
 
 const MONTH_ABBREVIATIONS = [
@@ -33,6 +34,30 @@ function formatActionDate(actionDate: string): string {
     month: "short",
     day: "numeric",
   });
+}
+
+/** Phase 2 Step 4: "📅 27 Sep – 10 Oct 2026" for a to-do with a `toDate` —
+ * day+abbreviated-month for both ends (manually spelled out, same
+ * locale-independence reasoning as `formatCreatedDate` above), with the
+ * year shown once at the end rather than duplicated on both sides. Only
+ * ever called when `toDate` is non-null — see this row's own render site. */
+function formatDateRange(fromIso: string, toIso: string): string {
+  const [, fromMonth, fromDay] = fromIso.split("-").map(Number);
+  const [toYear, toMonth, toDay] = toIso.split("-").map(Number);
+  const from = `${fromDay} ${MONTH_ABBREVIATIONS[fromMonth - 1]}`;
+  const to = `${toDay} ${MONTH_ABBREVIATIONS[toMonth - 1]}`;
+  return `📅 ${from} – ${to} ${toYear}`;
+}
+
+/** "15:30" -> "3:30 PM" for the reminder-time badge below. Duplicated from
+ * components/AddTodoBottomSheet.tsx's identical formatter rather than
+ * shared — small enough, in a different component tree, that a cross-file
+ * util would cost more to navigate than the few duplicated lines. */
+function formatTime12h(hhmm: string): string {
+  const [hour, minute] = hhmm.split(":").map(Number);
+  const period = hour >= 12 ? "PM" : "AM";
+  const hour12 = hour % 12 === 0 ? 12 : hour % 12;
+  return `${hour12}:${String(minute).padStart(2, "0")} ${period}`;
 }
 
 const RECURRENCE_UNIT_LABELS: Record<Exclude<ToDo["recurrence"], "none">, string> = {
@@ -161,9 +186,17 @@ export function TodoItemRow({ item, onCheck, onLongPressDelete, onOpenSourceNote
         </View>
 
         <Text style={styles.dueText}>
-          {formatActionDate(item.actionDate)}
+          {item.toDate ? formatDateRange(item.actionDate, item.toDate) : formatActionDate(item.actionDate)}
           {item.recurrence !== "none" ? ` · ${formatRecurrenceLabel(item.recurrence, item.recurrenceInterval)}` : ""}
         </Text>
+        {/* Phase 2 Step 4: only shown when an explicit time was actually
+            stated/picked — see db/schema.ts's DEFAULT_NOTIFICATION_TIME doc
+            comment. A to-do with no explicit time still fires its
+            notification at 5 AM (the default), it just doesn't clutter
+            every single row with a badge for it. */}
+        {item.notificationTime !== DEFAULT_NOTIFICATION_TIME && (
+          <Text style={styles.timeBadge}>⏰ {formatTime12h(item.notificationTime)}</Text>
+        )}
       </TouchableOpacity>
     </Animated.View>
   );
@@ -227,5 +260,11 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     ...typography.caption,
     marginTop: spacing.sm,
+  },
+  timeBadge: {
+    color: colors.accent,
+    ...typography.caption,
+    fontWeight: "600",
+    marginTop: spacing.xs,
   },
 });

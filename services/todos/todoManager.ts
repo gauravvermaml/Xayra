@@ -1,12 +1,19 @@
 import * as Crypto from "expo-crypto";
 
 import { getRawDatabase } from "../../db/client";
-import type { Recurrence } from "../../db/schema";
+import { DEFAULT_NOTIFICATION_TIME, type Recurrence } from "../../db/schema";
+import { cancelToDoNotification, scheduleToDoNotification } from "../notifications/todoNotifications";
 
 export type ToDo = {
   id: string;
   text: string;
   actionDate: string; // ISO YYYY-MM-DD
+  /** End of a date span ("from 27th Sep to 10th Oct") — see db/schema.ts's
+   * `toDate` doc comment. Null for the (far more common) single-day to-do. */
+  toDate: string | null;
+  /** 24-hour "HH:MM" local reminder time — see db/schema.ts's
+   * `notificationTime`/`DEFAULT_NOTIFICATION_TIME` doc comments. */
+  notificationTime: string;
   isCompleted: boolean;
   recurrence: Recurrence;
   /** Multiplier on `recurrence`'s unit — see db/schema.ts's doc comment on
@@ -28,6 +35,12 @@ function rowToToDo(row: Record<string, unknown>): ToDo {
     id: row.id as string,
     text: row.text as string,
     actionDate: row.action_date as string,
+    toDate: (row.to_date as string | null) ?? null,
+    // Same belt-and-suspenders fallback as `recurrenceInterval` above, for a
+    // row written before this column existed — op-sqlite's own column
+    // DEFAULT already covers this in practice, but a falsy/missing value
+    // here should never surface as an empty string to a caller.
+    notificationTime: (row.notification_time as string | null) || DEFAULT_NOTIFICATION_TIME,
     isCompleted: Boolean(row.is_completed),
     recurrence: row.recurrence as Recurrence,
     recurrenceInterval: Number.isFinite(interval) && interval >= 1 ? interval : 1,
@@ -67,32 +80,77 @@ function notifyToDosChanged(): void {
   changeListeners.forEach((listener) => listener());
 }
 
-/** Adds a single to-do, either entered directly (no `noteId`) or from a
+export type AddToDoInput = {
+  text: string;
+  actionDate: string;
+  /** See db/schema.ts's `toDate` doc comment. Omit or pass null for a
+   * single-day to-do (the common case). */
+  toDate?: string | null;
+  /** See db/schema.ts's `notificationTime`/`DEFAULT_NOTIFICATION_TIME` doc
+   * comments. Omit to use the 5 AM default. */
+  notificationTime?: string;
+  recurrence?: Recurrence;
+  recurrenceInterval?: number;
+  noteId?: string | null;
+};
+
+/**
+ * Adds a single to-do, either entered directly (no `noteId`) or from a
  * single extracted item in services/ai/transformationEngine.ts's output
  * (`noteId` = the note it came from, wired through by noteManager.ts's
  * `scheduleToDoExtraction`). `recurrenceInterval` is clamped to at least 1 —
  * a 0 or negative value would either spawn the next occurrence on the same
  * day (0) or drift backward in time (negative) in computeNextActionDate
- * below. */
-export async function addToDo(
-  text: string,
-  actionDate: string,
-  recurrence: Recurrence = "none",
-  recurrenceInterval = 1,
-  noteId: string | null = null
-): Promise<ToDo> {
+ * below.
+ *
+ * An options object, not positional params — Phase 2 Step 4 added two more
+ * optional fields (`toDate`, `notificationTime`) on top of the existing
+ * `recurrence`/`recurrenceInterval`/`noteId`, which would have made a 7th
+ * and 8th positional argument; `updateToDo` already took this shape (see
+ * `ToDoUpdateFields` below) for the same reason.
+ *
+ * Schedules (fire-and-forget) this to-do's local reminder notification via
+ * services/notifications/todoNotifications.ts once the row is written —
+ * never awaited, and any scheduling failure there is already swallowed
+ * internally (soft-failure by design): a to-do must always save
+ * successfully regardless of whether its reminder could be scheduled.
+ */
+export async function addToDo(input: AddToDoInput): Promise<ToDo> {
+  const {
+    text,
+    actionDate,
+    toDate = null,
+    notificationTime = DEFAULT_NOTIFICATION_TIME,
+    recurrence = "none",
+    recurrenceInterval = 1,
+    noteId = null,
+  } = input;
+
   const db = await getRawDatabase();
   const id = Crypto.randomUUID();
   const createdAt = new Date().toISOString();
   const interval = recurrenceInterval >= 1 ? Math.round(recurrenceInterval) : 1;
 
   await db.execute(
-    "INSERT INTO todos (id, text, action_date, is_completed, recurrence, recurrence_interval, created_at, note_id) VALUES (?, ?, ?, 0, ?, ?, ?, ?)",
-    [id, text, actionDate, recurrence, interval, createdAt, noteId]
+    "INSERT INTO todos (id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+    [id, text, actionDate, toDate, notificationTime, recurrence, interval, createdAt, noteId]
   );
   notifyToDosChanged();
 
-  return { id, text, actionDate, isCompleted: false, recurrence, recurrenceInterval: interval, createdAt, noteId };
+  const toDo: ToDo = {
+    id,
+    text,
+    actionDate,
+    toDate,
+    notificationTime,
+    isCompleted: false,
+    recurrence,
+    recurrenceInterval: interval,
+    createdAt,
+    noteId,
+  };
+  void scheduleToDoNotification(toDo);
+  return toDo;
 }
 
 /** Lists every not-yet-completed to-do, soonest action date first. Used by
@@ -102,7 +160,7 @@ export async function getPendingToDos(): Promise<ToDo[]> {
 
   const result = await db.execute(
     `
-      SELECT id, text, action_date, is_completed, recurrence, recurrence_interval, created_at, note_id
+      SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id
       FROM todos
       WHERE is_completed = 0
       ORDER BY action_date ASC, created_at ASC
@@ -121,19 +179,44 @@ export async function getPendingCount(): Promise<number> {
   return (result.rows[0]?.count as number | undefined) ?? 0;
 }
 
+/** Single-row lookup by id, used by `updateToDo` below to re-read the
+ * merged post-update state (needed to reschedule a notification correctly —
+ * any one of text/actionDate/notificationTime could have just changed) and
+ * available for any future caller that needs one full row rather than the
+ * whole pending list. */
+async function getToDoById(id: string): Promise<ToDo | null> {
+  const db = await getRawDatabase();
+  const result = await db.execute(
+    "SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id FROM todos WHERE id = ?",
+    [id]
+  );
+  const row = result.rows[0];
+  return row ? rowToToDo(row) : null;
+}
+
 export type ToDoUpdateFields = Partial<{
   text: string;
   actionDate: string;
+  toDate: string | null;
+  notificationTime: string;
   recurrence: Recurrence;
   recurrenceInterval: number;
 }>;
 
-/** Patches one or more editable fields on an existing to-do (e.g. a user
+/**
+ * Patches one or more editable fields on an existing to-do (e.g. a user
  * correcting a misextracted date or task text). No-ops on an empty patch
- * rather than issuing a no-column `UPDATE ... SET WHERE`. */
+ * rather than issuing a no-column `UPDATE ... SET WHERE`.
+ *
+ * Re-reads the row after writing and reschedules its notification via
+ * services/notifications/todoNotifications.ts (fire-and-forget) — any one
+ * of text/actionDate/notificationTime could have just changed, and
+ * `scheduleToDoNotification` always works from the CURRENT full row rather
+ * than trying to patch an already-scheduled native trigger in place.
+ */
 export async function updateToDo(id: string, fields: ToDoUpdateFields): Promise<void> {
   const setClauses: string[] = [];
-  const params: (string | number)[] = [];
+  const params: (string | null | number)[] = [];
 
   if (fields.text !== undefined) {
     setClauses.push("text = ?");
@@ -142,6 +225,14 @@ export async function updateToDo(id: string, fields: ToDoUpdateFields): Promise<
   if (fields.actionDate !== undefined) {
     setClauses.push("action_date = ?");
     params.push(fields.actionDate);
+  }
+  if (fields.toDate !== undefined) {
+    setClauses.push("to_date = ?");
+    params.push(fields.toDate);
+  }
+  if (fields.notificationTime !== undefined) {
+    setClauses.push("notification_time = ?");
+    params.push(fields.notificationTime);
   }
   if (fields.recurrence !== undefined) {
     setClauses.push("recurrence = ?");
@@ -159,6 +250,11 @@ export async function updateToDo(id: string, fields: ToDoUpdateFields): Promise<
   params.push(id);
   await db.execute(`UPDATE todos SET ${setClauses.join(", ")} WHERE id = ?`, params);
   notifyToDosChanged();
+
+  const updated = await getToDoById(id);
+  if (updated && !updated.isCompleted) {
+    void scheduleToDoNotification(updated);
+  }
 }
 
 /**
@@ -174,6 +270,7 @@ export async function deleteToDo(id: string): Promise<void> {
   const db = await getRawDatabase();
   await db.execute("DELETE FROM todos WHERE id = ?", [id]);
   notifyToDosChanged();
+  void cancelToDoNotification(id);
 }
 
 function formatIsoDate(date: Date): string {
@@ -181,6 +278,17 @@ function formatIsoDate(date: Date): string {
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+/** Adds `days` (may be negative) to a local YYYY-MM-DD date and returns the
+ * result as a `Date` — a small shared primitive `daysBetweenLocal`'s own
+ * caller below uses to reconstruct a shifted `to_date` from a day count,
+ * same local-components approach as every other date computation here. */
+function shiftLocalDate(iso: string, days: number): Date {
+  const [year, month, day] = iso.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  date.setDate(date.getDate() + days);
+  return date;
 }
 
 /**
@@ -215,6 +323,25 @@ function computeNextActionDate(actionDate: string, recurrence: Recurrence, inter
   return formatIsoDate(next);
 }
 
+/** Whole-day difference between two local YYYY-MM-DD dates (`to` minus
+ * `from`), used only to preserve a date range's LENGTH across a recurring
+ * respawn below — e.g. a 3-day-long recurring to-do's next occurrence
+ * should still span 3 days, not carry forward the same absolute `to_date`
+ * (which could now be before the new `action_date` entirely, or the same
+ * length by coincidence only on the first respawn). Computed via local
+ * `Date` components (never `new Date(iso)`, the same UTC-midnight trap every
+ * other date computation in this file already avoids) and rounded — day-
+ * count subtraction between two local midnights is always a whole number
+ * except across a DST transition, where `Math.round` lands on the
+ * calendar-day count a user actually means rather than a fractional one. */
+function daysBetweenLocal(fromIso: string, toIso: string): number {
+  const [fy, fm, fd] = fromIso.split("-").map(Number);
+  const [ty, tm, td] = toIso.split("-").map(Number);
+  const from = new Date(fy, fm - 1, fd);
+  const to = new Date(ty, tm - 1, td);
+  return Math.round((to.getTime() - from.getTime()) / (24 * 60 * 60 * 1000));
+}
+
 /**
  * Marks a to-do done. If it recurs, this also spawns the next occurrence as
  * a brand-new row rather than just rewriting `action_date` in place, so the
@@ -224,12 +351,17 @@ function computeNextActionDate(actionDate: string, recurrence: Recurrence, inter
  * again itself — only the fresh row carries the original recurrence forward.
  * Both writes happen in one transaction so a crash between them can never
  * leave a recurring to-do completed with no successor.
+ *
+ * Cancels the completed row's own scheduled notification (it's done, its
+ * reminder no longer means anything) and, if a next occurrence was spawned,
+ * schedules a fresh notification for THAT row — never the other way around,
+ * and never reusing the completed row's now-cancelled trigger.
  */
 export async function completeToDo(id: string): Promise<void> {
   const db = await getRawDatabase();
 
   const lookup = await db.execute(
-    "SELECT text, action_date, recurrence, recurrence_interval, note_id FROM todos WHERE id = ?",
+    "SELECT text, action_date, to_date, notification_time, recurrence, recurrence_interval, note_id FROM todos WHERE id = ?",
     [id]
   );
   const row = lookup.rows[0];
@@ -239,10 +371,14 @@ export async function completeToDo(id: string): Promise<void> {
 
   const text = row.text as string;
   const actionDate = row.action_date as string;
+  const toDate = (row.to_date as string | null) ?? null;
+  const notificationTime = (row.notification_time as string | null) || DEFAULT_NOTIFICATION_TIME;
   const recurrence = row.recurrence as Recurrence;
   const rawInterval = Number(row.recurrence_interval);
   const recurrenceInterval = Number.isFinite(rawInterval) && rawInterval >= 1 ? rawInterval : 1;
   const noteId = (row.note_id as string | null) ?? null;
+
+  let respawned: ToDo | null = null;
 
   await db.transaction(async (tx) => {
     // recurrence_interval is also reset to 1 alongside recurrence — a
@@ -255,15 +391,35 @@ export async function completeToDo(id: string): Promise<void> {
 
     if (recurrence !== "none") {
       const nextDate = computeNextActionDate(actionDate, recurrence, recurrenceInterval);
+      // Preserve the range's LENGTH, not its absolute end date — see
+      // daysBetweenLocal's own doc comment.
+      const nextToDate = toDate ? formatIsoDate(shiftLocalDate(nextDate, daysBetweenLocal(actionDate, toDate))) : null;
       const nextId = Crypto.randomUUID();
       const createdAt = new Date().toISOString();
       // note_id carries forward too — the respawned occurrence is still the
       // same recurring task traced back to the same original note.
       await tx.execute(
-        "INSERT INTO todos (id, text, action_date, is_completed, recurrence, recurrence_interval, created_at, note_id) VALUES (?, ?, ?, 0, ?, ?, ?, ?)",
-        [nextId, text, nextDate, recurrence, recurrenceInterval, createdAt, noteId]
+        "INSERT INTO todos (id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id) VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+        [nextId, text, nextDate, nextToDate, notificationTime, recurrence, recurrenceInterval, createdAt, noteId]
       );
+      respawned = {
+        id: nextId,
+        text,
+        actionDate: nextDate,
+        toDate: nextToDate,
+        notificationTime,
+        isCompleted: false,
+        recurrence,
+        recurrenceInterval,
+        createdAt,
+        noteId,
+      };
     }
   });
   notifyToDosChanged();
+
+  void cancelToDoNotification(id);
+  if (respawned) {
+    void scheduleToDoNotification(respawned);
+  }
 }

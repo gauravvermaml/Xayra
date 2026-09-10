@@ -2,6 +2,12 @@ import { Platform } from "react-native";
 import * as Notifications from "expo-notifications";
 
 import type { ModelDownloadStatus } from "../ai/modelDownloadManager";
+// Side-effect import — registers the one app-wide `setNotificationHandler`
+// call. See notificationHandler.ts's own doc comment for why this can't
+// just be an inline `Notifications.setNotificationHandler(...)` call in
+// this file anymore now that services/notifications/todoNotifications.ts
+// also needs a say in the same handler.
+import "./notificationHandler";
 
 /**
  * Build 25 SYSTEM NOTIFICATION: mirrors the in-app download progress card
@@ -37,19 +43,6 @@ let lastShownPercent = -1;
 let lastShownAtMs = 0;
 let channelReady = false;
 let permissionRequested = false;
-
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowBanner: false,
-    shouldShowList: true,
-    shouldPlaySound: false,
-    // Build 27 DISABLE LAUNCHER APP BADGE: a background model download is
-    // not something the app icon should ever reflect a count for — this,
-    // plus `badge: 0` on every posted notification's own content below, is
-    // belt-and-suspenders against the OS incrementing the home-screen badge.
-    shouldSetBadge: false,
-  }),
-});
 
 /**
  * Build 26 SILENT DOWNLOAD NOTIFICATION: no heads-up popover, no vibration,

@@ -170,6 +170,31 @@ async function createCoreTables(db: DB): Promise<void> {
       throw err;
     }
   }
+
+  // Phase 2 Step 4: date ranges + local notifications — see db/schema.ts's
+  // `toDate`/`notificationTime` doc comments. Same idempotent
+  // ALTER-and-catch-duplicate-column pattern as every migration above; a
+  // literal `'05:00'` here (not the DEFAULT_NOTIFICATION_TIME import) is
+  // deliberate — this is a raw SQL string sent to SQLite, not TypeScript, so
+  // it can't reference the constant directly, and SQLite column defaults
+  // can't be altered after the fact anyway. Keep this string in sync with
+  // db/schema.ts's DEFAULT_NOTIFICATION_TIME by hand if it's ever changed.
+  try {
+    await db.execute("ALTER TABLE todos ADD COLUMN to_date TEXT;");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/duplicate column/i.test(message)) {
+      throw err;
+    }
+  }
+  try {
+    await db.execute("ALTER TABLE todos ADD COLUMN notification_time TEXT NOT NULL DEFAULT '05:00';");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/duplicate column/i.test(message)) {
+      throw err;
+    }
+  }
 }
 
 /**
