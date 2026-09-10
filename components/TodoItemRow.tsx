@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { StyleSheet, Text, TextInput, View } from "react-native";
+import { StyleSheet, Text, View } from "react-native";
 import { TouchableOpacity } from "react-native-gesture-handler";
 import Animated, { FadeOutDown, LinearTransition } from "react-native-reanimated";
 import { Feather } from "@expo/vector-icons";
@@ -94,7 +93,16 @@ export type TodoItemRowProps = {
    * rendered in that case) — see components/TodosOverlay.tsx for how it opens
    * NoteDetailModal. */
   onOpenSourceNote: (noteId: string) => void;
-  onSaveText: (id: string, text: string) => void;
+  /** Edit-pen tap — opens components/AddTodoBottomSheet.tsx pre-filled with
+   * this item's full state (text, dates, time, recurrence), not just its
+   * text. Phase 2 Step 4 follow-up: an earlier version of this row did its
+   * own lightweight inline text-only edit (a plain TextInput swapped in for
+   * the Text), but that had no way to reach any of the fields Step 4 added —
+   * reusing the same sheet the Add flow already has, in an "editing" mode,
+   * covers every field with one surface instead of building a second,
+   * narrower one just for this row. See TodosOverlay.tsx's `editingTodo`
+   * state for how the sheet is told which mode it's in. */
+  onEditDetails: (item: ToDo) => void;
 };
 
 /**
@@ -103,7 +111,8 @@ export type TodoItemRowProps = {
  * translucent-box language (see HistorySheet.tsx's `textContainerBox` for
  * the same visual family), with two content lines: a micro-header (creation
  * date + optional source-note citation) and the main row (checkbox, task
- * text or its in-place editor, edit pen).
+ * text, edit pen). The edit pen opens the full Add/Edit sheet pre-filled
+ * with this item — see `onEditDetails`'s own doc comment.
  *
  * TOUCHABLE HARMONIZATION: every tappable element here is
  * `TouchableOpacity` from `react-native-gesture-handler`, not plain
@@ -129,22 +138,7 @@ export type TodoItemRowProps = {
  * (no `Animated.FlatList` needed) since it's this row's own mount/unmount
  * Reanimated is hooking into, not anything list-virtualization-specific.
  */
-export function TodoItemRow({ item, onCheck, onLongPressDelete, onOpenSourceNote, onSaveText }: TodoItemRowProps) {
-  const [isEditing, setIsEditing] = useState(false);
-  const [draftText, setDraftText] = useState(item.text);
-
-  const commitEdit = () => {
-    setIsEditing(false);
-    const trimmed = draftText.trim();
-    if (trimmed && trimmed !== item.text) {
-      onSaveText(item.id, trimmed);
-    } else {
-      // Reverts a blank/unchanged draft back to the saved text rather than
-      // letting an emptied TextInput persist as this row's next render.
-      setDraftText(item.text);
-    }
-  };
-
+export function TodoItemRow({ item, onCheck, onLongPressDelete, onOpenSourceNote, onEditDetails }: TodoItemRowProps) {
   return (
     <Animated.View exiting={FadeOutDown.duration(280)} layout={LinearTransition.duration(220)} style={styles.card}>
       <TouchableOpacity onLongPress={() => onLongPressDelete(item)} delayLongPress={600} activeOpacity={1}>
@@ -166,21 +160,9 @@ export function TodoItemRow({ item, onCheck, onLongPressDelete, onOpenSourceNote
             accessibilityLabel={`Mark "${item.text}" as done`}
           />
 
-          {isEditing ? (
-            <TextInput
-              value={draftText}
-              onChangeText={setDraftText}
-              autoFocus
-              onBlur={commitEdit}
-              onSubmitEditing={commitEdit}
-              returnKeyType="done"
-              style={styles.taskInput}
-            />
-          ) : (
-            <Text style={styles.taskText}>{item.text}</Text>
-          )}
+          <Text style={styles.taskText}>{item.text}</Text>
 
-          <TouchableOpacity onPress={() => setIsEditing(true)} hitSlop={10} style={styles.editButton}>
+          <TouchableOpacity onPress={() => onEditDetails(item)} hitSlop={10} style={styles.editButton}>
             <Feather name="edit-2" size={16} color={colors.textMuted} />
           </TouchableOpacity>
         </View>
@@ -241,14 +223,6 @@ const styles = StyleSheet.create({
     flex: 1,
     color: colors.textPrimary,
     ...typography.body,
-  },
-  taskInput: {
-    flex: 1,
-    color: colors.textPrimary,
-    ...typography.body,
-    padding: 0,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.borderStrong,
   },
   editButton: {
     width: 28,

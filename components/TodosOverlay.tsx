@@ -54,6 +54,12 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
   const { todos, pendingCount, addToDo, updateToDo, completeToDo, deleteToDo } = useToDos();
 
   const [isAddVisible, setIsAddVisible] = useState(false);
+  // Phase 2 Step 4 follow-up: the same AddTodoBottomSheet doubles as the
+  // full-detail editor — set to a to-do to open it pre-filled (see
+  // handleSheetClose below for how the two modes actually get told apart
+  // by `handleSaveTodo`). Null in every other state, including while adding
+  // a brand-new one (`isAddVisible` covers that case instead).
+  const [editingTodo, setEditingTodo] = useState<ToDo | null>(null);
   const [viewingNoteId, setViewingNoteId] = useState<string | null>(null);
 
   const pendingRef = useRef<{ id: string; timeoutId: ReturnType<typeof setTimeout> } | null>(null);
@@ -120,19 +126,29 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
     [deleteToDo]
   );
 
-  const handleSaveText = useCallback(
-    (id: string, text: string) => {
-      void updateToDo(id, { text });
+  const handleEditDetails = useCallback((item: ToDo) => {
+    setEditingTodo(item);
+  }, []);
+
+  // One handler for both the Add and Edit sheets, since they're the same
+  // component in two modes (see `editingTodo`'s own doc comment) — branches
+  // on whether an existing to-do is being edited to decide addToDo vs
+  // updateToDo, the one place that distinction actually needs to be made.
+  const handleSaveTodo = useCallback(
+    (text: string, actionDate: string, toDate: string | null, notificationTime: string, recurrence: Recurrence) => {
+      if (editingTodo) {
+        void updateToDo(editingTodo.id, { text, actionDate, toDate, notificationTime, recurrence });
+      } else {
+        void addToDo({ text, actionDate, toDate, notificationTime, recurrence });
+      }
     },
-    [updateToDo]
+    [editingTodo, addToDo, updateToDo]
   );
 
-  const handleAddTodo = useCallback(
-    (text: string, actionDate: string, toDate: string | null, notificationTime: string, recurrence: Recurrence) => {
-      void addToDo({ text, actionDate, toDate, notificationTime, recurrence });
-    },
-    [addToDo]
-  );
+  const handleSheetClose = useCallback(() => {
+    setIsAddVisible(false);
+    setEditingTodo(null);
+  }, []);
 
   // Filters the pending (mid-undo-window) item out immediately — see this
   // screen's own doc comment above for why that's what makes the drop
@@ -146,10 +162,10 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
         onCheck={handleCheck}
         onLongPressDelete={handleLongPressDelete}
         onOpenSourceNote={setViewingNoteId}
-        onSaveText={handleSaveText}
+        onEditDetails={handleEditDetails}
       />
     ),
-    [handleCheck, handleLongPressDelete, handleSaveText]
+    [handleCheck, handleLongPressDelete, handleEditDetails]
   );
 
   return (
@@ -199,7 +215,12 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
           </View>
         )}
 
-        <AddTodoBottomSheet visible={isAddVisible} onClose={() => setIsAddVisible(false)} onSave={handleAddTodo} />
+        <AddTodoBottomSheet
+          visible={isAddVisible || editingTodo !== null}
+          onClose={handleSheetClose}
+          onSave={handleSaveTodo}
+          editingTodo={editingTodo}
+        />
 
         <NoteDetailModal
           noteId={viewingNoteId}

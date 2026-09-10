@@ -10,11 +10,22 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { DEFAULT_NOTIFICATION_TIME, RECURRENCE_OPTIONS, type Recurrence } from "../db/schema";
+import type { ToDo } from "../services/todos/todoManager";
 
 export type AddTodoBottomSheetProps = {
   visible: boolean;
   onClose: () => void;
   onSave: (text: string, actionDate: string, toDate: string | null, notificationTime: string, recurrence: Recurrence) => void;
+  /**
+   * Phase 2 Step 4 follow-up: when set, this sheet opens pre-filled with an
+   * EXISTING to-do's full state instead of blank defaults — the same
+   * `onSave` callback fires either way (with whatever the fields currently
+   * are), and it's the caller's job (components/TodosOverlay.tsx) to decide
+   * whether that means `addToDo` or `updateToDo`, since this component has
+   * no DB access of its own. Null/undefined means "adding a new to-do," the
+   * original behavior.
+   */
+  editingTodo?: ToDo | null;
 };
 
 const RECURRENCE_PICKER_LABELS: Record<Recurrence, string> = {
@@ -180,7 +191,7 @@ const SNAP_POINTS = ["90%"];
  * every "glass" surface elsewhere, e.g. HistorySheet's `textContainerBox`,
  * is a flat translucent color over the jet-black canvas, not a real blur).
  */
-export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSheetProps) {
+export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = null }: AddTodoBottomSheetProps) {
   const insets = useSafeAreaInsets();
   const sheetRef = useRef<BottomSheet>(null);
   const [text, setText] = useState("");
@@ -210,11 +221,40 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
 
   useEffect(() => {
     if (visible) {
+      if (editingTodo) {
+        // Pre-fills every field from the existing to-do, not just text —
+        // the whole point of this prop (see its own doc comment). Each
+        // "isCustomX" flag is derived by checking whether the saved value
+        // matches one of that field's own presets; if it doesn't, the
+        // corresponding "Custom" chip is what should show as active, with
+        // its typed field seeded from the real value (never a normal-
+        // looking empty state a resumed edit shouldn't have).
+        setText(editingTodo.text);
+        setRecurrence(editingTodo.recurrence);
+
+        const today = todayIso();
+        setActionDate(editingTodo.actionDate);
+        const matchesDatePreset = DATE_PRESETS.some((preset) => preset.getIso(today) === editingTodo.actionDate);
+        setIsCustomDate(!matchesDatePreset);
+        setCustomDateText(editingTodo.actionDate);
+
+        setToDate(editingTodo.toDate);
+        const matchesToDatePreset = TO_DATE_PRESETS.some(
+          (preset) => preset.getIso(editingTodo.actionDate) === editingTodo.toDate
+        );
+        setIsCustomToDate(!matchesToDatePreset);
+        setCustomToDateText(editingTodo.toDate ?? "");
+
+        setNotificationTime(editingTodo.notificationTime);
+        const matchesTimePreset = TIME_PRESETS.some((preset) => preset.value === editingTodo.notificationTime);
+        setIsCustomTime(!matchesTimePreset);
+        setCustomTimeText(editingTodo.notificationTime);
+      }
       sheetRef.current?.snapToIndex(0);
     } else {
       sheetRef.current?.close();
     }
-  }, [visible]);
+  }, [visible, editingTodo]);
 
   // Fires on every way the sheet actually closes — backdrop tap, swipe-down,
   // or this component's own `sheetRef.current?.close()` call after a save —
@@ -376,7 +416,7 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
           contentContainerStyle={styles.content}
           keyboardShouldPersistTaps="handled"
         >
-          <Text style={styles.title}>New To-Do</Text>
+          <Text style={styles.title}>{editingTodo ? "Edit To-Do" : "New To-Do"}</Text>
 
           <BottomSheetTextInput
             value={text}
@@ -550,7 +590,7 @@ export function AddTodoBottomSheet({ visible, onClose, onSave }: AddTodoBottomSh
               disabled={!canSave}
               style={[styles.saveButton, !canSave && styles.saveButtonDisabled]}
             >
-              <Text style={styles.saveButtonText}>Save Task</Text>
+              <Text style={styles.saveButtonText}>{editingTodo ? "Save Changes" : "Save Task"}</Text>
             </Pressable>
           </View>
         </BottomSheetScrollView>
