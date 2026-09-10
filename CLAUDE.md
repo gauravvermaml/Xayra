@@ -16,11 +16,13 @@
 ## Directory layout
 
 - `app/` — Expo Router screens (`index.tsx` = Notes tab, `chat.tsx` = Chat/RAG tab).
-- `services/ai/` — local-first AI: `localWhisper.ts`, `localEmbeddings.ts`, `tokenizer.ts` (from-scratch BERT WordPiece), `localLlama.ts`, `rag.ts`. (The legacy OpenAI-backed `whisper.ts`/`embeddings.ts` and their `config/env.ts` — unreferenced by any live path and requiring an `EXPO_PUBLIC_`-prefixed key that Metro would have inlined into the client bundle — were deleted as a security cleanup; see git history if that reference implementation is ever needed again.)
+- `services/ai/` — local-first AI: `localWhisper.ts`, `localEmbeddings.ts`, `tokenizer.ts` (from-scratch BERT WordPiece), `localLlama.ts`, `rag.ts`, `transformationEngine.ts` (Llama-based To-Do extraction from note text, GBNF-grammar-constrained, with a `chrono-node` pre-pass — see its own doc comments for the extraction pipeline's history). (The legacy OpenAI-backed `whisper.ts`/`embeddings.ts` and their `config/env.ts` — unreferenced by any live path and requiring an `EXPO_PUBLIC_`-prefixed key that Metro would have inlined into the client bundle — were deleted as a security cleanup; see git history if that reference implementation is ever needed again.)
 - `services/audio/` — recording (`recorder.ts`), playback (`player.ts`), TTS (`tts.ts`), each a single-instance singleton so only one audio source is ever active app-wide.
 - `services/notes/noteManager.ts` — note CRUD and hybrid (vector + FTS5, reciprocal-rank-fusion) search.
+- `services/todos/todoManager.ts` — "Your To-Dos" CRUD, recurrence/interval respawn logic (`completeToDo()`, `computeNextActionDate()`).
 - `services/crypto/keyManager.ts` — database encryption key lifecycle (SecureStore, biometric-gated where enrolled).
 - `db/` — `schema.ts` (Drizzle schema plus raw `vec0`/`fts5` SQL — drizzle-kit has no first-class virtual-table support) and `client.ts` (connection, dimension-migration logic).
+- `modules/` — small local Expo native modules, following the same pattern each time (`package.json` with a `file:` reference from root `package.json`, `expo-module.config.json`, a thin Kotlin `Module`): `app-signature/` (release-signature verification) and `device-cpu/` (`Runtime.getRuntime().availableProcessors()`, used by `localLlama.ts` to size inference threads proportionally to real device core count rather than a hardcoded guess).
 - `patches/` — `patch-package` fixes for native dependencies with broken Gradle scripts (see Coding Standards).
 
 ## Build, typecheck & native rebuild
