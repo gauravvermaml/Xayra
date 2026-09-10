@@ -141,6 +141,48 @@ const BARE_DAY_OF_MONTH_PATTERN = /\b(?:on\s+)?(?:the\s+)?(\d{1,2})(?:st|nd|rd|t
  *  4. Anything chrono-node can't parse at all → today, same safe fallback as
  *     an empty phrase, rather than leaving the to-do dateless.
  */
+/**
+ * Deterministically finds every date/time expression chrono-node can
+ * identify in the raw note text, independent of the LLM entirely — the fix
+ * for the actual scaling problem with the few-shot-example approach below
+ * (see FEW_SHOT_EXAMPLES's own doc comment): teaching the model one more
+ * phrasing shape at a time only ever covers the exact shapes someone
+ * happened to hit on-device, and inflates the prompt (more tokens, more
+ * TTFT on mobile hardware) forever without ever generalizing. chrono-node
+ * is a dedicated, actively maintained date-parsing library — running it
+ * directly on the raw note BEFORE the LLM call turns "recall this
+ * substring from scratch" (what a 1B model keeps missing — see the
+ * "Book a movie ticket this Friday." on-device repro) into "select one of
+ * these already-found candidates" (a much easier task for a small model),
+ * and covers whatever phrasing chrono itself can parse, not just phrasings
+ * this file has a dedicated example for.
+ *
+ * `{ forwardDate: true }` matches resolveActionDate's own chrono options —
+ * a bare "Friday" should be treated as the NEXT Friday, and detection
+ * should agree with resolution about what counts as a valid reference.
+ *
+ * Returns unique, trimmed `.text` substrings only (not parsed Date
+ * objects) — normalizeExtracted only needs to know what substrings are
+ * legitimate to hand back as a task's date_phrase; the actual date
+ * arithmetic still happens exactly once, in resolveActionDate, unchanged.
+ */
+function detectDatePhrases(rawText: string, todayISO: string): string[] {
+  const referenceDate = parseIsoDateLocal(todayISO);
+  const results = chrono.parse(rawText, referenceDate, { forwardDate: true });
+
+  const seen = new Set<string>();
+  const phrases: string[] = [];
+  for (const result of results) {
+    const text = result.text.trim();
+    const key = text.toLowerCase();
+    if (text && !seen.has(key)) {
+      seen.add(key);
+      phrases.push(text);
+    }
+  }
+  return phrases;
+}
+
 function resolveActionDate(datePhrase: string, todayISO: string): string {
   const trimmed = datePhrase.trim();
   if (!trimmed) {
@@ -299,8 +341,30 @@ function hasRecurrenceEvidence(rawNoteText: string): boolean {
  * CAN'T enforce: what each field actually MEANS, and the semantic judgment
  * calls behind recurrence classification — those are still entirely on the
  * model, and still need real instruction, not just a schema.
+ *
+ * `detectedPhrases` (see detectDatePhrases above) is injected here as an
+ * "answer key" for date_phrase specifically — the one field a small model
+ * keeps failing to recall correctly from scratch. This does NOT replace
+ * normalizeExtracted's own reconciliation against the same list (a prompt
+ * is a request, not a guarantee — grammar is the only thing that's ever
+ * actually enforced in this file); it's the other half of the same fix,
+ * giving the model its best shot at getting date_phrase right in the first
+ * place instead of relying entirely on the deterministic single-candidate
+ * fallback to correct it after the fact.
  */
-function buildSystemPrompt(todayISO: string): string {
+function buildSystemPrompt(todayISO: string, detectedPhrases: string[]): string {
+  const detectedPhrasesBlock =
+    detectedPhrases.length > 0
+      ? "A separate, exact string-matching pass already found these date/time phrases in this note — " +
+        "treat this as your answer key: " +
+        JSON.stringify(detectedPhrases) +
+        ". For every task that has a date, `date_phrase` MUST be copied EXACTLY character-for-character " +
+        "from this list — never write it slightly differently, never invent a phrase that isn't in this " +
+        "list, and never leave date_phrase empty if one of these phrases clearly belongs to that task. If " +
+        "a task genuinely has no date of its own, still use \"\" even though other phrases were detected " +
+        "elsewhere in the note.\n\n"
+      : "";
+
   return (
     "You are a task-extraction engine for a personal notes app. Read the note text the user " +
     "provides and extract EVERY actionable to-do item mentioned in it — an actionable item is " +
@@ -310,6 +374,7 @@ function buildSystemPrompt(todayISO: string): string {
     "array entry. Never stop after the first task you find; keep reading to the end of the note and " +
     "list all of them, however many there are.\n\n" +
     `Today's Date: ${todayISO}\n\n` +
+    detectedPhrasesBlock +
     "Each item has three fields:\n" +
     '  "task": a short, clear description of the action item\n' +
     '  "date_phrase": the date/time reference exactly as it appears in the note (e.g. "tomorrow", ' +
@@ -507,7 +572,7 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
   },
 ];
 
-function buildPrompt(rawText: string, todayISO: string): string {
+function buildPrompt(rawText: string, todayISO: string, detectedPhrases: string[]): string {
   const fewShotTurns = FEW_SHOT_EXAMPLES.map(
     ({ input, answer }) =>
       "<|start_header_id|>user<|end_header_id|>\n\n" +
@@ -518,7 +583,7 @@ function buildPrompt(rawText: string, todayISO: string): string {
 
   return (
     "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" +
-    `${buildSystemPrompt(todayISO)}${EOT_TOKEN}` +
+    `${buildSystemPrompt(todayISO, detectedPhrases)}${EOT_TOKEN}` +
     fewShotTurns +
     "<|start_header_id|>user<|end_header_id|>\n\n" +
     `${rawText}${EOT_TOKEN}` +
@@ -560,26 +625,67 @@ function isRecurrence(value: unknown): value is Recurrence {
  * entirely (an empty/missing task), rather than throwing and discarding
  * every other item the model got right.
  */
-function normalizeExtracted(raw: unknown, todayISO: string, rawNoteText: string): ExtractedToDo[] {
+function normalizeExtracted(
+  raw: unknown,
+  todayISO: string,
+  rawNoteText: string,
+  detectedPhrases: string[]
+): ExtractedToDo[] {
   if (!Array.isArray(raw)) {
     return [];
   }
 
   const noteHasRecurrenceEvidence = hasRecurrenceEvidence(rawNoteText);
+  const lowerNoteText = rawNoteText.toLowerCase();
+
+  // Filtered up front, not inline in the loop below, so the "exactly one
+  // task in this note" check the single-candidate fallback relies on isn't
+  // thrown off by junk entries (missing/empty task) that never make it into
+  // the final result anyway.
+  const validEntries = raw
+    .filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === "object")
+    .filter((record) => typeof record.task === "string" && record.task.trim().length > 0);
 
   const results: ExtractedToDo[] = [];
-  for (const entry of raw) {
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
-    const record = entry as Record<string, unknown>;
+  for (const record of validEntries) {
+    const task = (record.task as string).trim();
 
-    const task = typeof record.task === "string" ? record.task.trim() : "";
-    if (!task) {
-      continue;
-    }
+    let datePhrase = typeof record.date_phrase === "string" ? record.date_phrase.trim() : "";
 
-    const datePhrase = typeof record.date_phrase === "string" ? record.date_phrase : "";
+    // Reconciles the model's claim against chrono's own deterministic
+    // detection (see detectDatePhrases's doc comment) — the model's raw
+    // date_phrase is treated as a claim, not ground truth, the same
+    // "don't trust the model on something a plain check can verify"
+    // principle hasRecurrenceEvidence below already applies to recurrence.
+    if (datePhrase) {
+      const matchesDetected = detectedPhrases.some((phrase) => phrase.toLowerCase() === datePhrase.toLowerCase());
+      if (!matchesDetected && !lowerNoteText.includes(datePhrase.toLowerCase())) {
+        // Hallucinated a phrase that isn't actually anywhere in the note —
+        // never trust it. (A phrase chrono missed but that's still a real
+        // substring of the note is left alone here; chrono not catching
+        // every possible phrasing is expected and fine, hallucinating text
+        // that was never written is not.)
+        console.warn(
+          `[transformationEngine] Dropping hallucinated date_phrase "${datePhrase}" for "${task}" — ` +
+            "not found anywhere in the note."
+        );
+        datePhrase = "";
+      }
+    } else if (validEntries.length === 1 && detectedPhrases.length === 1) {
+      // The one case that's genuinely safe to auto-fill: a single-task note
+      // where chrono found exactly one date candidate and the model still
+      // came back empty — no ambiguity about which task it belongs to. This
+      // is the deterministic fix for the exact on-device miss ("Book a
+      // movie ticket this Friday." -> date_phrase "") that motivated this
+      // whole reconciliation step, generalized to any phrasing chrono can
+      // detect rather than one more few-shot example for one more shape.
+      datePhrase = detectedPhrases[0];
+    }
+    // Multi-task, multi-candidate notes are deliberately left alone here —
+    // matching the right date to the right task is a genuine semantic
+    // judgment call still squarely on the model; a count-based heuristic
+    // guessing wrong there would be a worse bug than the one being fixed.
+
     const actionDate = resolveActionDate(datePhrase, todayISO);
 
     let recurrence: Recurrence = isRecurrence(record.recurrence) ? record.recurrence : "none";
@@ -612,9 +718,15 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
   }
 
   const todayISO = todayIso();
+  // Runs before the LLM call, entirely on the JS thread — see
+  // detectDatePhrases's own doc comment. This is a plain synchronous regex/
+  // pattern-matching pass, single-digit milliseconds, with zero interaction
+  // with the shared llama.cpp context or the n_threads tuning in
+  // localLlama.ts; it never competes with inference for CPU.
+  const detectedPhrases = detectDatePhrases(trimmed, todayISO);
 
   try {
-    const prompt = buildPrompt(trimmed, todayISO);
+    const prompt = buildPrompt(trimmed, todayISO, detectedPhrases);
 
     const start = nowMs();
     // Routed through localLlama.ts's shared completion queue, not a direct
@@ -663,7 +775,7 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
       // Extracted's return value only exposes the already-resolved
       // actionDate, which collapses both cases to the same "today" result.
       console.log("[transformationEngine] Raw extracted items (pre-date-resolution):", parsed);
-      return normalizeExtracted(parsed, todayISO, trimmed);
+      return normalizeExtracted(parsed, todayISO, trimmed, detectedPhrases);
     } catch (parseErr) {
       // Logged separately from the outer catch (which also covers
       // getContext()/completion failures) specifically so a parse failure
