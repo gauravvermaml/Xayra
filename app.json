@@ -20,7 +20,7 @@
         "backgroundColor": "#0E0F12"
       },
       "predictiveBackGestureEnabled": false,
-      "versionCode": 31,
+      "versionCode": 34,
       "navigationBarColor": "#1C1C1E",
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [

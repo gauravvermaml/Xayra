@@ -943,10 +943,15 @@ async function waitForCoolerThermalStateIfNeeded(): Promise<void> {
     // this is a nice-to-have deferral, never a dependency the extraction
     // pipeline can be blocked on indefinitely by an unknown signal.
     if (status === null || status < ThermalStatus.MODERATE) {
+      if (status !== null) {
+        console.log(`[ThermalGate] status=${status} (below MODERATE) — proceeding with extraction.`);
+      }
       return;
     }
+    console.log(`[ThermalGate] status=${status} (MODERATE+) — deferring extraction ${delayMs}ms.`);
     await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
+  console.log("[ThermalGate] still warm after all retries — proceeding with extraction anyway.");
 }
 
 /**
