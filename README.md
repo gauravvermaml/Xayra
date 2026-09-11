@@ -68,7 +68,7 @@ Every stage of the pipeline below runs on-device. Nothing in it makes a network 
 [`whisper.rn`](https://github.com/mybigday/whisper.rn) binds whisper.cpp's C++ engine directly into the app; `services/ai/localWhisper.ts` resolves a `ggml-tiny.en.bin` (preferred, lower latency) or `ggml-base.en.bin` model from the document directory and transcribes both recorded voice notes and spoken chat queries.
 
 ### Intent & Reasoning
-`services/ai/localLlama.ts` runs a quantized Llama 3.2 Instruct GGUF model via [`llama.rn`](https://github.com/mybigday/llama.rn) (llama.cpp). Two sizes are supported — a 1B and a 3B variant, both `-UD-Q4_K_XL.gguf` (Unsloth Dynamic quantization) — and `services/ai/modelDownloadManager.ts` fetches whichever one fits the device's RAM tier (see [Hardware Requirements](#hardware-requirements--constraints)). If both happen to be present on disk, the 3B is preferred.
+`services/ai/localLlama.ts` runs a quantized Llama 3.2 Instruct GGUF model via [`llama.rn`](https://github.com/mybigday/llama.rn) (llama.cpp). Two sizes are supported — a 1B and a 3B variant, both `-UD-Q4_K_XL.gguf` (Unsloth Dynamic quantization). Every device downloads the 1B model unconditionally on first run; a device only ever moves to the 3B model via a real, measured opportunistic upgrade — see [Hardware Requirements](#hardware-requirements--constraints) for why RAM alone was dropped as the selection signal, and `services/ai/modelPerformanceTracker.ts` / `maybeAttemptTierUpgrade()` in `services/ai/modelDownloadManager.ts` for how the upgrade is decided and trialed. If a 3B file is already on disk (an already-upgraded device, or one manually pushed via `adb`), it's preferred over the 1B.
 
 ### Explicit Mode Routing
 Earlier builds (through Build 21) classified every submission automatically via a two-stage regex + Llama micro-prompt router (`services/ai/intentRouter.ts`). As of Build 22, that file — and its Llama-side half, `classifyIntentWithLlama()` in `services/ai/localLlama.ts` — is **deleted**, not just unused. Routing is now 100% deterministic: an explicit `[ Record | Ask ]` pill (floating above the drawer, synced with which drawer segment is showing) is the single source of truth for what a submission does, set only by the user's own tap. `RECORD` always saves a note (SQLite + vector index, zero RAG calls); `ASK` always runs retrieval + generation (zero note writes) — never both, never a guess. This is a deliberate product reversal, not a bug fix: automatic classification traded away the occasional wrong guess on ambiguous input (e.g. "do laundry" vs. "did I do laundry") for convenience; the explicit pill trades that convenience back for the user always knowing exactly what a submission will do before they make it.
@@ -79,7 +79,9 @@ Earlier builds (through Build 21) classified every submission automatically via 
 ## High-Performance Infrastructure
 
 ### Model Streaming
-None of the model files (whisper GGML, ONNX embedding model, Llama GGUF — tens of MB to ~2GB) are bundled into the app or downloaded automatically at every launch. When a feature is first used, `services/ai/modelDownloadManager.ts` streams the required file directly to disk using `expo-file-system`'s native `createDownloadResumable()` — a true OS-level background download, not a hand-rolled `fetch()` + JS-heap buffer loop, so multi-hundred-MB files never risk an out-of-memory crash from holding the whole download in JS memory at once. Downloads are pausable/resumable, survive an airplane-mode drop with automatic reconnect, and are backed by an explicit keep-awake lock (`expo-keep-awake`) so the screen sleeping mid-download doesn't stall it.
+None of the model files (whisper GGML, ONNX embedding model, Llama GGUF — tens of MB to ~2GB) are bundled into the app or downloaded automatically at every launch. The app gates entirely behind a full-screen "One Door, Opens Once" onboarding screen (`components/OnboardingSetupScreen.tsx`) until all three are on disk — see `PROJECT_STATE_HANDOFF.md`'s Build 32 entry for why a partial/locked app state was worse than a single clear setup step.
+
+Whisper and the Llama chat model — the two large, slow phases — are handed to **Android's own system `DownloadManager` service** via a local native module, `modules/download-bridge/` (not a hand-rolled `fetch()` + JS-heap buffer loop, and not even `expo-file-system`'s `DownloadResumable`): a real OS-level transfer that survives this app's process being frozen, killed, or backgrounded, which the onboarding screen's own "feel free to minimize" copy explicitly invites. The much smaller embedding model still uses `expo-file-system`'s `createDownloadResumable()` directly (`services/ai/embeddingModel.ts`) — not worth the same treatment for a file that finishes in seconds. `expo-keep-awake` backs the whole flow so the screen sleeping mid-setup doesn't stall it.
 
 Files are fetched from a **Cloudflare Worker CDN proxy** (`services/ai/modelCdn.ts`'s `MODEL_CDN_BASE_URL`) rather than hitting Hugging Face or an R2 bucket directly from the client.
 
@@ -91,9 +93,11 @@ The moment a model finishes downloading (or is found already on disk at boot), `
 
 ## Hardware Requirements & Constraints
 
-Running Whisper transcription and a multi-hundred-MB-to-multi-GB Llama context concurrently on-device is memory-intensive. `services/ai/modelDownloadManager.ts` reads `expo-device`'s `Device.totalMemory` and treats **7GB** as the tier boundary (`RAM_TIER_THRESHOLD_BYTES`): at or above it, a device is treated as a modern flagship and gets the 3B Llama model; below it, the 1B model. This project's own low-end test device (a Galaxy A50) is 4GB and is the reference point for the "must still work" floor.
+Running Whisper transcription and a multi-hundred-MB-to-multi-GB Llama context concurrently on-device is memory-intensive — but RAM alone turned out to be a bad proxy for whether a device can actually run the 3B Llama model at a *usable speed*, not just fit it in memory. Confirmed on-device (a Redmi Note 8 Pro — 8 cores, 7.48 GiB RAM, comfortably over any RAM threshold): a first retrieval on the 3B model took **12+ minutes**, because the CPU (a 2019 mid-range chipset, further capped to a quarter of its cores by the thread-sizing fix below) can't sustain it, regardless of RAM headroom.
 
-**Worth being precise about scope here:** that RAM-tier split is implemented in app code and confirmed in the repo. A Google Play Console device-catalog exclusion rule (blocking install entirely below some RAM floor) is a Play Console **dashboard** setting, external to this codebase — nothing in `app.json`/`eas.json` currently encodes one, so if that exclusion is desired as a second line of defense against OOM terminations on very low-RAM devices, it needs to be configured directly in the Play Console's device catalog, not assumed from anything checked into this repo.
+Every device now downloads the 1B model unconditionally on first run. `services/ai/modelDownloadManager.ts` still reads `expo-device`'s `Device.totalMemory` and treats **7GB** as a hard prerequisite (`RAM_FLOOR_FOR_3B_BYTES`) for a device to even be *considered* for the 3B model — but RAM alone no longer decides the outcome. `services/ai/modelPerformanceTracker.ts` tracks a rolling window of real, measured completion throughput (llama.cpp's own native `timings.predicted_per_second`, never a synthetic one-shot benchmark — a single measurement taken at the wrong moment, before sustained-load thermal throttling or while other setup work is still competing for CPU, can misjudge a device in either direction); only once a device's real 1B performance comfortably clears a usable floor does `maybeAttemptTierUpgrade()` even attempt the 2GB 3B download, and even then the upgrade is only kept if a real trial completion on the 3B model itself clears that same floor — otherwise it's rolled back to 1B automatically, no user-facing decision either way. This project's own low-end test device (a Galaxy A50, 4GB) remains the reference point for the "must still work at all" floor; the Redmi is the reference point for "fits the old RAM-only tier boundary but shouldn't get the bigger model anyway."
+
+**Worth being precise about scope here:** the tiering logic above is implemented in app code and confirmed in the repo. A Google Play Console device-catalog exclusion rule (blocking install entirely below some RAM/SoC floor) is a Play Console **dashboard** setting, external to this codebase — nothing in `app.json`/`eas.json` currently encodes one. It was evaluated as a *complementary*, not alternative, lever to the in-app tiering above (a backstop for genuinely incompatible hardware, once real crash/ANR telemetry exists to justify one) — not assumed from anything checked into this repo, and not a substitute for measuring real device performance in-app.
 
 ## Handsfree Mode
 
@@ -144,7 +148,7 @@ npx expo run:android
 
 ### Model files
 
-None of the model files ship with the app — in normal use, `services/ai/modelDownloadManager.ts` streams them on demand from the Cloudflare Worker CDN the first time a feature needs one, choosing the Llama size automatically by device RAM tier (see [Hardware Requirements](#hardware-requirements--constraints)). For local development without going through that flow, each file can also be pushed manually to the app's document directory:
+None of the model files ship with the app — in normal use, the onboarding flow (`components/OnboardingSetupScreen.tsx` + `services/ai/modelDownloadManager.ts`) streams them on demand from the Cloudflare Worker CDN, always starting with the 1B Llama model (see [Hardware Requirements](#hardware-requirements--constraints) for why RAM alone no longer picks the 3B model outright). For local development without going through that flow, each file can also be pushed manually to the app's document directory — this bypasses the onboarding gate/DownloadManager plumbing entirely and lands the files exactly where `FileSystem.documentDirectory` expects them:
 
 ```bash
 # 1. Whisper (speech-to-text) — tiny is preferred for lower latency; base is used as a fallback if present instead
@@ -154,9 +158,13 @@ adb push ggml-tiny.en.bin /data/data/com.anonymous.silentconfidant/files/
 adb push bge-small-en-v1.5-quantized.onnx /data/data/com.anonymous.silentconfidant/files/
 adb push bge-small-en-v1.5-vocab.txt /data/data/com.anonymous.silentconfidant/files/
 
-# 3. Llama 3.2 Instruct (chat answers) — pick ONE, matching the -UD-Q4_K_XL quantization
+# 3. Llama 3.2 Instruct (chat answers) — pick ONE, matching the -UD-Q4_K_XL quantization.
+# Pushing the 3B file directly here skips the in-app measured-performance
+# trial entirely — fine for local dev, but means the device never actually
+# proved it can run 3B at a usable speed the way a real opportunistic
+# upgrade would have required.
 adb push Llama-3.2-1B-Instruct-UD-Q4_K_XL.gguf /data/data/com.anonymous.silentconfidant/files/
-# — or, on a 7GB+ RAM device —
+# — or —
 adb push Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf /data/data/com.anonymous.silentconfidant/files/
 ```
 
