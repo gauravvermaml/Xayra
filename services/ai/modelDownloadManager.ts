@@ -167,60 +167,101 @@ class OfflineDownloadError extends Error {
   }
 }
 
+/** Thrown when a phase fails for a reason that ISN'T confirmed offline (a
+ * TLS handshake blip, a read timeout, a connection reset) after exhausting
+ * `TRANSIENT_RETRY_DELAYS_MS`'s automatic retries. Confirmed on-device
+ * (Pixel 9 Pro, Build 31 testing): a tester's Wi-Fi never actually dropped,
+ * but a transient failure still didn't flip `Network.getNetworkStateAsync()`
+ * to offline — so this used to fall through to the generic "delete
+ * everything and start over" branch below despite being just as recoverable
+ * as the confirmed-offline case. The `.download` file and its native resume
+ * data are preserved exactly the same way OfflineDownloadError's are; the
+ * only real difference is there's no network-reconnect event to silently
+ * resume on, so surfacing this as `status: "error"` and letting the user tap
+ * "Resume Download" is correct — the fix is that tap now actually resumes
+ * instead of silently restarting the whole phase from byte 0. */
+class TransientDownloadError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "TransientDownloadError";
+  }
+}
+
+/** Delays before each automatic retry of a non-offline failure, tried in
+ * order before a phase gives up and surfaces `TransientDownloadError` to the
+ * user at all — most TLS/timeout blips self-resolve within a few seconds, so
+ * this alone should make the manual "Resume Download" tap unnecessary for
+ * the common case, not just make it correct when it is needed. */
+const TRANSIENT_RETRY_DELAYS_MS = [2000, 5000, 10000];
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Streams `url` directly to `dest` using expo-file-system's native resumable
  * downloader — the JS layer only observes progress, never touches a byte.
- * Resumes a phase that was previously paused for being offline (same `dest`)
- * via native `resumeAsync()`; otherwise starts a fresh `downloadAsync()`.
- * Moves the `.download` sibling into place only once the native download
- * reports success, so `dest` never briefly exists as a truncated file.
+ * Resumes a phase that was previously paused (offline OR a transient error
+ * below) via native `resumeAsync()`; otherwise starts a fresh
+ * `downloadAsync()`. Moves the `.download` sibling into place only once the
+ * native download reports success, so `dest` never briefly exists as a
+ * truncated file.
  */
 async function downloadFileNative(url: string, dest: string, onProgress: PhaseProgressCallback): Promise<void> {
   const tmpDest = `${dest}.download`;
 
-  let resumable: FileSystem.DownloadResumable;
-  let isResuming = false;
-  if (pausedPhaseHandle && pausedPhaseHandle.dest === dest) {
-    resumable = pausedPhaseHandle.resumable;
-    isResuming = true;
-    pausedPhaseHandle = null;
-  } else {
-    resumable = FileSystem.createDownloadResumable(url, tmpDest, {}, (progress) => {
-      if (progress.totalBytesExpectedToWrite > 0) {
-        onProgress(
-          progress.totalBytesWritten / progress.totalBytesExpectedToWrite,
-          progress.totalBytesWritten,
-          progress.totalBytesExpectedToWrite
-        );
+  for (let attempt = 0; ; attempt++) {
+    let resumable: FileSystem.DownloadResumable;
+    let isResuming = false;
+    if (pausedPhaseHandle && pausedPhaseHandle.dest === dest) {
+      resumable = pausedPhaseHandle.resumable;
+      isResuming = true;
+      pausedPhaseHandle = null;
+    } else {
+      resumable = FileSystem.createDownloadResumable(url, tmpDest, {}, (progress) => {
+        if (progress.totalBytesExpectedToWrite > 0) {
+          onProgress(
+            progress.totalBytesWritten / progress.totalBytesExpectedToWrite,
+            progress.totalBytesWritten,
+            progress.totalBytesExpectedToWrite
+          );
+        }
+      });
+    }
+
+    activePhaseHandle = { resumable, tmpDest, dest };
+
+    try {
+      const result = isResuming ? await resumable.resumeAsync() : await resumable.downloadAsync();
+      if (!result || (result.status !== 200 && result.status !== 206)) {
+        throw new Error(`Download failed (HTTP ${result?.status ?? "unknown"}).`);
       }
-    });
-  }
-
-  activePhaseHandle = { resumable, tmpDest, dest };
-
-  try {
-    const result = isResuming ? await resumable.resumeAsync() : await resumable.downloadAsync();
-    if (!result || (result.status !== 200 && result.status !== 206)) {
-      throw new Error(`Download failed (HTTP ${result?.status ?? "unknown"}).`);
-    }
-    await FileSystem.moveAsync({ from: tmpDest, to: dest });
-    activePhaseHandle = null;
-  } catch (err) {
-    const netState = await Network.getNetworkStateAsync();
-    const isOffline = netState.isConnected === false || netState.isInternetReachable === false;
-    if (isOffline) {
-      // Best-effort: pauseAsync can itself throw if the native task already
-      // stopped on its own when the socket dropped — either way, the partial
-      // `.download` file and the resumable's internal resume data survive,
-      // which is all resumeAsync() on the next attempt actually needs.
-      await resumable.pauseAsync().catch(() => {});
-      pausedPhaseHandle = activePhaseHandle;
+      await FileSystem.moveAsync({ from: tmpDest, to: dest });
       activePhaseHandle = null;
-      throw new OfflineDownloadError();
+      return;
+    } catch (err) {
+      // Every failure here — confirmed-offline or not — preserves the
+      // partial `.download` file and the resumable's native resume data via
+      // pauseAsync(), rather than only doing so for the subset
+      // getNetworkStateAsync() happens to classify as "offline". pauseAsync
+      // can itself throw if the native task already stopped on its own when
+      // the socket dropped; either way the partial file and its resume data
+      // survive, which is all a later resumeAsync() needs.
+      await resumable.pauseAsync().catch(() => {});
+      pausedPhaseHandle = { resumable, tmpDest, dest };
+      activePhaseHandle = null;
+
+      const netState = await Network.getNetworkStateAsync();
+      const isOffline = netState.isConnected === false || netState.isInternetReachable === false;
+      if (isOffline) {
+        throw new OfflineDownloadError();
+      }
+      if (attempt < TRANSIENT_RETRY_DELAYS_MS.length) {
+        await delay(TRANSIENT_RETRY_DELAYS_MS[attempt]);
+        continue;
+      }
+      throw new TransientDownloadError(err);
     }
-    activePhaseHandle = null;
-    await FileSystem.deleteAsync(tmpDest, { idempotent: true });
-    throw err instanceof Error ? err : new Error(String(err));
   }
 }
 
@@ -525,6 +566,11 @@ async function beginDownloads(tier: LlamaTier): Promise<void> {
       watchForReconnectThenResume(tier);
       return;
     }
+    // A plain download error (bad HTTP status, or a TransientDownloadError
+    // that exhausted its automatic retries) — either way, unlike before,
+    // every byte streamed so far is still safely on disk and the resumable
+    // is paused and retained in pausedPhaseHandle. "Resume Download" below
+    // continues from there instead of restarting the phase from byte 0.
     setStatus({ status: "error", error: err instanceof Error ? err.message : String(err) });
   }
 }
@@ -540,7 +586,10 @@ export async function allowCellularDownloadAndResume(): Promise<void> {
  * call any time — `beginDownloads` always re-checks which phases are already
  * complete, and `downloadFileNative` resumes a still-paused phase natively
  * (see `pausedPhaseHandle`) rather than re-streaming bytes that already
- * landed. Wired to the "Resume Download" button in chat.tsx.
+ * landed, REGARDLESS of whether the prior failure was confirmed-offline or a
+ * transient one (see TransientDownloadError) — both preserve
+ * `pausedPhaseHandle` now, so this always continues rather than restarting.
+ * Wired to the "Resume Download" button in ChatSheetContent.tsx.
  */
 export async function resumeDownloads(): Promise<void> {
   await beginDownloads(resolveLlamaTier());
