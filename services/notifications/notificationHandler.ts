@@ -19,8 +19,12 @@ import * as Notifications from "expo-notifications";
  */
 Notifications.setNotificationHandler({
   handleNotification: async (notification) => {
-    const isToDoReminder = notification.request.content.data?.kind === "todo-reminder";
-    if (isToDoReminder) {
+    const kind = notification.request.content.data?.kind;
+    // todo-reminder (todoNotifications.ts) and setup-complete
+    // (setupCompleteNotification.ts) are the two kinds actually worth
+    // interrupting the user for — everything else falls through to
+    // downloadNotification.ts's silent progress-mirror default below.
+    if (kind === "todo-reminder" || kind === "setup-complete") {
       return {
         shouldShowBanner: true,
         shouldShowList: true,

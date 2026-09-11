@@ -130,6 +130,22 @@ export const todos = sqliteTable("todos", {
 });
 
 /**
+ * Generic one-row-per-flag key/value store for small durable app state that
+ * isn't really "data" (no user-facing list/search/query needs) but still
+ * belongs in the same encrypted SQLite DB as everything else rather than a
+ * second storage mechanism — see services/settings/appSettings.ts, whose
+ * `isSetupComplete()`/`markSetupComplete()` are its first use (the "One
+ * Door, Opens Once" onboarding gate in app/_layout.tsx). Deliberately NOT
+ * the same thing as services/settings/preferences.ts's plain-JSON-file
+ * `allowCellularDownloads` flag, which predates this table and was left
+ * as-is rather than migrated — this table is for state added going forward.
+ */
+export const appSettings = sqliteTable("app_settings", {
+  key: text("key").primaryKey(),
+  value: text("value").notNull(),
+});
+
+/**
  * FTS5 keyword index over `notes.content`, as an "external content" table:
  * it stores no copy of the text itself, just the token index, keyed by
  * `notes.rowid`. Kept in sync by the triggers below rather than updated

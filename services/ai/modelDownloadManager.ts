@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import * as Device from "expo-device";
+import { enqueueDownload, queryDownload } from "expo-download-bridge";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Network from "expo-network";
 
@@ -53,13 +54,14 @@ export type ModelDownloadState =
   | "ready"
   | "error"
   | "cellular_blocked"
-  /** The native download failed because the device itself went offline
-   * (Airplane mode, a Wi-Fi drop) rather than a genuine download error —
-   * distinct from "error" so the UI can say "paused, we'll resume
-   * automatically" instead of implying something actually went wrong. Every
-   * byte streamed to disk so far is preserved (native `pauseAsync()`, not a
-   * crash) and `watchForReconnectThenResume` below fires `resumeDownloads()`
-   * the moment connectivity returns, with no user action required. */
+  /** The whisper/llama phase (see `downloadFileViaSystemManager`) is paused
+   * by Android's own DownloadManager, almost always for a connectivity
+   * reason — distinct from "error" so the UI can say "paused, we'll resume
+   * automatically" instead of implying something actually went wrong.
+   * DownloadManager resumes it on its own the moment connectivity returns;
+   * no user action, JS-side listener, or `resumeDownloads()` call required —
+   * the poll loop in `downloadFileViaSystemManager` just keeps polling and
+   * flips this back to "downloading" once `query()` reports "running" again. */
   | "paused_offline";
 
 export type ModelDownloadStatus = {
@@ -78,6 +80,12 @@ export type ModelDownloadStatus = {
    * the one asset actually big enough for a user to weigh before agreeing
    * to burn mobile data on it. */
   chatModelSizeLabel: string;
+  /** Which of the three real download phases have actually landed on disk —
+   * exposed so screens/OnboardingSetupScreen.tsx's step checklist can show
+   * genuine per-step "Ready" state instead of only the combined progress
+   * bar (whisper/embedding typically finish in a couple of minutes, long
+   * before the llama phase does, and that difference is worth showing). */
+  phasesReady: { whisper: boolean; embedding: boolean; llama: boolean };
   error: string | null;
 };
 
@@ -127,146 +135,8 @@ async function isChatModelDownloaded(filename: string): Promise<boolean> {
 
 type PhaseProgressCallback = (fraction: number, bytesWritten: number, bytesTotal: number) => void;
 
-// ---- Zero-heap native direct-to-disk streaming -----------------------------
-//
-// Whisper and the Llama chat model (the two large, Worker-CDN-hosted assets —
-// the embedding model stays on its existing single-stream download from
-// Hugging Face; see embeddingModel.ts) stream straight from the network
-// socket to disk via expo-file-system's *native* `DownloadResumable` —
-// deliberately NOT hand-rolled JS-level chunking: an earlier version of this
-// file fetched 50MB `Range` requests and buffered each one as a JS
-// `Uint8Array`/`ArrayBuffer` before writing it out, which put up to 50MB of
-// raw model bytes on the JS heap at a time and was a real OOM risk on a
-// memory-constrained device (the Galaxy A50 this project targets is 4GB,
-// already shared with Llama's own multi-hundred-MB native allocation). The
-// native downloader never surfaces the bytes to JS at all — this layer only
-// ever sees the periodic `{ totalBytesWritten, totalBytesExpectedToWrite }`
-// progress callback, which is all `onPhaseProgress`/`updateTelemetry` need.
-
-/** Kept per in-flight phase (whisper or llama) so a network drop can be
- * resumed with the SAME native `DownloadResumable` instance via
- * `resumeAsync()` — true byte-exact native resume, no JS-side byte tracking —
- * rather than restarting the phase's destination file from zero. Cleared the
- * moment the phase either completes or fails for a reason other than being
- * offline. */
-type PausablePhaseHandle = { resumable: FileSystem.DownloadResumable; tmpDest: string; dest: string };
-let activePhaseHandle: PausablePhaseHandle | null = null;
-let pausedPhaseHandle: PausablePhaseHandle | null = null;
-
-/** Thrown instead of a generic error when a native download fails *because
- * the device is offline* (Airplane mode, a Wi-Fi drop mid-stream) — signals
- * `beginDownloads` to pause quietly (`status: "paused_offline"`) rather than
- * surfacing it as a download error. The in-flight `DownloadResumable` is
- * paused (native `pauseAsync()`, so the OS-level download task itself stops
- * cleanly) and retained in `pausedPhaseHandle` for a true native resume once
- * connectivity returns. */
-class OfflineDownloadError extends Error {
-  constructor() {
-    super("Lost network connection.");
-    this.name = "OfflineDownloadError";
-  }
-}
-
-/** Thrown when a phase fails for a reason that ISN'T confirmed offline (a
- * TLS handshake blip, a read timeout, a connection reset) after exhausting
- * `TRANSIENT_RETRY_DELAYS_MS`'s automatic retries. Confirmed on-device
- * (Pixel 9 Pro, Build 31 testing): a tester's Wi-Fi never actually dropped,
- * but a transient failure still didn't flip `Network.getNetworkStateAsync()`
- * to offline — so this used to fall through to the generic "delete
- * everything and start over" branch below despite being just as recoverable
- * as the confirmed-offline case. The `.download` file and its native resume
- * data are preserved exactly the same way OfflineDownloadError's are; the
- * only real difference is there's no network-reconnect event to silently
- * resume on, so surfacing this as `status: "error"` and letting the user tap
- * "Resume Download" is correct — the fix is that tap now actually resumes
- * instead of silently restarting the whole phase from byte 0. */
-class TransientDownloadError extends Error {
-  constructor(cause: unknown) {
-    super(cause instanceof Error ? cause.message : String(cause));
-    this.name = "TransientDownloadError";
-  }
-}
-
-/** Delays before each automatic retry of a non-offline failure, tried in
- * order before a phase gives up and surfaces `TransientDownloadError` to the
- * user at all — most TLS/timeout blips self-resolve within a few seconds, so
- * this alone should make the manual "Resume Download" tap unnecessary for
- * the common case, not just make it correct when it is needed. */
-const TRANSIENT_RETRY_DELAYS_MS = [2000, 5000, 10000];
-
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Streams `url` directly to `dest` using expo-file-system's native resumable
- * downloader — the JS layer only observes progress, never touches a byte.
- * Resumes a phase that was previously paused (offline OR a transient error
- * below) via native `resumeAsync()`; otherwise starts a fresh
- * `downloadAsync()`. Moves the `.download` sibling into place only once the
- * native download reports success, so `dest` never briefly exists as a
- * truncated file.
- */
-async function downloadFileNative(url: string, dest: string, onProgress: PhaseProgressCallback): Promise<void> {
-  const tmpDest = `${dest}.download`;
-
-  for (let attempt = 0; ; attempt++) {
-    let resumable: FileSystem.DownloadResumable;
-    let isResuming = false;
-    if (pausedPhaseHandle && pausedPhaseHandle.dest === dest) {
-      resumable = pausedPhaseHandle.resumable;
-      isResuming = true;
-      pausedPhaseHandle = null;
-    } else {
-      resumable = FileSystem.createDownloadResumable(url, tmpDest, {}, (progress) => {
-        if (progress.totalBytesExpectedToWrite > 0) {
-          onProgress(
-            progress.totalBytesWritten / progress.totalBytesExpectedToWrite,
-            progress.totalBytesWritten,
-            progress.totalBytesExpectedToWrite
-          );
-        }
-      });
-    }
-
-    activePhaseHandle = { resumable, tmpDest, dest };
-
-    try {
-      const result = isResuming ? await resumable.resumeAsync() : await resumable.downloadAsync();
-      if (!result || (result.status !== 200 && result.status !== 206)) {
-        throw new Error(`Download failed (HTTP ${result?.status ?? "unknown"}).`);
-      }
-      await FileSystem.moveAsync({ from: tmpDest, to: dest });
-      activePhaseHandle = null;
-      return;
-    } catch (err) {
-      // Every failure here — confirmed-offline or not — preserves the
-      // partial `.download` file and the resumable's native resume data via
-      // pauseAsync(), rather than only doing so for the subset
-      // getNetworkStateAsync() happens to classify as "offline". pauseAsync
-      // can itself throw if the native task already stopped on its own when
-      // the socket dropped; either way the partial file and its resume data
-      // survive, which is all a later resumeAsync() needs.
-      await resumable.pauseAsync().catch(() => {});
-      pausedPhaseHandle = { resumable, tmpDest, dest };
-      activePhaseHandle = null;
-
-      const netState = await Network.getNetworkStateAsync();
-      const isOffline = netState.isConnected === false || netState.isInternetReachable === false;
-      if (isOffline) {
-        throw new OfflineDownloadError();
-      }
-      if (attempt < TRANSIENT_RETRY_DELAYS_MS.length) {
-        await delay(TRANSIENT_RETRY_DELAYS_MS[attempt]);
-        continue;
-      }
-      throw new TransientDownloadError(err);
-    }
-  }
-}
-
-async function downloadChatModel(filename: string, onProgress: PhaseProgressCallback): Promise<void> {
-  await downloadFileNative(`${MODEL_CDN_BASE_URL}/${filename}`, chatModelPath(filename), onProgress);
 }
 
 type Listener = (status: ModelDownloadStatus) => void;
@@ -279,6 +149,7 @@ let currentStatus: ModelDownloadStatus = {
   speedMBps: 0,
   etaSeconds: 0,
   chatModelSizeLabel: resolveLlamaTier().sizeLabel,
+  phasesReady: { whisper: false, embedding: false, llama: false },
   error: null,
 };
 
@@ -384,6 +255,15 @@ function isPhaseSkippedEntirely(phase: PhaseName): boolean {
   return phasesSkippedEntirely.has(phase);
 }
 
+/** Read into `ModelDownloadStatus.phasesReady` — see its own doc comment. */
+function snapshotPhasesReady(): ModelDownloadStatus["phasesReady"] {
+  return {
+    whisper: phaseCompleted.has("whisper"),
+    embedding: phaseCompleted.has("embedding"),
+    llama: phaseCompleted.has("llama"),
+  };
+}
+
 function resetTelemetry(tier: LlamaTier): void {
   phaseApproxTotals = {
     whisper: WHISPER_APPROX_BYTES,
@@ -454,6 +334,107 @@ function onPhaseProgress(phase: PhaseName, fraction: number, bytesWritten: numbe
   updateTelemetry(completedBytesBeforeCurrentPhase() + currentPhaseBytes, totalBytesAcrossPendingPhases());
 }
 
+// ---- Android DownloadManager-backed phases ---------------------------------
+//
+// Whisper and the Llama chat model — the two large, slow, Worker-CDN-hosted
+// phases the "One Door, Opens Once" onboarding screen explicitly invites the
+// user to minimize/background the app during (see app/_layout.tsx's root
+// guard and screens/OnboardingSetupScreen.tsx) — are handed to Android's own
+// system DownloadManager (modules/download-bridge) rather than run inside
+// this app's React Native process. DownloadManager is a real OS service:
+// once enqueued, the transfer survives this app's process being frozen,
+// killed, or even a device reboot, which expo-file-system's
+// DownloadResumable (still used below by the small, fast embedding phase —
+// see embeddingModel.ts) cannot offer, since that's still ultimately driven
+// by this app's own process. DownloadManager also already retries/resumes
+// on its own when connectivity drops mid-transfer (status flips to "paused"
+// with a PAUSED_WAITING_FOR_NETWORK reason, then back to "running" once the
+// network returns) — so, unlike the old in-process implementation this
+// replaced, nothing here needs to catch a network error and manually
+// arrange a resume; the poll loop below just keeps polling and mirrors
+// "paused" into the same `status: "paused_offline"` the UI already knows
+// how to render.
+
+const NATIVE_POLL_INTERVAL_MS = 750;
+
+/** DownloadManager writes into this app's app-private *external* files
+ * directory (see DownloadBridgeModule.kt's doc comment) — never the same
+ * directory as `FileSystem.documentDirectory`, which every other service in
+ * this app reads model files from. Moves the finished file across that
+ * boundary once DownloadManager reports success. */
+async function moveIntoDocumentDirectory(sourceUri: string, dest: string): Promise<void> {
+  try {
+    await FileSystem.moveAsync({ from: sourceUri, to: dest });
+  } catch {
+    // A plain rename can fail crossing storage volumes on some Android
+    // versions/vendors — copy+delete always works, since both sides are
+    // ordinary paths this app already has read/write access to.
+    await FileSystem.copyAsync({ from: sourceUri, to: dest });
+    await FileSystem.deleteAsync(sourceUri, { idempotent: true });
+  }
+}
+
+async function clearPersistedNativeDownloadId(phaseKey: "whisper" | "llama"): Promise<void> {
+  const prefs = await readPreferences();
+  const { [phaseKey]: _removed, ...remaining } = prefs.nativeDownloadIds;
+  await writePreferences({ nativeDownloadIds: remaining });
+}
+
+/**
+ * Enqueues (or, if this app's process was killed and relaunched mid-download,
+ * re-attaches to) a DownloadManager transfer and polls it to completion.
+ * Never throws for a connectivity drop — DownloadManager handles that
+ * itself; only a genuine terminal failure (`"failed"`/`"not_found"`) throws.
+ */
+async function downloadFileViaSystemManager(
+  phaseKey: "whisper" | "llama",
+  url: string,
+  destFilename: string,
+  dest: string,
+  title: string,
+  onProgress: PhaseProgressCallback
+): Promise<void> {
+  const prefs = await readPreferences();
+  let downloadId = prefs.nativeDownloadIds[phaseKey];
+  if (downloadId === undefined) {
+    downloadId = enqueueDownload(url, destFilename, title);
+    await writePreferences({ nativeDownloadIds: { ...prefs.nativeDownloadIds, [phaseKey]: downloadId } });
+  }
+
+  for (;;) {
+    const result = queryDownload(downloadId);
+
+    if (result.status === "successful") {
+      await clearPersistedNativeDownloadId(phaseKey);
+      if (!result.localUri) {
+        throw new Error(`${phaseKey} download reported successful with no local file.`);
+      }
+      await moveIntoDocumentDirectory(result.localUri, dest);
+      onProgress(1, result.bytesTotal || 1, result.bytesTotal || 1);
+      return;
+    }
+
+    if (result.status === "failed" || result.status === "not_found") {
+      await clearPersistedNativeDownloadId(phaseKey);
+      throw new Error(`${phaseKey} download failed (DownloadManager status "${result.status}", reason ${result.reason}).`);
+    }
+
+    // "pending" | "running" | "paused" | "unknown" — all still in flight;
+    // DownloadManager itself decides when/whether to retry a "paused" one.
+    if (result.status === "paused" && currentStatus.status !== "paused_offline") {
+      setStatus({ status: "paused_offline", error: null });
+    } else if (result.status !== "paused" && currentStatus.status === "paused_offline") {
+      setStatus({ status: "downloading", error: null });
+    }
+
+    if (result.bytesTotal > 0) {
+      onProgress(result.bytesDownloaded / result.bytesTotal, result.bytesDownloaded, result.bytesTotal);
+    }
+
+    await delay(NATIVE_POLL_INTERVAL_MS);
+  }
+}
+
 // ---- Network / consent -----------------------------------------------------
 
 let networkChangeSubscription: { remove: () => void } | null = null;
@@ -477,34 +458,7 @@ function watchForWifiThenResume(tier: LlamaTier): void {
   });
 }
 
-let reconnectSubscription: { remove: () => void } | null = null;
-
-function stopWatchingForReconnect(): void {
-  reconnectSubscription?.remove();
-  reconnectSubscription = null;
-}
-
-/** Fires while `status === "paused_offline"`: the moment the device reports
- * both `isConnected` and `isInternetReachable` again — any network type, not
- * just Wi-Fi, since a download that was already in flight was already
- * running under whatever consent (Wi-Fi, or an already-approved cellular
- * session) got it started — `resumeDownloads()` re-enters `beginDownloads`,
- * which resumes the paused phase's native `DownloadResumable` exactly where
- * it left off (see `downloadFileNative`'s `pausedPhaseHandle` handoff). No
- * user action required, matching Airplane-mode-off recovering silently. */
-function watchForReconnectThenResume(tier: LlamaTier): void {
-  stopWatchingForReconnect();
-  reconnectSubscription = Network.addNetworkStateListener((event) => {
-    if (event.isConnected === true && event.isInternetReachable === true) {
-      stopWatchingForReconnect();
-      void beginDownloads(tier);
-    }
-  });
-}
-
 async function beginDownloads(tier: LlamaTier): Promise<void> {
-  stopWatchingForReconnect();
-
   const [whisperDone, embeddingDone, llamaDone] = await Promise.all([
     isWhisperModelDownloaded(),
     isEmbeddingModelDownloaded(),
@@ -525,18 +479,22 @@ async function beginDownloads(tier: LlamaTier): Promise<void> {
     phasesSkippedEntirely.add("llama");
   }
 
-  setStatus({ status: "downloading", error: null });
+  setStatus({ status: "downloading", error: null, phasesReady: snapshotPhasesReady() });
   updateTelemetry(completedBytesBeforeCurrentPhase(), totalBytesAcrossPendingPhases());
 
   try {
     if (!whisperDone) {
-      await downloadFileNative(
+      await downloadFileViaSystemManager(
+        "whisper",
         `${MODEL_CDN_BASE_URL}/${WHISPER_BASE_FILENAME}`,
+        WHISPER_BASE_FILENAME,
         getWhisperModelPath(),
+        "Xayra: speech-to-text engine",
         (fraction, bytesWritten, bytesTotal) => onPhaseProgress("whisper", fraction, bytesWritten, bytesTotal)
       );
       resetWhisperContext();
       phaseCompleted.add("whisper");
+      setStatus({ phasesReady: snapshotPhasesReady() });
     }
 
     if (!embeddingDone) {
@@ -544,33 +502,31 @@ async function beginDownloads(tier: LlamaTier): Promise<void> {
         onPhaseProgress("embedding", fraction, bytesWritten, bytesTotal)
       );
       phaseCompleted.add("embedding");
+      setStatus({ phasesReady: snapshotPhasesReady() });
     }
 
     if (!llamaDone) {
-      await downloadChatModel(tier.filename, (fraction, bytesWritten, bytesTotal) =>
-        onPhaseProgress("llama", fraction, bytesWritten, bytesTotal)
+      await downloadFileViaSystemManager(
+        "llama",
+        `${MODEL_CDN_BASE_URL}/${tier.filename}`,
+        tier.filename,
+        chatModelPath(tier.filename),
+        "Xayra: on-device intelligence engine",
+        (fraction, bytesWritten, bytesTotal) => onPhaseProgress("llama", fraction, bytesWritten, bytesTotal)
       );
       phaseCompleted.add("llama");
+      setStatus({ phasesReady: snapshotPhasesReady() });
     }
 
     const totalBytes = totalBytesAcrossPendingPhases();
     updateTelemetry(totalBytes, totalBytes);
     setStatus({ status: "ready", progressPercent: 100, error: null });
   } catch (err) {
-    if (err instanceof OfflineDownloadError) {
-      // Every byte streamed so far is already safely on disk, and the
-      // native DownloadResumable is paused and retained (see
-      // downloadFileNative) — nothing to roll back, just wait for the
-      // network and pick up from there.
-      setStatus({ status: "paused_offline", error: null });
-      watchForReconnectThenResume(tier);
-      return;
-    }
-    // A plain download error (bad HTTP status, or a TransientDownloadError
-    // that exhausted its automatic retries) — either way, unlike before,
-    // every byte streamed so far is still safely on disk and the resumable
-    // is paused and retained in pausedPhaseHandle. "Resume Download" below
-    // continues from there instead of restarting the phase from byte 0.
+    // Unlike the old in-process downloader, reaching here means a genuine
+    // terminal failure — DownloadManager already retries transient/offline
+    // conditions on its own (see downloadFileViaSystemManager's doc
+    // comment), so there's no separate "paused, will auto-resume" branch to
+    // handle here the way OfflineDownloadError used to require.
     setStatus({ status: "error", error: err instanceof Error ? err.message : String(err) });
   }
 }
@@ -582,14 +538,15 @@ export async function allowCellularDownloadAndResume(): Promise<void> {
 }
 
 /**
- * Retries setup after a `status: "error"` or `"paused_offline"`. Safe to
- * call any time — `beginDownloads` always re-checks which phases are already
- * complete, and `downloadFileNative` resumes a still-paused phase natively
- * (see `pausedPhaseHandle`) rather than re-streaming bytes that already
- * landed, REGARDLESS of whether the prior failure was confirmed-offline or a
- * transient one (see TransientDownloadError) — both preserve
- * `pausedPhaseHandle` now, so this always continues rather than restarting.
- * Wired to the "Resume Download" button in ChatSheetContent.tsx.
+ * Retries setup after a `status: "error"`. Safe to call any time —
+ * `beginDownloads` always re-checks which phases are already complete, and
+ * for a whisper/llama phase whose DownloadManager transfer is still present
+ * (id persisted in `nativeDownloadIds` — see `downloadFileViaSystemManager`),
+ * re-attaches to that SAME system-owned download and continues from wherever
+ * it actually is rather than re-streaming bytes that already landed. `status:
+ * "paused_offline"` never reaches this at all — DownloadManager resumes that
+ * case on its own with no user action. Wired to the "Resume Download" button
+ * in ChatSheetContent.tsx.
  */
 export async function resumeDownloads(): Promise<void> {
   await beginDownloads(resolveLlamaTier());
@@ -620,7 +577,12 @@ async function runInitialCheck(): Promise<void> {
     isChatModelDownloaded(tier.filename),
   ]);
   if (whisperReady && embeddingReady && chatReady) {
-    setStatus({ status: "ready", progressPercent: 100, error: null });
+    setStatus({
+      status: "ready",
+      progressPercent: 100,
+      error: null,
+      phasesReady: { whisper: true, embedding: true, llama: true },
+    });
     return;
   }
 

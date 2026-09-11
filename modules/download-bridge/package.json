@@ -1,0 +1,9 @@
+{
+  "name": "expo-download-bridge",
+  "version": "1.0.0",
+  "description": "Local Expo module that hands a large model download to Android's own system DownloadManager service instead of running it inside this app's React Native process, so it keeps running (and survives) the app being backgrounded/frozen/killed by the OS during the Xayra onboarding setup flow. See services/ai/modelDownloadManager.ts for the caller.",
+  "main": "index.ts",
+  "types": "index.ts",
+  "license": "UNLICENSED",
+  "private": true
+}
