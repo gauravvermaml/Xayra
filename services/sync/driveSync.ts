@@ -13,6 +13,8 @@ import { Platform } from "react-native";
 import { getRawDatabase } from "../../db/client";
 import { getOrCreateDatabaseKey } from "../crypto/keyManager";
 import { mergeMissingNotes, type CloudNoteRecord } from "../notes/noteManager";
+import { mergeMissingToDos, type CloudToDoRecord } from "../todos/todoManager";
+import type { Recurrence } from "../../db/schema";
 
 /**
  * op-sqlite (and SQLite's own VFS underneath it — `VACUUM INTO`, `open()`'s
@@ -478,6 +480,10 @@ export type RestoreResult = {
   /** Number of notes actually inserted — 0 means the local vault already had
    * every note the cloud backup does (not an error, just nothing to do). */
   restoredCount: number;
+  /** Number of to-dos actually inserted — see `mergeMissingToDos`. Restored
+   * separately from `restoredCount` (notes) since the two are unrelated
+   * counts that can each independently be zero. */
+  restoredToDoCount: number;
   /** Ready-to-display summary, e.g. for a toast — see app/settings.tsx. */
   message: string;
 };
@@ -546,13 +552,49 @@ export async function restoreFromDrive(): Promise<RestoreResult> {
       createdAt: row.created_at as number,
     }));
 
+    // The `VACUUM INTO` snapshot backupToDrive() writes is a byte-for-byte
+    // copy of the whole encrypted database, so the backup already contains
+    // every to-do row alongside notes — nothing extra to change on the
+    // backup side, only on this restore side, which (before this) only ever
+    // read the `notes` table back out and silently dropped every to-do a
+    // backup carried.
+    const cloudToDoRows = await backupDb.execute(
+      "SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id FROM todos"
+    );
+    const cloudToDos: CloudToDoRecord[] = cloudToDoRows.rows.map((row) => ({
+      id: row.id as string,
+      text: row.text as string,
+      actionDate: row.action_date as string,
+      toDate: (row.to_date as string | null) ?? null,
+      notificationTime: (row.notification_time as string | null) || "05:00",
+      isCompleted: Boolean(row.is_completed),
+      recurrence: (row.recurrence as Recurrence) || "none",
+      recurrenceInterval: Number(row.recurrence_interval) || 1,
+      createdAt: row.created_at as string,
+      noteId: (row.note_id as string | null) ?? null,
+    }));
+
     const restoredCount = await mergeMissingNotes(cloudNotes);
+    // Restored after notes, not in parallel — a restored to-do's `note_id`
+    // may point at a note this same restore just inserted, and there's no
+    // ordering guarantee otherwise needed beyond "the note row exists by the
+    // time anything reads it" (see db/schema.ts's `noteId` doc comment: a
+    // to-do citing a missing note already degrades gracefully, so this isn't
+    // load-bearing correctness, just the more sensible order).
+    const restoredToDoCount = await mergeMissingToDos(cloudToDos);
+
+    const parts: string[] = [];
+    if (restoredCount > 0) {
+      parts.push(`${restoredCount} note${restoredCount === 1 ? "" : "s"}`);
+    }
+    if (restoredToDoCount > 0) {
+      parts.push(`${restoredToDoCount} to-do${restoredToDoCount === 1 ? "" : "s"}`);
+    }
+
     return {
       restoredCount,
-      message:
-        restoredCount === 0
-          ? "All notes are already up to date!"
-          : `Restored ${restoredCount} missing note${restoredCount === 1 ? "" : "s"}.`,
+      restoredToDoCount,
+      message: parts.length === 0 ? "Everything is already up to date!" : `Restored ${parts.join(" and ")}.`,
     };
   } finally {
     backupDb?.close();

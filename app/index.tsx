@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Dimensions, Image, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
+import * as FileSystem from "expo-file-system/legacy";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import BottomSheet, { useBottomSheetSpringConfigs } from "@gorhom/bottom-sheet";
@@ -441,13 +442,29 @@ export default function HomeScreen() {
       reportState?: (state: "processing" | "speaking") => void,
       options?: { isHandsfree?: boolean }
     ) => {
-      if (await isAudioTooShort(audioUri)) {
-        return;
-      }
-      const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
-      if (isSilentTranscript(transcript)) {
-        return;
-      }
+      // AUDIO CLEANUP: this raw WAV (services/audio/recorder.ts, written to
+      // documentDirectory/recordings/) is only ever kept around long-term for
+      // a RECORD intent — routeRecord below hands it to
+      // services/notes/noteManager.ts's `createVoiceNote`, which persists it
+      // permanently for in-app playback (see NoteDetailModal/
+      // AudioPlayerControls) and owns its deletion from then on, via
+      // deleteNote()/clearAllNotes(). Every OTHER way this function can end —
+      // an ASK-intent voice query (never attached to any saved row at all),
+      // or any of the early returns below (too-short/silent/no-wake-word/
+      // duplicate-utterance) — has nothing else that will ever delete this
+      // file, so without this it leaks forever. `persistedForRecord` is
+      // flipped true only once `routeRecord` has actually been handed the
+      // file; every other path falls through to the `finally` block's
+      // best-effort delete.
+      let persistedForRecord = false;
+      try {
+        if (await isAudioTooShort(audioUri)) {
+          return;
+        }
+        const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
+        if (isSilentTranscript(transcript)) {
+          return;
+        }
       // Build 25 STRICT DUAL-MODE WAKE-WORD GATEKEEPER: scoped to Handsfree
       // only — see containsWakeWord's own doc comment
       // (services/audio/activeMode.ts) for why manual recordings are exempt
@@ -487,6 +504,11 @@ export default function HomeScreen() {
       try {
         reportState?.("processing");
         const { intent, answerText } = await routeFreeformInput(transcript.trim(), audioUri, whisperModelId ?? null);
+        // By the time routeFreeformInput has returned "RECORD", routeRecord
+        // has already (synchronously, on the way to that return) handed
+        // audioUri to createVoiceNote — the file's lifecycle is now
+        // noteManager.ts's to own, not this function's.
+        persistedForRecord = intent === "RECORD";
 
         reportState?.("speaking");
         if (intent === "RECORD") {
@@ -505,6 +527,11 @@ export default function HomeScreen() {
         }
       } finally {
         isProcessingVoiceQueryRef.current = false;
+      }
+      } finally {
+        if (!persistedForRecord) {
+          await FileSystem.deleteAsync(audioUri, { idempotent: true }).catch(() => {});
+        }
       }
     },
     [routeFreeformInput, chatSession]

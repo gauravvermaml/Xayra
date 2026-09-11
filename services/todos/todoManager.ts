@@ -273,6 +273,103 @@ export async function deleteToDo(id: string): Promise<void> {
   void cancelToDoNotification(id);
 }
 
+/** A to-do as read out of a downloaded Google Drive backup database — see
+ * driveSync.ts's `restoreFromDrive()`, which opens that backup as a second,
+ * read-only op-sqlite connection and extracts rows in this shape before
+ * handing them here. Mirrors `ToDo` field-for-field (unlike
+ * services/notes/noteManager.ts's `CloudNoteRecord`, there's no `audioUri`-
+ * style field to exclude — a to-do carries no on-disk asset of its own). */
+export type CloudToDoRecord = {
+  id: string;
+  text: string;
+  actionDate: string;
+  toDate: string | null;
+  notificationTime: string;
+  isCompleted: boolean;
+  recurrence: Recurrence;
+  recurrenceInterval: number;
+  createdAt: string;
+  noteId: string | null;
+};
+
+/**
+ * Delta/merge restore: inserts only the cloud to-dos this device doesn't
+ * already have (matched by `id`), never overwriting or duplicating one that
+ * already exists locally — same idempotent shape as
+ * services/notes/noteManager.ts's `mergeMissingNotes`, which
+ * driveSync.ts's `restoreFromDrive()` calls alongside this one restore run.
+ *
+ * A restored to-do that's still pending (`isCompleted` false) gets its local
+ * notification (re-)scheduled via `scheduleToDoNotification` — the same
+ * function every other write path in this file already goes through, so the
+ * "already in the past? cancel instead of scheduling" check lives in exactly
+ * one place rather than being duplicated here. This is what actually
+ * re-registers the native Android alarm on a new device: a backup restored
+ * on a fresh install would otherwise leave every pending to-do with no
+ * reminder at all until it was next edited. Returns the number of to-dos
+ * actually restored.
+ */
+export async function mergeMissingToDos(cloudToDos: CloudToDoRecord[]): Promise<number> {
+  const db = await getRawDatabase();
+
+  const localIdsResult = await db.execute("SELECT id FROM todos");
+  const localIds = new Set(localIdsResult.rows.map((row) => row.id as string));
+  const missingToDos = cloudToDos.filter((todo) => !localIds.has(todo.id));
+  if (missingToDos.length === 0) {
+    return 0;
+  }
+
+  await db.transaction(async (tx) => {
+    for (const todo of missingToDos) {
+      // `INSERT OR IGNORE` is belt-and-suspenders against the id already
+      // existing — the id filter above already guarantees that in the
+      // common case, but guards against the same to-do being created
+      // locally (e.g. re-extracted from a note also being restored right
+      // now) in the moment between that filter and this transaction
+      // committing.
+      await tx.execute(
+        `INSERT OR IGNORE INTO todos
+           (id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          todo.id,
+          todo.text,
+          todo.actionDate,
+          todo.toDate,
+          todo.notificationTime,
+          todo.isCompleted ? 1 : 0,
+          todo.recurrence,
+          todo.recurrenceInterval,
+          todo.createdAt,
+          todo.noteId,
+        ]
+      );
+    }
+  });
+
+  notifyToDosChanged();
+
+  for (const todo of missingToDos) {
+    if (todo.isCompleted) {
+      continue;
+    }
+    void scheduleToDoNotification({
+      id: todo.id,
+      text: todo.text,
+      actionDate: todo.actionDate,
+      toDate: todo.toDate,
+      notificationTime: todo.notificationTime,
+      isCompleted: false,
+      recurrence: todo.recurrence,
+      recurrenceInterval: todo.recurrenceInterval,
+      createdAt: todo.createdAt,
+      noteId: todo.noteId,
+    });
+  }
+
+  return missingToDos.length;
+}
+
 function formatIsoDate(date: Date): string {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
