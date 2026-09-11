@@ -2,6 +2,7 @@ import { getCpuCoreCount } from "expo-device-cpu";
 import * as FileSystem from "expo-file-system/legacy";
 import { initLlama, LlamaContext, type CompletionParams, type NativeCompletionResult, type TokenData } from "llama.rn";
 
+import { MIN_USABLE_TOKENS_PER_SECOND, recordCompletionSpeed } from "./modelPerformanceTracker";
 import { logDuration, nowMs } from "./perf";
 
 /**
@@ -282,38 +283,95 @@ async function resolveModelPath(): Promise<ResolvedModel> {
 }
 
 /**
+ * Loads a GGUF file at `path` into a fresh native context — the one place
+ * `initLlama()` is actually called, shared by the normal lazy singleton
+ * below AND `attemptTierUpgrade()`'s trial load, so both pay the exact same
+ * cold-start cost/logging rather than two subtly different code paths.
+ */
+function loadContext(path: string, label: string): Promise<LlamaContext> {
+  const coldStart = nowMs();
+  console.log(`[Llama] Initialized Model: ${label} (q4_k_m)`);
+  // Build 26: `use_mmap: true` maps the GGUF file straight into the
+  // process's address space instead of reading it into a heap buffer — the
+  // OS page-caches it, so a released-then-reloaded context (or a second cold
+  // start after a background app kill) is materially faster to reload since
+  // the pages are often still resident. (Named `use_mmap`, not `useMmap` —
+  // llama.rn's option names mirror llama.cpp's own C API snake_case, same as
+  // n_ctx/n_threads below.) n_threads is sized to this actual device's core
+  // count — see computeInferenceThreadCount()'s doc comment above for why a
+  // flat number here was the real cause of a much bigger bug than slow
+  // extraction.
+  return initLlama({ model: path, n_ctx: 4096, n_threads: computeInferenceThreadCount(), use_mmap: true }).then(
+    (context) => {
+      logDuration("Llama cold-start (GGUF model load from disk)", coldStart);
+      return context;
+    }
+  );
+}
+
+/**
  * Loading the GGUF model is expensive, so the context is created once and
  * reused across calls. If creation fails, the next call retries instead of
  * replaying a cached rejection forever.
  */
 async function getContext(): Promise<LlamaContext> {
   if (!contextPromise) {
-    const coldStart = nowMs();
-    contextPromise = resolveModelPath()
-      .then(({ path, label }) => {
-        console.log(`[Llama] Initialized Model: ${label} (q4_k_m)`);
-        // Build 26: `use_mmap: true` maps the GGUF file straight into the
-        // process's address space instead of reading it into a heap buffer
-        // — the OS page-caches it, so a released-then-reloaded context (or a
-        // second cold start after a background app kill) is materially
-        // faster to reload since the pages are often still resident. (Named
-        // `use_mmap`, not `useMmap` — llama.rn's option names mirror
-        // llama.cpp's own C API snake_case, same as n_ctx/n_threads below.)
-        // n_threads is sized to this actual device's core count — see
-        // computeInferenceThreadCount()'s doc comment above for why a flat
-        // number here was the real cause of a much bigger bug than slow
-        // extraction.
-        return initLlama({ model: path, n_ctx: 4096, n_threads: computeInferenceThreadCount(), use_mmap: true });
-      })
-      .then((context) => {
-        logDuration("Llama cold-start (GGUF model load from disk)", coldStart);
-        return context;
-      });
+    contextPromise = resolveModelPath().then(({ path, label }) => loadContext(path, label));
     contextPromise.catch(() => {
       contextPromise = null;
     });
   }
   return contextPromise;
+}
+
+/** A moderate 32-token trial generation — long enough that llama.cpp's
+ * `predicted_per_second` reflects real sustained decode speed rather than
+ * fixed per-call overhead (the 1-token prewarm completion is too short for
+ * this), short enough not to burn several more minutes on a device that's
+ * about to fail the trial anyway. */
+const TRIAL_N_PREDICT = 32;
+
+/**
+ * Opportunistic 1B -> 3B upgrade trial — see
+ * services/ai/modelDownloadManager.ts's `maybeAttemptTierUpgrade()` for the
+ * eligibility gating (RAM floor + real 1B performance history) that decides
+ * WHETHER to call this at all. Deliberately releases the current (1B)
+ * context BEFORE loading the candidate, rather than briefly holding both
+ * multi-hundred-MB-to-multi-GB models resident at once — this device class
+ * is exactly the kind where that could tip into OOM territory (confirmed
+ * on-device: a lone 3B context alone already sits around 3.6GB RSS). The
+ * cost is a real (if brief) window with no usable context if the trial
+ * fails and the fallback reload is still in flight — acceptable since this
+ * only ever runs at a quiet moment (see the caller), never mid-answer.
+ */
+export async function attemptTierUpgrade(
+  candidatePath: string,
+  candidateLabel: string,
+  fallbackPath: string,
+  fallbackLabel: string
+): Promise<{ passed: boolean; tokensPerSecond: number }> {
+  await releaseLocalLlama();
+
+  const candidateContext = await loadContext(candidatePath, candidateLabel);
+  const result = await candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
+  const tokensPerSecond = result.timings?.predicted_per_second ?? 0;
+  const passed = tokensPerSecond >= MIN_USABLE_TOKENS_PER_SECOND;
+
+  if (passed) {
+    // Promote the already-loaded, already-warm trial context to be the new
+    // shared singleton — avoids paying a second full load for the exact
+    // model that just proved itself.
+    contextPromise = Promise.resolve(candidateContext);
+  } else {
+    await candidateContext.release();
+    contextPromise = loadContext(fallbackPath, fallbackLabel);
+    contextPromise.catch(() => {
+      contextPromise = null;
+    });
+    await contextPromise;
+  }
+
+  return { passed, tokensPerSecond };
 }
 
 /**
@@ -402,7 +460,18 @@ export async function runQueuedLlamaCompletion(
     () => undefined,
     () => undefined
   );
-  return run;
+  const result = await run;
+  // Real-world throughput telemetry — see modelPerformanceTracker.ts. Skips
+  // the throwaway single-token prewarm completion (n_predict: 1): one
+  // predicted token is too noisy a sample, and native `timings` for it is
+  // dominated by fixed per-call overhead rather than sustained decode speed.
+  // `predicted_per_second` comes straight from llama.cpp's own native
+  // timing, not a derived JS wall-clock measurement, so it isn't polluted by
+  // this function's own completionQueue wait time.
+  if (params.n_predict !== 1 && result.timings) {
+    void recordCompletionSpeed(result.timings.predicted_per_second);
+  }
+  return result;
 }
 
 /**

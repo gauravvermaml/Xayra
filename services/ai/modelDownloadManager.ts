@@ -5,9 +5,10 @@ import * as FileSystem from "expo-file-system/legacy";
 import * as Network from "expo-network";
 
 import { downloadEmbeddingAssets, isEmbeddingModelDownloaded } from "./embeddingModel";
-import { LLAMA_MODEL_FILENAMES, prewarmLocalLlama } from "./localLlama";
+import { attemptTierUpgrade, LLAMA_MODEL_FILENAMES, prewarmLocalLlama } from "./localLlama";
 import { resetWhisperContext } from "./localWhisper";
 import { MODEL_CDN_BASE_URL } from "./modelCdn";
+import { getAverageTokensPerSecond, MIN_USABLE_TOKENS_PER_SECOND, resetPerformanceSamples } from "./modelPerformanceTracker";
 import { getWhisperModelPath, isWhisperModelDownloaded, WHISPER_BASE_FILENAME } from "./whisperModels";
 import { readPreferences, writePreferences } from "../settings/preferences";
 import { syncDownloadNotification } from "../notifications/downloadNotification";
@@ -26,11 +27,34 @@ import { syncDownloadNotification } from "../notifications/downloadNotification"
 const LLAMA_1B_FILENAME = LLAMA_MODEL_FILENAMES.find((m) => m.label === "1B")!.filename;
 const LLAMA_3B_FILENAME = LLAMA_MODEL_FILENAMES.find((m) => m.label === "3B")!.filename;
 
-/** Below this, a device is treated as memory-constrained (the Galaxy A50
- * this project tests on is 4GB) and gets the smaller model; at or above it,
- * a device is treated as a modern flagship (Pixel-class, 8GB+) and gets the
- * more capable one. */
-const RAM_TIER_THRESHOLD_BYTES = 7 * 1024 * 1024 * 1024;
+/**
+ * Below this, a device doesn't have room for the 3B model regardless of how
+ * fast its CPU is — a hard prerequisite for even ATTEMPTING an upgrade, kept
+ * from the original RAM-only design. What changed (see
+ * [[ram-tier-bad-proxy-for-cpu]] in project memory): RAM used to be treated
+ * as SUFFICIENT on its own to hand a device the 3B model outright. Measured
+ * on-device that this is wrong — a Redmi Note 8 Pro (7.48 GiB RAM, qualifies
+ * under this exact threshold) took 12+ minutes for its first retrieval on
+ * the 3B model, because its CPU (a 2019 mid-range chipset, further limited
+ * to 2 inference threads by the freeze-fix in localLlama.ts) can't sustain
+ * it. RAM now only gates whether an upgrade is worth TRYING; real measured
+ * throughput (services/ai/modelPerformanceTracker.ts) decides whether it's
+ * worth KEEPING — see `maybeAttemptTierUpgrade()` below.
+ */
+const RAM_FLOOR_FOR_3B_BYTES = 7 * 1024 * 1024 * 1024;
+
+/** A device's real 1B throughput needs to comfortably clear the "usable"
+ * floor by roughly this multiple before an upgrade attempt is even worth
+ * the 2GB download — llama.cpp decode speed on a given device scales
+ * roughly with parameter count for CPU-bound generation, so a device
+ * barely clearing MIN_USABLE_TOKENS_PER_SECOND at 1B almost certainly won't
+ * clear it at 3B at all. Deliberately a rough heuristic, not a precise
+ * prediction — the actual keep/reject decision always comes from a real
+ * measured trial on the 3B model itself (see `attemptTierUpgrade` in
+ * localLlama.ts), never from this estimate alone; this constant only
+ * decides whether that trial (and its 2GB download) is worth attempting.
+ */
+const MIN_1B_SPEED_MULTIPLE_TO_ATTEMPT_UPGRADE = 3;
 
 /**
  * Byte counts measured directly against the live Worker (`curl` a real GET,
@@ -99,25 +123,43 @@ function bytesToMB(bytes: number): number {
   return Math.round((bytes / BYTES_PER_MB) * 10) / 10;
 }
 
-type LlamaTier = { filename: string; approxBytes: number; sizeLabel: string };
+type LlamaTier = { filename: string; approxBytes: number; sizeLabel: string; label: string };
 
-/** `Device.totalMemory` can legitimately come back `null` (unsupported
- * platform/OS version) — in that case, default to the smaller model rather
- * than gambling a low-end device can handle the 3B one. */
-function resolveLlamaTier(): LlamaTier {
-  const totalMemory = Device.totalMemory;
-  if (totalMemory !== null && totalMemory !== undefined && totalMemory >= RAM_TIER_THRESHOLD_BYTES) {
-    return {
-      filename: LLAMA_3B_FILENAME,
-      approxBytes: LLAMA_3B_APPROX_BYTES,
-      sizeLabel: formatGigabytes(LLAMA_3B_APPROX_BYTES),
-    };
-  }
-  return {
-    filename: LLAMA_1B_FILENAME,
-    approxBytes: LLAMA_1B_APPROX_BYTES,
-    sizeLabel: formatGigabytes(LLAMA_1B_APPROX_BYTES),
-  };
+const TIER_1B: LlamaTier = {
+  filename: LLAMA_1B_FILENAME,
+  approxBytes: LLAMA_1B_APPROX_BYTES,
+  sizeLabel: formatGigabytes(LLAMA_1B_APPROX_BYTES),
+  label: "1B",
+};
+const TIER_3B: LlamaTier = {
+  filename: LLAMA_3B_FILENAME,
+  approxBytes: LLAMA_3B_APPROX_BYTES,
+  sizeLabel: formatGigabytes(LLAMA_3B_APPROX_BYTES),
+  label: "3B",
+};
+
+/**
+ * The tier a device with NEITHER model on disk downloads — always 1B. See
+ * [[ram-tier-bad-proxy-for-cpu]]: RAM alone used to pick 3B for any device
+ * over the 7 GiB threshold, which handed at least one real device a 12+
+ * minute first retrieval. 1B is fast on effectively any device that can run
+ * an LLM at all; `maybeAttemptTierUpgrade()` is the only path that ever
+ * moves a device to 3B, gated on real measured performance rather than RAM.
+ */
+function resolveDefaultLlamaTier(): LlamaTier {
+  return TIER_1B;
+}
+
+/**
+ * The tier THIS device is actually using right now — prefers 3B if it's
+ * already on disk (a device that already passed its upgrade trial, or was
+ * manually pushed one via adb), otherwise the 1B default. Async because it
+ * has to check disk, unlike `resolveDefaultLlamaTier()` — used at startup
+ * (`runInitialCheck`) so an already-upgraded device doesn't get its working
+ * 3B model discarded and re-downloaded as 1B on a later launch.
+ */
+async function resolveActiveLlamaTier(): Promise<LlamaTier> {
+  return (await isChatModelDownloaded(TIER_3B.filename)) ? TIER_3B : TIER_1B;
 }
 
 function chatModelPath(filename: string): string {
@@ -148,7 +190,7 @@ let currentStatus: ModelDownloadStatus = {
   totalMB: 0,
   speedMBps: 0,
   etaSeconds: 0,
-  chatModelSizeLabel: resolveLlamaTier().sizeLabel,
+  chatModelSizeLabel: resolveDefaultLlamaTier().sizeLabel,
   phasesReady: { whisper: false, embedding: false, llama: false },
   error: null,
 };
@@ -171,6 +213,10 @@ function setStatus(patch: Partial<ModelDownloadStatus>): void {
   // every later status read once the app is already warm and idle.
   if (currentStatus.status === "ready" && previousStatus !== "ready") {
     void prewarmLocalLlama();
+    // See maybeAttemptTierUpgrade's own doc comment — a cheap no-op for most
+    // calls, and deliberately fired from this same "just became ready" hook
+    // as prewarmLocalLlama so it only ever runs at a quiet moment.
+    void maybeAttemptTierUpgrade();
   }
 }
 
@@ -540,7 +586,7 @@ async function beginDownloads(tier: LlamaTier): Promise<void> {
 export async function allowCellularDownloadAndResume(): Promise<void> {
   await writePreferences({ allowCellularDownloads: true });
   stopWatchingForWifi();
-  await beginDownloads(resolveLlamaTier());
+  await beginDownloads(await resolveActiveLlamaTier());
 }
 
 /**
@@ -555,7 +601,102 @@ export async function allowCellularDownloadAndResume(): Promise<void> {
  * in ChatSheetContent.tsx.
  */
 export async function resumeDownloads(): Promise<void> {
-  await beginDownloads(resolveLlamaTier());
+  await beginDownloads(await resolveActiveLlamaTier());
+}
+
+/**
+ * Opportunistic 1B -> 3B upgrade, gated on real measured performance rather
+ * than RAM alone — see [[ram-tier-bad-proxy-for-cpu]] for why. Called from
+ * `setStatus`'s existing "just became ready" hook (same trigger as
+ * `prewarmLocalLlama`), so it only ever runs at a quiet moment — right after
+ * boot with everything already warm, or right after a fresh download
+ * finishes — never mid-answer. A no-op, cheaply, for the large majority of
+ * calls: most of the early return conditions below are the common case
+ * (already decided, not enough history yet, doesn't have the RAM for it).
+ */
+async function maybeAttemptTierUpgrade(): Promise<void> {
+  const prefs = await readPreferences();
+  if (prefs.tier3BStatus !== "not_attempted") {
+    return;
+  }
+
+  const totalMemory = Device.totalMemory;
+  const hasRamFor3B = totalMemory !== null && totalMemory !== undefined && totalMemory >= RAM_FLOOR_FOR_3B_BYTES;
+  if (!hasRamFor3B) {
+    return;
+  }
+
+  if (await isChatModelDownloaded(TIER_3B.filename)) {
+    // A 3B file already on disk with tier3BStatus still "not_attempted"
+    // means one of: a device from before this feature existed (this whole
+    // file used to hand out 3B by RAM alone — see [[ram-tier-bad-proxy-for-cpu]]),
+    // or one manually pushed via adb. Deliberately NOT run through a real
+    // trial here the way a fresh upgrade is — trusted as-is, since that
+    // would need a 1B fallback file downloaded first just to have something
+    // to fall back to, for what's expected to be a rare legacy/manual case
+    // rather than anything a real post-this-fix install ever hits. Marked
+    // "accepted" so this check doesn't re-run on every boot, not because it
+    // was actually measured.
+    await writePreferences({ tier3BStatus: "accepted" });
+    return;
+  }
+
+  const averageTokensPerSecond = await getAverageTokensPerSecond();
+  if (averageTokensPerSecond === null) {
+    return; // Not enough real 1B usage history yet to judge anything from.
+  }
+  if (averageTokensPerSecond < MIN_USABLE_TOKENS_PER_SECOND * MIN_1B_SPEED_MULTIPLE_TO_ATTEMPT_UPGRADE) {
+    // This device's 1B speed itself isn't fast enough to suggest 3B (roughly
+    // 3x heavier per-token) would land anywhere near usable — not worth a
+    // 2GB download to find out. Not marked "rejected": a future firmware/
+    // thermal-management change (or just cooler real-world conditions) could
+    // change this, so it's worth re-checking on a later boot rather than
+    // closing the door permanently the way an actual failed trial does.
+    return;
+  }
+
+  const netState = await Network.getNetworkStateAsync();
+  if (netState.type !== Network.NetworkStateType.WIFI) {
+    return; // Re-checked on every "ready" transition; no separate listener needed.
+  }
+
+  const candidatePath = chatModelPath(TIER_3B.filename);
+  try {
+    await downloadFileViaSystemManager(
+      "llama",
+      `${MODEL_CDN_BASE_URL}/${TIER_3B.filename}`,
+      TIER_3B.filename,
+      candidatePath,
+      "Xayra: on-device intelligence engine upgrade",
+      () => {} // Silent — this is a background upgrade attempt, not the onboarding download the UI already has a progress bar for.
+    );
+  } catch {
+    // A failed download here isn't the user-facing "error" state the main
+    // onboarding flow surfaces — this device just keeps using its working 1B
+    // model and gets another chance on a later boot (tier3BStatus is still
+    // "not_attempted").
+    return;
+  }
+
+  const fallbackPath = chatModelPath(TIER_1B.filename);
+  const { passed, tokensPerSecond } = await attemptTierUpgrade(candidatePath, "3B", fallbackPath, "1B");
+  await resetPerformanceSamples(); // A throughput history from one model size says nothing about another.
+
+  if (passed) {
+    await writePreferences({ tier3BStatus: "accepted" });
+    // deleteNativeFile, not FileSystem.deleteAsync — both paths here are
+    // ordinary FileSystem.documentDirectory paths, so deleteAsync would
+    // actually work fine in this specific case, but this module already
+    // standardized on the native delete for every file this tier-management
+    // code touches (see downloadFileViaSystemManager's own doc comment).
+    deleteNativeFile(fallbackPath);
+    setStatus({ chatModelSizeLabel: TIER_3B.sizeLabel });
+    console.log(`[ModelTier] Upgraded to 3B — measured ${tokensPerSecond.toFixed(1)} tok/s.`);
+  } else {
+    await writePreferences({ tier3BStatus: "rejected" });
+    deleteNativeFile(candidatePath);
+    console.log(`[ModelTier] Rejected 3B — measured ${tokensPerSecond.toFixed(1)} tok/s, below usable floor. Staying on 1B.`);
+  }
 }
 
 let initStarted = false;
@@ -574,7 +715,7 @@ export function initModelDownloads(): void {
 }
 
 async function runInitialCheck(): Promise<void> {
-  const tier = resolveLlamaTier();
+  const tier = await resolveActiveLlamaTier();
   setStatus({ chatModelSizeLabel: tier.sizeLabel });
 
   const [whisperReady, embeddingReady, chatReady] = await Promise.all([

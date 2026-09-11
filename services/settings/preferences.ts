@@ -15,11 +15,31 @@ export type Preferences = {
    * instead of enqueueing a duplicate transfer. Cleared once a phase
    * reaches "successful" or a terminal "failed". */
   nativeDownloadIds: Partial<Record<"whisper" | "llama", number>>;
+  /** Recent real-world tokens/sec samples from actual completions (RAG
+   * answers and to-do extractions), most recent last — see
+   * services/ai/modelPerformanceTracker.ts. Deliberately NOT a one-shot
+   * synthetic benchmark: a single measurement taken right after a cold
+   * model load can be misleadingly fast (before sustained-load thermal
+   * throttling kicks in — confirmed on-device, see
+   * [[ram-tier-bad-proxy-for-cpu]]) or misleadingly slow (competing with
+   * other onboarding work still finishing). A short rolling window of real
+   * usage is a much more honest signal of what this device can actually
+   * sustain. */
+  performanceSamples: number[];
+  /** Whether this device has ever attempted, and how it fared on, an
+   * opportunistic upgrade from the default 1B model to the 3B one — see
+   * `maybeAttemptTierUpgrade()` in modelDownloadManager.ts. "rejected" is
+   * permanent for this install: a device whose real 3B throughput came in
+   * under the usable floor isn't worth re-trying, since the underlying CPU
+   * doesn't change. */
+  tier3BStatus: "not_attempted" | "rejected" | "accepted";
 };
 
 const DEFAULT_PREFERENCES: Preferences = {
   allowCellularDownloads: false,
   nativeDownloadIds: {},
+  performanceSamples: [],
+  tier3BStatus: "not_attempted",
 };
 
 function preferencesPath(): string {
