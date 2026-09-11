@@ -442,21 +442,17 @@ export default function HomeScreen() {
       reportState?: (state: "processing" | "speaking") => void,
       options?: { isHandsfree?: boolean }
     ) => {
-      // AUDIO CLEANUP: this raw WAV (services/audio/recorder.ts, written to
-      // documentDirectory/recordings/) is only ever kept around long-term for
-      // a RECORD intent — routeRecord below hands it to
-      // services/notes/noteManager.ts's `createVoiceNote`, which persists it
-      // permanently for in-app playback (see NoteDetailModal/
-      // AudioPlayerControls) and owns its deletion from then on, via
-      // deleteNote()/clearAllNotes(). Every OTHER way this function can end —
-      // an ASK-intent voice query (never attached to any saved row at all),
-      // or any of the early returns below (too-short/silent/no-wake-word/
-      // duplicate-utterance) — has nothing else that will ever delete this
-      // file, so without this it leaks forever. `persistedForRecord` is
-      // flipped true only once `routeRecord` has actually been handed the
-      // file; every other path falls through to the `finally` block's
-      // best-effort delete.
-      let persistedForRecord = false;
+      // TEXT-ONLY STORAGE (enforced, no exceptions): this raw WAV
+      // (services/audio/recorder.ts, written to documentDirectory/recordings/)
+      // is ALWAYS deleted once this function is done with it, regardless of
+      // outcome — a RECORD intent no longer keeps its audio around for
+      // in-app playback (services/notes/noteManager.ts's `createVoiceNote`
+      // now persists every note with `audio_uri = NULL`, transcript text
+      // only), and an ASK-intent voice query's audio was never attached to
+      // any saved row to begin with. Every early return below (too-short/
+      // silent/no-wake-word/duplicate-utterance) also falls through to the
+      // same `finally` block, so there is no path through this function that
+      // leaves the file on disk.
       try {
         if (await isAudioTooShort(audioUri)) {
           return;
@@ -504,11 +500,6 @@ export default function HomeScreen() {
       try {
         reportState?.("processing");
         const { intent, answerText } = await routeFreeformInput(transcript.trim(), audioUri, whisperModelId ?? null);
-        // By the time routeFreeformInput has returned "RECORD", routeRecord
-        // has already (synchronously, on the way to that return) handed
-        // audioUri to createVoiceNote — the file's lifecycle is now
-        // noteManager.ts's to own, not this function's.
-        persistedForRecord = intent === "RECORD";
 
         reportState?.("speaking");
         if (intent === "RECORD") {
@@ -529,9 +520,9 @@ export default function HomeScreen() {
         isProcessingVoiceQueryRef.current = false;
       }
       } finally {
-        if (!persistedForRecord) {
-          await FileSystem.deleteAsync(audioUri, { idempotent: true }).catch(() => {});
-        }
+        // Always — see this function's opening comment. `idempotent: true`
+        // makes this a safe no-op if the file was somehow already gone.
+        await FileSystem.deleteAsync(audioUri, { idempotent: true }).catch(() => {});
       }
     },
     [routeFreeformInput, chatSession]

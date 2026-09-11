@@ -217,7 +217,14 @@ async function insertEmbedding(noteId: string, embedding: number[]): Promise<voi
  * itself happens upstream via `services/ai/asrRouter.ts` (Tier 1 native /
  * Tier 2 Whisper) — the caller passes the resolved transcript in rather than
  * this function calling Whisper directly, since the router may have already
- * produced it live during recording via the native tier. */
+ * produced it live during recording via the native tier.
+ *
+ * TEXT-ONLY STORAGE: `audioUri` is used only to validate the recording
+ * (below) and is deliberately never written to the `notes` row — every note
+ * is persisted as `audio_uri = NULL`, transcript text only. The raw WAV
+ * itself is deleted by the caller (app/index.tsx's `finishUtterance`, in its
+ * `finally` block) once this function returns; nothing downstream of this
+ * call ever needs the file again, including a re-render of this exact note. */
 export async function createVoiceNote(
   audioUri: string,
   transcript: string,
@@ -239,12 +246,13 @@ export async function createVoiceNote(
   const createdAt = nowUnix();
   const db = await getRawDatabase();
 
-  // The audio file is already on disk (written by the recorder before this
-  // is called) — insert a `pending` row right away so the note is visible
-  // while transcription/embedding are still in flight.
+  // `audio_uri` is NULL from the very first (`pending`) row onward — see
+  // this function's own doc comment above. The file itself is still on disk
+  // at this exact moment (the caller deletes it only after this function
+  // returns), but nothing in this row ever points at it.
   await db.execute(
-    "INSERT INTO notes (id, content, audio_uri, transcript, status, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-    [id, "", audioUri, null, "pending", createdAt]
+    "INSERT INTO notes (id, content, audio_uri, transcript, status, created_at) VALUES (?, ?, NULL, ?, ?, ?)",
+    [id, "", null, "pending", createdAt]
   );
 
   try {
@@ -260,7 +268,7 @@ export async function createVoiceNote(
     return {
       id,
       content: transcript,
-      audioUri,
+      audioUri: null,
       transcript,
       status: embedded ? "embedded" : "transcribed",
       transcriptionModel,

@@ -34,6 +34,11 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted }: NoteDet
   // The embedded AudioPlayerControls manages its own playback hook
   // internally; this second subscription (same uri, same shared player) is
   // just so the delete flow can pause playback before the note is gone.
+  // TEXT-ONLY STORAGE: every note saved from here on has `audioUri: null`
+  // (services/notes/noteManager.ts's `createVoiceNote` no longer persists
+  // audio) — this hook still has to be called unconditionally (rules of
+  // hooks), so it's handed "" for a text note, same as the render guard
+  // below skips actually mounting the player for one.
   const player = useAudioPlayerControls(note?.audioUri ?? "");
 
   useEffect(() => {
@@ -148,7 +153,16 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted }: NoteDet
                 </Pressable>
               </ScrollView>
 
-              <AudioPlayerControls audioUri={note.audioUri ?? ""} style={styles.player} />
+              {/* A note recorded before audio was made text-only (or one
+                  restored from a Drive backup, which never carries audio —
+                  see driveSync.ts's CloudNoteRecord) may still have a real
+                  audioUri; every note saved going forward has none. Omit the
+                  player entirely rather than mounting it against an empty
+                  uri, so opening a text note never attempts to load/play a
+                  file that was never there. */}
+              {note.audioUri && (
+                <AudioPlayerControls audioUri={note.audioUri} style={styles.player} />
+              )}
 
               <Pressable
                 onPress={handleDelete}
