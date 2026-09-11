@@ -1,4 +1,5 @@
 import * as chrono from "chrono-node";
+import { getThermalStatus, ThermalStatus } from "expo-device-cpu";
 
 import { DEFAULT_NOTIFICATION_TIME, RECURRENCE_OPTIONS, type Recurrence } from "../../db/schema";
 import { runQueuedLlamaCompletion } from "./localLlama";
@@ -922,6 +923,32 @@ function normalizeExtracted(
   return results;
 }
 
+/** Delays tried, in order, while the device reports itself at or above
+ * `ThermalStatus.MODERATE` before firing an extraction anyway — extraction
+ * has no one waiting on it (unlike a live "Ask" answer), so it's exactly the
+ * kind of "can tolerate being delayed" background work that should back off
+ * rather than pile more sustained heavy CPU load onto an already-hot
+ * chipset. Deliberately gives up and proceeds after these are exhausted,
+ * never silently drops a note's extraction forever just because the device
+ * stays warm — general device hygiene for any device class, not tuned to
+ * any one phone's thermal curve (see [[ram-tier-bad-proxy-for-cpu]] in
+ * project memory for why device-specific tuning here would be the wrong
+ * instinct). */
+const THERMAL_RECHECK_DELAYS_MS = [5000, 15000, 30000];
+
+async function waitForCoolerThermalStateIfNeeded(): Promise<void> {
+  for (const delayMs of THERMAL_RECHECK_DELAYS_MS) {
+    const status = getThermalStatus();
+    // null (pre-Android-10, or the call failing) is treated as "proceed" —
+    // this is a nice-to-have deferral, never a dependency the extraction
+    // pipeline can be blocked on indefinitely by an unknown signal.
+    if (status === null || status < ThermalStatus.MODERATE) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+}
+
 /**
  * Parses raw note text into structured to-do items entirely on-device, via
  * Xayra's existing llama.rn context (services/ai/localLlama.ts) — no network
@@ -945,6 +972,7 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
   const detectedPhrases = detectDatePhrases(trimmed, todayISO);
 
   try {
+    await waitForCoolerThermalStateIfNeeded();
     const prompt = buildPrompt(trimmed, todayISO, detectedPhrases);
 
     const start = nowMs();
@@ -978,7 +1006,7 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
       // point — this should rarely if ever actually trigger.
       grammar: TODO_EXTRACTION_GRAMMAR,
       stop: [EOT_TOKEN, "<|end_of_text|>"],
-    });
+    }, "background"); // no one is waiting on this — always yields to a live "Ask" query already queued or arriving
     logDuration("Llama to-do extraction", start);
 
     const rawOutput = result.text.trim();

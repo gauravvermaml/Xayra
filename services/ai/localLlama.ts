@@ -434,44 +434,100 @@ export async function getSharedLlamaContext(): Promise<LlamaContext> {
  * never-block-note-saving contract) with no visible symptom beyond the
  * missing to-dos themselves.
  *
- * Fixed by queuing every completion through this one chain rather than
- * calling `context.completion()` directly from more than one place — both
- * generateLocalRAGAnswer() and runQueuedLlamaCompletion()'s callers now
- * always wait their turn instead of racing. `.catch(() => undefined)` on the
- * chain link (not on `run` itself, which callers still await and handle
- * their own errors on) keeps one failed completion from poisoning every
- * later queued call.
+ * Fixed by queuing every completion through one shared queue rather than
+ * calling `context.completion()` directly from more than one place — every
+ * caller now waits its turn instead of racing.
+ *
+ * Upgraded from a plain FIFO chain to a PRIORITY queue after a second
+ * on-device finding: a live "Ask" answer queued strictly behind several
+ * already-pending background to-do extractions waited several extra minutes
+ * for its turn, even though the user was actively watching a "Thinking..."
+ * spinner and the extractions had no one waiting on them at all. llama.cpp
+ * has no API to pause/resume an ALREADY-RUNNING completion (that needs
+ * KV-cache save/restore machinery this library doesn't expose), so a job
+ * that's already mid-generation always finishes — but a job that's still
+ * WAITING can be reordered. `runQueuedLlamaCompletion`'s `priority` param
+ * lets `generateLocalRAGAnswer()` (a person is actively watching) jump
+ * ahead of any not-yet-started `transformationEngine.ts` extraction (no one
+ * waiting, tolerates being delayed) already sitting in the queue — the same
+ * "interactive requests preempt queued background work" pattern used by
+ * production LLM-serving systems, adapted to what a single mobile
+ * llama.cpp context actually allows.
  */
-let completionQueue: Promise<unknown> = Promise.resolve();
+type CompletionPriority = "interactive" | "background";
+
+type QueuedCompletion = {
+  params: CompletionParams;
+  onToken?: (data: TokenData) => void;
+  resolve: (result: NativeCompletionResult) => void;
+  reject: (err: unknown) => void;
+};
+
+let isCompletionRunning = false;
+/** Kept sorted: every "interactive" job before every "background" job;
+ * stable (FIFO) within the same priority. A newly-arrived interactive job
+ * is spliced in ahead of any waiting background jobs, but never disturbs
+ * whichever job is already running (see this whole block's own doc comment
+ * for why that part isn't possible). */
+const waitingCompletions: { priority: CompletionPriority; job: QueuedCompletion }[] = [];
+
+function processCompletionQueue(): void {
+  if (isCompletionRunning) {
+    return;
+  }
+  const next = waitingCompletions.shift();
+  if (!next) {
+    return;
+  }
+  isCompletionRunning = true;
+  const { job } = next;
+  void getContext()
+    .then((context) => context.completion(job.params, job.onToken))
+    .then(
+      (result) => {
+        // Real-world throughput telemetry — see modelPerformanceTracker.ts.
+        // Skips the throwaway single-token prewarm completion (n_predict: 1):
+        // one predicted token is too noisy a sample, and native `timings` for
+        // it is dominated by fixed per-call overhead rather than sustained
+        // decode speed. `predicted_per_second` comes straight from
+        // llama.cpp's own native timing, not a derived JS wall-clock
+        // measurement, so it isn't polluted by this queue's own wait time.
+        if (job.params.n_predict !== 1 && result.timings) {
+          void recordCompletionSpeed(result.timings.predicted_per_second);
+        }
+        job.resolve(result);
+      },
+      (err) => job.reject(err)
+    )
+    .finally(() => {
+      isCompletionRunning = false;
+      processCompletionQueue();
+    });
+}
 
 /**
- * Runs a completion against the shared context, serialized against every
- * other queued completion (see completionQueue above). Exported so
- * transformationEngine.ts's to-do extraction shares the same queue as RAG
- * generation below rather than calling `context.completion()` directly.
+ * Runs a completion against the shared context, queued against every other
+ * pending completion (see the priority-queue doc comment above). Exported so
+ * transformationEngine.ts's to-do extraction (`priority: "background"`)
+ * shares the same queue as RAG generation (`priority: "interactive"`) below,
+ * rather than calling `context.completion()` directly.
  */
-export async function runQueuedLlamaCompletion(
+export function runQueuedLlamaCompletion(
   params: CompletionParams,
+  priority: CompletionPriority,
   onToken?: (data: TokenData) => void
 ): Promise<NativeCompletionResult> {
-  const context = await getContext();
-  const run = completionQueue.then(() => context.completion(params, onToken));
-  completionQueue = run.then(
-    () => undefined,
-    () => undefined
-  );
-  const result = await run;
-  // Real-world throughput telemetry — see modelPerformanceTracker.ts. Skips
-  // the throwaway single-token prewarm completion (n_predict: 1): one
-  // predicted token is too noisy a sample, and native `timings` for it is
-  // dominated by fixed per-call overhead rather than sustained decode speed.
-  // `predicted_per_second` comes straight from llama.cpp's own native
-  // timing, not a derived JS wall-clock measurement, so it isn't polluted by
-  // this function's own completionQueue wait time.
-  if (params.n_predict !== 1 && result.timings) {
-    void recordCompletionSpeed(result.timings.predicted_per_second);
-  }
-  return result;
+  return new Promise((resolve, reject) => {
+    const job: QueuedCompletion = { params, onToken, resolve, reject };
+    if (priority === "interactive") {
+      const firstBackgroundIndex = waitingCompletions.findIndex((w) => w.priority === "background");
+      const insertAt = firstBackgroundIndex === -1 ? waitingCompletions.length : firstBackgroundIndex;
+      waitingCompletions.splice(insertAt, 0, { priority, job });
+    } else {
+      waitingCompletions.push({ priority, job });
+    }
+    processCompletionQueue();
+  });
 }
 
 /**
@@ -503,6 +559,7 @@ export async function generateLocalRAGAnswer(
       penalty_repeat: REPEAT_PENALTY,
       stop: [EOT_TOKEN, "<|end_of_text|>"],
     },
+    "interactive", // a person is actively watching this — jumps ahead of any queued background extraction
     (data) => {
       if (data.token) {
         if (!firstTokenLogged) {
@@ -567,7 +624,9 @@ let warmupPromise: Promise<void> | null = null;
 export async function prewarmLocalLlama(): Promise<void> {
   if (!warmupPromise) {
     warmupPromise = (async () => {
-      await runQueuedLlamaCompletion({ prompt: WARMUP_PROMPT, n_predict: 1 }, () => {});
+      // "background": nothing is waiting on a warm-up itself, though in
+      // practice it only ever runs at boot when the queue's already empty.
+      await runQueuedLlamaCompletion({ prompt: WARMUP_PROMPT, n_predict: 1 }, "background", () => {});
     })();
     // Same reset-on-failure as getContext()'s own contextPromise — a failed
     // warm-up (model not downloaded yet, a corrupt file) shouldn't poison

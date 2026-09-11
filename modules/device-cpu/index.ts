@@ -20,6 +20,7 @@ import { requireNativeModule } from "expo-modules-core";
  */
 const DeviceCpuModule = requireNativeModule<{
   getCoreCount(): number;
+  getThermalStatus(): number;
 }>("DeviceCpu");
 
 /** The device's real CPU core count (`Runtime.getRuntime().availableProcessors()`),
@@ -29,6 +30,36 @@ export function getCpuCoreCount(): number | null {
   try {
     const count = DeviceCpuModule.getCoreCount();
     return Number.isFinite(count) && count > 0 ? count : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Mirrors Android's own `PowerManager.THERMAL_STATUS_*` constants (0 NONE
+ * through 6 SHUTDOWN) — see `getThermalStatus()` below for how "unknown"
+ * (pre-Android-10, or the call otherwise failing) is represented.
+ */
+export const ThermalStatus = {
+  NONE: 0,
+  LIGHT: 1,
+  MODERATE: 2,
+  SEVERE: 3,
+  CRITICAL: 4,
+  EMERGENCY: 5,
+  SHUTDOWN: 6,
+} as const;
+
+/** Android's own real-time thermal signal (`PowerManager.getCurrentThermalStatus()`,
+ * API 29+) — `null` on pre-Android-10 devices or if the native call somehow
+ * fails, which callers must treat as "unknown," never as "definitely cool."
+ * Used to let background AI work defer itself rather than pile more
+ * sustained CPU load onto an already-hot chipset — general device hygiene,
+ * not something tuned to any one device's thermal curve. */
+export function getThermalStatus(): number | null {
+  try {
+    const status = DeviceCpuModule.getThermalStatus();
+    return Number.isFinite(status) && status >= 0 ? status : null;
   } catch {
     return null;
   }
