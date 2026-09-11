@@ -1,1 +1,10 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="expo.modules.downloadbridge" />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="expo.modules.downloadbridge">
+  <!-- Required specifically for DownloadManager.Request.VISIBILITY_HIDDEN
+       (see DownloadBridgeModule.kt's doc comment for why HIDDEN, not
+       VISIBLE, is used) - without this, .enqueue() throws a SecurityException
+       synchronously, which the JS side's try/catch swallows into a silent
+       "error" status with no on-screen explanation. Confirmed on-device: a
+       fresh install's onboarding screen sat at 0 bytes indefinitely with zero
+       DownloadManager system-log activity, which is exactly this failure. -->
+  <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION" />
+</manifest>

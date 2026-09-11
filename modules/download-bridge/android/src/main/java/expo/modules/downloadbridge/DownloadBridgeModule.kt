@@ -7,6 +7,7 @@ import expo.modules.kotlin.exception.Exceptions
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import org.json.JSONObject
+import java.io.File
 
 /**
  * Hands a large model download to Android's own system DownloadManager
@@ -103,6 +104,21 @@ class DownloadBridgeModule : Module() {
 
     Function("cancel") { downloadId: Double ->
       downloadManager.remove(downloadId.toLong())
+      Unit
+    }
+
+    // Deletes the finished file DownloadManager wrote into the app-private
+    // external files dir, AFTER the caller has already copied it into
+    // FileSystem.documentDirectory. Exists because expo-file-system's own
+    // `deleteAsync` validates its target is inside one of ITS sandboxed
+    // directories (documentDirectory/cacheDirectory) and rejects an
+    // arbitrary external-storage path with "isn't deletable" - confirmed
+    // on-device - even though this app has full OS-level write access to a
+    // path this very module's own DownloadManager transfer wrote. A plain
+    // java.io.File delete has no such restriction.
+    Function("deleteFile") { path: String ->
+      val cleanPath = if (path.startsWith("file://")) path.removePrefix("file://") else path
+      File(cleanPath).delete()
       Unit
     }
   }

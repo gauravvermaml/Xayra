@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
-import { useModelDownload } from "../services/ai/modelDownloadManager";
+import { resumeDownloads, useModelDownload } from "../services/ai/modelDownloadManager";
 import { markSetupComplete } from "../services/settings/appSettings";
 import { showSetupCompleteNotification } from "../services/notifications/setupCompleteNotification";
 
@@ -108,6 +108,7 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
         formatEta(modelDownload.etaSeconds);
 
   const isPaused = modelDownload.status === "paused_offline";
+  const isError = modelDownload.status === "error";
 
   return (
     <View style={styles.container}>
@@ -123,6 +124,17 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
         {isPaused && (
           <View style={styles.pausedBanner}>
             <Text style={styles.pausedText}>Waiting for a network connection — this will resume automatically.</Text>
+          </View>
+        )}
+
+        {isError && (
+          <View style={styles.errorBanner}>
+            <Text style={styles.errorText}>
+              {modelDownload.error ?? "Setup was interrupted."}
+            </Text>
+            <Pressable style={styles.retryButton} onPress={() => void resumeDownloads()}>
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </Pressable>
           </View>
         )}
 
@@ -197,6 +209,28 @@ const styles = StyleSheet.create({
   },
   pausedText: {
     ...typography.caption,
+    color: colors.textPrimary,
+  },
+  errorBanner: {
+    marginTop: spacing.md,
+    padding: spacing.md,
+    borderRadius: radius.md,
+    backgroundColor: colors.dangerMuted,
+  },
+  errorText: {
+    ...typography.caption,
+    color: colors.textPrimary,
+    marginBottom: spacing.sm,
+  },
+  retryButton: {
+    alignSelf: "flex-start",
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.base,
+    borderRadius: radius.pill,
+    backgroundColor: colors.danger,
+  },
+  retryButtonText: {
+    ...typography.label,
     color: colors.textPrimary,
   },
   stepRow: {

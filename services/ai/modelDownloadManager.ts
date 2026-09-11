@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import * as Device from "expo-device";
-import { enqueueDownload, queryDownload } from "expo-download-bridge";
+import { deleteNativeFile, enqueueDownload, queryDownload } from "expo-download-bridge";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Network from "expo-network";
 
@@ -366,11 +366,17 @@ async function moveIntoDocumentDirectory(sourceUri: string, dest: string): Promi
   try {
     await FileSystem.moveAsync({ from: sourceUri, to: dest });
   } catch {
-    // A plain rename can fail crossing storage volumes on some Android
-    // versions/vendors — copy+delete always works, since both sides are
-    // ordinary paths this app already has read/write access to.
+    // A plain rename fails crossing storage volumes on this device (external
+    // files dir -> internal documentDirectory) — confirmed on-device — so
+    // fall back to copy+delete. The delete half uses the native
+    // deleteNativeFile(), NOT FileSystem.deleteAsync(): expo-file-system's
+    // own deleteAsync validates its target is inside one of ITS sandboxed
+    // directories and rejects this external-storage path with "isn't
+    // deletable" — confirmed on-device — even though the app has full
+    // OS-level write access to it (this module's own DownloadManager
+    // transfer wrote it there in the first place).
     await FileSystem.copyAsync({ from: sourceUri, to: dest });
-    await FileSystem.deleteAsync(sourceUri, { idempotent: true });
+    deleteNativeFile(sourceUri);
   }
 }
 

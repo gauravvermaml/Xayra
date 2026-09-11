@@ -18,6 +18,7 @@ const DownloadBridgeModule = requireNativeModule<{
   enqueue(url: string, destFilename: string, title: string): number;
   query(downloadId: number): string;
   cancel(downloadId: number): void;
+  deleteFile(path: string): void;
 }>("DownloadBridge");
 
 export type NativeDownloadStatus =
@@ -63,4 +64,18 @@ export function queryDownload(downloadId: number): NativeDownloadQueryResult {
 /** Cancels and removes a download's DownloadManager record. */
 export function cancelDownload(downloadId: number): void {
   DownloadBridgeModule.cancel(downloadId);
+}
+
+/**
+ * Deletes a plain file path natively — specifically for cleaning up a
+ * finished download in this app's app-private external-files directory
+ * after the caller has already copied it into `FileSystem.documentDirectory`.
+ * NOT a replacement for `FileSystem.deleteAsync` in general: use this only
+ * for a path DownloadManager itself wrote (via `enqueueDownload`), since
+ * expo-file-system's own `deleteAsync` rejects paths outside its own
+ * sandboxed directories with an "isn't deletable" error — confirmed
+ * on-device — even though this app has full OS-level write access to them.
+ */
+export function deleteNativeFile(path: string): void {
+  DownloadBridgeModule.deleteFile(path);
 }
