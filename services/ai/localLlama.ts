@@ -457,6 +457,103 @@ export async function attemptThreadEscalation(
   return { passed, tokensPerSecond };
 }
 
+/** How long an onboarding-time calibration trial is allowed to run before
+ * it's treated as "this device struggled" and cut off — see
+ * `attemptOptimisticThreadCalibration()`'s own doc comment. Generous enough
+ * that a genuinely capable device (this app's actual target user base)
+ * finishes in a small fraction of this; short enough that a device which
+ * can't handle the optimistic thread count doesn't stall onboarding for
+ * anywhere near the ~2-minute delays this whole feature exists to
+ * prevent. */
+const CALIBRATION_TIMEOUT_MS = 12_000;
+
+/**
+ * Runs exactly once, from `OnboardingSetupScreen.tsx`'s "Tuning quick-recall
+ * for your device" step, before the user has asked a single real question —
+ * NOT the conservative-then-escalate design `attemptThreadEscalation` above
+ * is, and deliberately so. Product call, not a technical default: this
+ * app's real target users are 2023+ flagship-class devices, not the 2019
+ * budget phones this codebase also keeps around for edge-case testing, so
+ * the FIRST thing tried is optimistic (reserve only 2 cores for the OS, use
+ * everything else for inference), not the safe default — earning your way
+ * DOWN from ambitious is the design, not earning your way up from
+ * conservative. A capable device (the common case) gets its best real
+ * thread count from its very first genuine query onward, with zero extra
+ * wait added to that query — the whole calibration cost lands inside a
+ * setup screen the user is already waiting through for model downloads,
+ * never on an interaction that actually matters to how the app is judged.
+ *
+ * Bounded and cancellable, not a blind gamble: `stopCompletion()` (llama.rn)
+ * lets a stalling trial be cut off cleanly rather than left to hang
+ * onboarding — a genuinely weak device that slips through this app's real
+ * user base still completes setup normally, just on the same conservative
+ * quarter-of-cores default this app always used, with a second chance
+ * later via `maybeAttemptThreadEscalation()` (modelDownloadManager.ts) once
+ * it has real usage history to measure against — that function's own
+ * conservative-then-escalate design is exactly right as a SECOND-CHANCE
+ * safety net, just wrong as the very first thing every device tries.
+ */
+export async function attemptOptimisticThreadCalibration(): Promise<
+  { calibrated: true; threads: number; tokensPerSecond: number } | { calibrated: false }
+> {
+  const cores = getCpuCoreCount();
+  const conservativeThreads = cores ? Math.max(1, Math.floor(cores / 4)) : 2;
+  if (!cores || cores < 3) {
+    return { calibrated: false }; // Nothing to gain — reserving 2 cores leaves this device no real headroom to try.
+  }
+
+  const candidateThreads = Math.max(1, cores - 2);
+  if (candidateThreads <= conservativeThreads) {
+    return { calibrated: false };
+  }
+
+  const { path, label } = await resolveModelPath();
+  await releaseLocalLlama();
+  const candidateContext = await loadContext(path, label, candidateThreads);
+
+  const completionPromise = candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
+  const timedOut = await Promise.race([
+    completionPromise.then(() => false),
+    new Promise<true>((resolve) => setTimeout(() => resolve(true), CALIBRATION_TIMEOUT_MS)),
+  ]);
+
+  if (timedOut) {
+    // Cuts the actual native work short rather than leaving it running in
+    // the background — without this, a struggling device would keep
+    // burning CPU on the abandoned trial underneath whatever runs next.
+    await candidateContext.stopCompletion().catch(() => {});
+    // The real completion may still resolve or reject shortly after being
+    // asked to stop — swallow it here so it can't surface as an unhandled
+    // rejection later, unobserved. Its result is discarded either way.
+    await completionPromise.catch(() => {});
+    await candidateContext.release().catch(() => {});
+    contextPromise = loadContext(path, label, conservativeThreads);
+    contextPromise.catch(() => {
+      contextPromise = null;
+    });
+    await contextPromise;
+    return { calibrated: false };
+  }
+
+  const result = await completionPromise;
+  const tokensPerSecond = result.timings?.predicted_per_second ?? 0;
+  if (tokensPerSecond < MIN_USABLE_TOKENS_PER_SECOND) {
+    // Finished inside the timeout but still not genuinely usable — unlikely
+    // (a device this slow almost always times out first instead), but
+    // handled the same way as a timeout for safety: fall back, don't keep it.
+    await candidateContext.release().catch(() => {});
+    contextPromise = loadContext(path, label, conservativeThreads);
+    contextPromise.catch(() => {
+      contextPromise = null;
+    });
+    await contextPromise;
+    return { calibrated: false };
+  }
+
+  contextPromise = Promise.resolve(candidateContext);
+  return { calibrated: true, threads: candidateThreads, tokensPerSecond };
+}
+
 /**
  * Builds a raw Llama-3.2 instruct-template prompt by hand — headers,
  * `<|eot_id|>` turn separators, and the trailing assistant header that

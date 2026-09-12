@@ -3,7 +3,7 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { AnimatedEmoji } from "./AnimatedEmoji";
 import { colors, radius, spacing, typography } from "../constants/theme";
-import { resumeDownloads, useModelDownload } from "../services/ai/modelDownloadManager";
+import { resumeDownloads, runOnboardingThreadCalibration, useModelDownload } from "../services/ai/modelDownloadManager";
 import { markSetupComplete } from "../services/settings/appSettings";
 import { showSetupCompleteNotification } from "../services/notifications/setupCompleteNotification";
 
@@ -20,14 +20,29 @@ import { showSetupCompleteNotification } from "../services/notifications/setupCo
  * last "ok, go" step became a deliberate user action instead of one that
  * just happens to them.
  *
- * The last two checklist rows ("Tuning quick-recall..." / "Locking in
- * 100% offline privacy...") are deliberately COSMETIC pacing, not a real
- * measured step — by the time the three real downloads finish,
- * `prewarmLocalLlama()` has already been triggered by
- * modelDownloadManager's own `setStatus` side effect, so there's no
- * separate real "warm-up" operation left for this screen to await. They
- * exist purely so the transition from "99% downloaded" to "ready" doesn't
- * feel like it happened suspiciously instantly.
+ * The last checklist row ("Locking in 100% offline privacy...") is
+ * deliberately COSMETIC pacing, not a real measured step — by the time the
+ * three real downloads finish, `prewarmLocalLlama()` has already been
+ * triggered by modelDownloadManager's own `setStatus` side effect, so
+ * there's no separate real "warm-up" operation left for this screen to
+ * await. It exists purely so the transition from "99% downloaded" to
+ * "ready" doesn't feel like it happened suspiciously instantly.
+ *
+ * "Tuning quick-recall for your device" (the row above it) is NOT cosmetic
+ * — it runs a real, bounded, cancellable thread-count calibration trial
+ * (`runOnboardingThreadCalibration()`, services/ai/modelDownloadManager.ts)
+ * before the user has asked a single real question. See that function and
+ * `attemptOptimisticThreadCalibration()` (localLlama.ts) for the full
+ * reasoning: this app's real target users are 2023+ flagship-class devices,
+ * so the first thing ever tried on a fresh install is an OPTIMISTIC thread
+ * count, not the old conservative default — a capable device gets its best
+ * real speed from its very first genuine query onward, at the cost of a few
+ * extra seconds here, in a screen the user is already waiting through for
+ * model downloads anyway, never on the question that actually matters to
+ * how the app is judged. This step's on-screen duration genuinely varies by
+ * device as a result (bounded by a hard timeout inside that trial) — it is
+ * not the same fixed `COSMETIC_STEP_DURATION_MS` pause the row below it
+ * still uses.
  *
  * Warm, human-centered copy + `AnimatedEmoji` (pulse/rotate/bounce, built on
  * React Native's own `Animated` API) throughout this screen are a
@@ -107,11 +122,21 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
 
     let cancelled = false;
     async function runCompletionSequence() {
-      for (let i = 0; i < COSMETIC_STEPS.length; i++) {
-        await new Promise((resolve) => setTimeout(resolve, COSMETIC_STEP_DURATION_MS));
-        if (cancelled) return;
-        setCosmeticStepIndex(i + 1);
-      }
+      // Step 0, "Tuning quick-recall for your device" — a REAL calibration
+      // trial, not a fixed cosmetic pause; see this file's own doc comment
+      // above for why. Internally bounded/cancellable (localLlama.ts's
+      // CALIBRATION_TIMEOUT_MS), so this never blocks setup from
+      // completing even on a device the optimistic attempt doesn't suit.
+      await runOnboardingThreadCalibration();
+      if (cancelled) return;
+      setCosmeticStepIndex(1);
+
+      // Step 1, "Locking in 100% offline privacy" — still cosmetic pacing,
+      // see this file's own doc comment for why.
+      await new Promise((resolve) => setTimeout(resolve, COSMETIC_STEP_DURATION_MS));
+      if (cancelled) return;
+      setCosmeticStepIndex(2);
+
       await new Promise((resolve) => setTimeout(resolve, COSMETIC_STEP_DURATION_MS));
       if (cancelled) return;
 

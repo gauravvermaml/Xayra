@@ -7,6 +7,7 @@ import * as Network from "expo-network";
 
 import { downloadEmbeddingAssets, isEmbeddingModelDownloaded } from "./embeddingModel";
 import {
+  attemptOptimisticThreadCalibration,
   attemptThreadEscalation,
   attemptTierUpgrade,
   computeInferenceThreadCount,
@@ -794,6 +795,39 @@ async function maybeAttemptThreadEscalation(): Promise<void> {
     console.log(
       `[ThreadTuning] Rejected ${candidateThreads}-thread trial — measured ${tokensPerSecond.toFixed(1)} tok/s, not meaningfully faster than the ~${averageTokensPerSecond.toFixed(1)} baseline at ${currentThreads}. Staying at ${currentThreads} threads.`
     );
+  }
+}
+
+/**
+ * Thin persistence wrapper around localLlama.ts's
+ * `attemptOptimisticThreadCalibration()` — called ONCE from
+ * `OnboardingSetupScreen.tsx`'s "Tuning quick-recall for your device" step,
+ * deliberately NOT from the "just became ready" hook `maybeAttemptTierUpgrade`/
+ * `maybeAttemptThreadEscalation` share above. This one runs BEFORE the user
+ * has asked a single real question — optimistic-first, not conservative-
+ * then-earn-your-way-up — see that function's own doc comment for the full
+ * reasoning (this app's real target users are 2023+ flagship-class devices,
+ * so the FIRST thing tried should assume that, not a 2019 budget phone).
+ *
+ * Marking `threadEscalationStatus: "accepted"` on success short-circuits
+ * `maybeAttemptThreadEscalation` from later re-checking a device that's
+ * already sitting at its optimistic ceiling (there'd be no headroom left to
+ * escalate INTO anyway — the math there already guards against that, this
+ * just avoids the wasted check). Leaving it "not_attempted" on a failed/
+ * timed-out calibration is equally deliberate: it's what lets that
+ * function's own conservative-then-escalate path give a device a second,
+ * later chance once it has real usage history to measure against, exactly
+ * as if this optimistic attempt had never run at all.
+ */
+export async function runOnboardingThreadCalibration(): Promise<void> {
+  const result = await attemptOptimisticThreadCalibration();
+  if (result.calibrated) {
+    await writePreferences({ llamaThreadCount: result.threads, threadEscalationStatus: "accepted" });
+    console.log(
+      `[ThreadTuning] Onboarding calibration accepted — ${result.threads} threads, measured ${result.tokensPerSecond.toFixed(1)} tok/s.`
+    );
+  } else {
+    console.log("[ThreadTuning] Onboarding calibration declined or timed out — staying on the conservative default.");
   }
 }
 
