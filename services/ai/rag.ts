@@ -1,4 +1,5 @@
 import { generateLocalRAGAnswer } from "./localLlama";
+import { setPipelineStage } from "./pipelineStage";
 import { hybridSearchNotes, type HybridSearchResult } from "../notes/noteManager";
 
 /**
@@ -136,6 +137,7 @@ export async function generateRAGAnswer(
   userQuery: string,
   onChunk?: (chunk: string) => void
 ): Promise<RagAnswer> {
+  setPipelineStage("retrieving");
   const notes = await hybridSearchNotes(userQuery, CONTEXT_NOTE_LIMIT);
 
   const citations: RagCitation[] = notes.map((note, i) => ({
@@ -163,6 +165,23 @@ export async function generateRAGAnswer(
     console.log("[RAG Prompt Context]", noteContext);
   }
 
-  const rawText = await generateLocalRAGAnswer(userQuery, noteContext, (token) => onChunk?.(token));
-  return { text: sanitizeLLMResponse(rawText), citations };
+  setPipelineStage("answering");
+  let firstTokenSeen = false;
+  try {
+    const rawText = await generateLocalRAGAnswer(userQuery, noteContext, (token) => {
+      if (!firstTokenSeen) {
+        firstTokenSeen = true;
+        // The streaming answer itself takes over from here — see
+        // ChatSheetContent.tsx's own `item.isStreaming && item.text.length
+        // === 0` check, which this same first-token moment already governs.
+        setPipelineStage(null);
+      }
+      onChunk?.(token);
+    });
+    return { text: sanitizeLLMResponse(rawText), citations };
+  } finally {
+    // Safety net for a zero-token answer or a thrown error, where the
+    // onToken callback above never ran to clear this itself.
+    setPipelineStage(null);
+  }
 }

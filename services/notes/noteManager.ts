@@ -6,6 +6,7 @@ import type { NoteStatus } from "../../db/schema";
 import { isEmbeddingModelDownloaded } from "../ai/embeddingModel";
 import { generateEmbeddingLocal } from "../ai/localEmbeddings";
 import { logDuration, nowMs } from "../ai/perf";
+import { setPipelineStage } from "../ai/pipelineStage";
 import { extractToDosFromText } from "../ai/transformationEngine";
 import { addToDo } from "../todos/todoManager";
 
@@ -133,7 +134,9 @@ async function updateNoteStatus(
  */
 async function tryEmbedNote(id: string, text: string): Promise<boolean> {
   try {
+    setPipelineStage("understanding");
     const embedding = await generateEmbeddingLocal(text);
+    setPipelineStage("saving");
     await insertEmbedding(id, embedding);
     await updateNoteStatus(id, "embedded");
     return true;
@@ -145,6 +148,13 @@ async function tryEmbedNote(id: string, text: string): Promise<boolean> {
       err
     );
     return false;
+  } finally {
+    // Always clear, success or failure — otherwise this global stage would
+    // keep reporting "saving"/"understanding" long after this call
+    // actually finished, misleading whatever screen reads it next (e.g. a
+    // later query briefly rendering a stale note-save label before its own
+    // "retrieving" stage overwrites it).
+    setPipelineStage(null);
   }
 }
 

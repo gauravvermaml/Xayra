@@ -154,6 +154,33 @@ const INITIAL_PROMPT = "Xayra";
  * noteManager). Returns which model produced the transcript so callers can
  * persist it as note metadata.
  */
+/**
+ * Silent, best-effort warm-up: loads the Whisper GGML model into native
+ * memory at app boot (called from services/ai/enginePrewarmer.ts, alongside
+ * the SQLite and Llama warm-ups already there) rather than leaving it to be
+ * paid the moment a user actually taps record. Whisper was the one engine
+ * this codebase prewarmed nothing for — every real note's "first
+ * transcription of the session felt slow" complaint traced back to this
+ * exact cold-start cost (`getWhisperContext()`'s own doc comment), paid at
+ * the single worst possible moment: the first time a user is actually
+ * waiting on it. For the common case (open the app, look around, THEN
+ * record), this eliminates that cost entirely rather than just labeling it
+ * better; a genuinely instant first tap still pays it, which is what
+ * pipelineStage.ts's "Hearing you out" stage exists to make visible rather
+ * than hidden behind a bare, unexplained pause.
+ */
+export async function prewarmLocalWhisper(): Promise<void> {
+  try {
+    await getWhisperContext();
+  } catch (err) {
+    // Same "don't poison the app over a missing/corrupt model" contract as
+    // every other caller here — the model may simply not be downloaded yet
+    // (a fresh install still mid-onboarding-download), which is normal, not
+    // an error worth surfacing.
+    console.warn("[Whisper] Prewarm skipped:", err instanceof Error ? err.message : err);
+  }
+}
+
 export async function transcribeAudioLocal(fileUri: string): Promise<LocalTranscriptionResult> {
   const start = nowMs();
   activeTranscriptionCount += 1;

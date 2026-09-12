@@ -18,6 +18,12 @@ import { colors } from "../constants/theme";
 import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
+import {
+  PIPELINE_STAGE_LABELS,
+  setPipelineStage,
+  subscribeToPipelineStage,
+  type PipelineStage,
+} from "../services/ai/pipelineStage";
 import { useChatSession } from "../services/ai/useChatSession";
 import { containsWakeWord, useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
 import {
@@ -189,6 +195,15 @@ export default function HomeScreen() {
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [processingState, setProcessingState] = useState<"idle" | "processing">("idle");
   const [processingLabel, setProcessingLabel] = useState<"note" | "query" | null>(null);
+  // Real, granular pipeline progress (see services/ai/pipelineStage.ts) —
+  // "Hearing you out", "Finding where this belongs", etc. — read here so the
+  // recorder canvas's status line can show what's ACTUALLY happening right
+  // now instead of one static label for the whole save/query. Falls back to
+  // `processingLabel`'s older generic text below whenever no specific stage
+  // is set (e.g. the brief gap right after one stage clears and before the
+  // next one starts).
+  const [pipelineStage, setPipelineStageState] = useState<PipelineStage | null>(null);
+  useEffect(() => subscribeToPipelineStage(setPipelineStageState), []);
   const [error, setError] = useState<string | null>(null);
 
   const sheetRef = useRef<BottomSheet>(null);
@@ -432,6 +447,18 @@ export default function HomeScreen() {
           }
           return;
         }
+        // Set BEFORE transcription starts, not after (routeFreeformInput
+        // below used to be the only place these flipped, which only ran
+        // once transcription had already finished) — otherwise the canvas
+        // sat at "idle" for the entire real Whisper cold-start/transcribe
+        // window, the single biggest real delay a user actually feels,
+        // showing nothing at all rather than the "Hearing you out" stage
+        // that's genuinely happening right now. `inputMode` is already
+        // known (the user chose Record/Ask before ever tapping the mic), so
+        // it's safe to set the label this early.
+        setProcessingState("processing");
+        setProcessingLabel(inputMode === "record" ? "note" : "query");
+        setPipelineStage("transcribing");
         const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
         if (isSilentTranscript(transcript)) {
           if (options?.isHandsfree) {
@@ -509,9 +536,19 @@ export default function HomeScreen() {
         // Always — see this function's opening comment. `idempotent: true`
         // makes this a safe no-op if the file was somehow already gone.
         await FileSystem.deleteAsync(audioUri, { idempotent: true }).catch(() => {});
+        // Safety net for every early-return path above (too-short/silent/
+        // no-wake-word/duplicate) that flips processing state on at the top
+        // of this function but never reaches `routeFreeformInput`'s own
+        // matching reset below — without this, one of those rejections
+        // would leave the canvas stuck on "Hearing you out" forever. A
+        // no-op on the normal success path, where routeFreeformInput's own
+        // `finally` has already reset all three.
+        setProcessingState("idle");
+        setProcessingLabel(null);
+        setPipelineStage(null);
       }
     },
-    [routeFreeformInput, chatSession]
+    [routeFreeformInput, chatSession, inputMode]
   );
 
   // ---- Handsfree Mode -----------------------------------------------------
@@ -681,12 +718,19 @@ export default function HomeScreen() {
       ? "transcribing"
       : "idle";
 
+  // Prefers the real, granular pipeline stage (see pipelineStage.ts) —
+  // "Hearing you out", "Reading through your notes", etc. — falling back to
+  // the older generic label only for the brief gap between one stage
+  // clearing and the next one starting (e.g. right after a note finishes
+  // embedding and before the pipeline as a whole has finished unwinding).
   const recordingStatusText = recorder.isRecording
     ? "Recording… tap to stop"
     : canvasState === "transcribing"
-      ? processingLabel === "note"
-        ? "Transcribing your thought..."
-        : "Searching your thoughts..."
+      ? pipelineStage
+        ? PIPELINE_STAGE_LABELS[pipelineStage]
+        : processingLabel === "note"
+          ? "Transcribing your thought..."
+          : "Searching your thoughts..."
       : null;
 
   // Opens a citation chip's source note from the chat view — the one

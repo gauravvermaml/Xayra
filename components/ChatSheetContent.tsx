@@ -1,10 +1,11 @@
-import { useEffect, useRef } from "react";
-import { ActivityIndicator, Animated, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { useEffect, useRef, useState } from "react";
+import { Animated, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
 
 import { MarkdownText } from "./MarkdownText";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { allowCellularDownloadAndResume, resumeDownloads, type ModelDownloadStatus } from "../services/ai/modelDownloadManager";
+import { PIPELINE_STAGE_LABELS, subscribeToPipelineStage } from "../services/ai/pipelineStage";
 import type { ChatMessage } from "../services/ai/useChatSession";
 import { copyTextWithFeedback } from "../utils/clipboard";
 
@@ -25,6 +26,41 @@ function StreamingCursor({ color }: { color: string }) {
   }, [opacity]);
 
   return <Animated.Text style={{ color, opacity }}>{"▋"}</Animated.Text>;
+}
+
+/**
+ * Replaces the old bare `ActivityIndicator` + static "Thinking…" — shows
+ * what's ACTUALLY happening (see services/ai/pipelineStage.ts) via the same
+ * gentle fade-loop `StreamingCursor` above already uses, so the row reads as
+ * "working," not "stalled," without a literal spinning wheel. Falls back to
+ * "Thinking…" for the brief instant before the first real stage (retrieval)
+ * has been reported yet, or on the rare answer with an empty note context
+ * that skips straight to generation.
+ */
+function StreamingStageLabel({ color }: { color: string }) {
+  const [stage, setStage] = useState(() => PIPELINE_STAGE_LABELS.retrieving);
+  const opacity = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    return subscribeToPipelineStage((next) => {
+      if (next === "retrieving" || next === "answering") {
+        setStage(PIPELINE_STAGE_LABELS[next]);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(opacity, { toValue: 0.4, duration: 700, useNativeDriver: true }),
+        Animated.timing(opacity, { toValue: 1, duration: 700, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [opacity]);
+
+  return <Animated.Text style={[styles.streamingStartText, { color, opacity }]}>{stage}</Animated.Text>;
 }
 
 /** Shown only before the first message of a session. Tapping one submits it
@@ -104,8 +140,7 @@ export function ChatSheetContent({
       <Text style={styles.roleLabel}>{item.role === "user" ? "You" : "Xayra"}</Text>
       {item.isStreaming && item.text.length === 0 ? (
         <View style={styles.streamingStartRow}>
-          <ActivityIndicator color={colors.textMuted} size="small" />
-          <Text style={styles.streamingStartText}>Thinking…</Text>
+          <StreamingStageLabel color={colors.textMuted} />
         </View>
       ) : (
         <View style={styles.bubbleTextWrap}>
