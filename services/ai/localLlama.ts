@@ -366,6 +366,11 @@ const TRIAL_N_PREDICT = 32;
  * cost is a real (if brief) window with no usable context if the trial
  * fails and the fallback reload is still in flight — acceptable since this
  * only ever runs at a quiet moment (see the caller), never mid-answer.
+ *
+ * Runs as a `runExclusiveLlamaTask()` job (see that function's own doc
+ * comment), not by calling `releaseLocalLlama()` directly — releasing the
+ * shared context is only safe once nothing else can possibly still be
+ * mid-completion on it, which only the shared queue itself can guarantee.
  */
 export async function attemptTierUpgrade(
   candidatePath: string,
@@ -373,28 +378,30 @@ export async function attemptTierUpgrade(
   fallbackPath: string,
   fallbackLabel: string
 ): Promise<{ passed: boolean; tokensPerSecond: number }> {
-  await releaseLocalLlama();
+  return runExclusiveLlamaTask(async () => {
+    await releaseLocalLlama();
 
-  const candidateContext = await loadContext(candidatePath, candidateLabel);
-  const result = await candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
-  const tokensPerSecond = result.timings?.predicted_per_second ?? 0;
-  const passed = tokensPerSecond >= MIN_USABLE_TOKENS_PER_SECOND;
+    const candidateContext = await loadContext(candidatePath, candidateLabel);
+    const result = await candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
+    const tokensPerSecond = result.timings?.predicted_per_second ?? 0;
+    const passed = tokensPerSecond >= MIN_USABLE_TOKENS_PER_SECOND;
 
-  if (passed) {
-    // Promote the already-loaded, already-warm trial context to be the new
-    // shared singleton — avoids paying a second full load for the exact
-    // model that just proved itself.
-    contextPromise = Promise.resolve(candidateContext);
-  } else {
-    await candidateContext.release();
-    contextPromise = loadContext(fallbackPath, fallbackLabel);
-    contextPromise.catch(() => {
-      contextPromise = null;
-    });
-    await contextPromise;
-  }
+    if (passed) {
+      // Promote the already-loaded, already-warm trial context to be the new
+      // shared singleton — avoids paying a second full load for the exact
+      // model that just proved itself.
+      contextPromise = Promise.resolve(candidateContext);
+    } else {
+      await candidateContext.release();
+      contextPromise = loadContext(fallbackPath, fallbackLabel);
+      contextPromise.catch(() => {
+        contextPromise = null;
+      });
+      await contextPromise;
+    }
 
-  return { passed, tokensPerSecond };
+    return { passed, tokensPerSecond };
+  });
 }
 
 /**
@@ -428,33 +435,38 @@ const THREAD_ESCALATION_MIN_IMPROVEMENT_MULTIPLE = 1.3;
  * "rejected" — same reasoning as a failed tier trial: the underlying CPU/
  * core layout doesn't change between app launches, so there's nothing to
  * gain by re-trying the same candidate later).
+ *
+ * Runs as a `runExclusiveLlamaTask()` job — see that function's own doc
+ * comment for why this can never call `releaseLocalLlama()` directly.
  */
 export async function attemptThreadEscalation(
   candidateThreads: number,
   baselineTokensPerSecond: number
 ): Promise<{ passed: boolean; tokensPerSecond: number }> {
-  const { path, label } = await resolveModelPath();
-  const previousThreads = await computeInferenceThreadCount();
+  return runExclusiveLlamaTask(async () => {
+    const { path, label } = await resolveModelPath();
+    const previousThreads = await computeInferenceThreadCount();
 
-  await releaseLocalLlama();
+    await releaseLocalLlama();
 
-  const candidateContext = await loadContext(path, label, candidateThreads);
-  const result = await candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
-  const tokensPerSecond = result.timings?.predicted_per_second ?? 0;
-  const passed = tokensPerSecond >= baselineTokensPerSecond * THREAD_ESCALATION_MIN_IMPROVEMENT_MULTIPLE;
+    const candidateContext = await loadContext(path, label, candidateThreads);
+    const result = await candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
+    const tokensPerSecond = result.timings?.predicted_per_second ?? 0;
+    const passed = tokensPerSecond >= baselineTokensPerSecond * THREAD_ESCALATION_MIN_IMPROVEMENT_MULTIPLE;
 
-  if (passed) {
-    contextPromise = Promise.resolve(candidateContext);
-  } else {
-    await candidateContext.release();
-    contextPromise = loadContext(path, label, previousThreads);
-    contextPromise.catch(() => {
-      contextPromise = null;
-    });
-    await contextPromise;
-  }
+    if (passed) {
+      contextPromise = Promise.resolve(candidateContext);
+    } else {
+      await candidateContext.release();
+      contextPromise = loadContext(path, label, previousThreads);
+      contextPromise.catch(() => {
+        contextPromise = null;
+      });
+      await contextPromise;
+    }
 
-  return { passed, tokensPerSecond };
+    return { passed, tokensPerSecond };
+  });
 }
 
 /** How long an onboarding-time calibration trial is allowed to run before
@@ -492,6 +504,15 @@ const CALIBRATION_TIMEOUT_MS = 12_000;
  * it has real usage history to measure against — that function's own
  * conservative-then-escalate design is exactly right as a SECOND-CHANCE
  * safety net, just wrong as the very first thing every device tries.
+ *
+ * Runs as a `runExclusiveLlamaTask()` job, not by calling
+ * `releaseLocalLlama()` directly — confirmed on-device why this matters:
+ * an earlier version of this function called it directly and hung the app
+ * during onboarding, no error, no crash, just a `release()` call that
+ * never returned, because `prewarmLocalLlama()`'s own 1-token warm-up
+ * completion was still in-flight on the very context this function was
+ * simultaneously trying to tear down. See `runExclusiveLlamaTask()`'s own
+ * doc comment for the full explanation.
  */
 export async function attemptOptimisticThreadCalibration(): Promise<
   { calibrated: true; threads: number; tokensPerSecond: number } | { calibrated: false }
@@ -507,51 +528,54 @@ export async function attemptOptimisticThreadCalibration(): Promise<
     return { calibrated: false };
   }
 
-  const { path, label } = await resolveModelPath();
-  await releaseLocalLlama();
-  const candidateContext = await loadContext(path, label, candidateThreads);
+  return runExclusiveLlamaTask(async () => {
+    const { path, label } = await resolveModelPath();
+    await releaseLocalLlama();
+    const candidateContext = await loadContext(path, label, candidateThreads);
 
-  const completionPromise = candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
-  const timedOut = await Promise.race([
-    completionPromise.then(() => false),
-    new Promise<true>((resolve) => setTimeout(() => resolve(true), CALIBRATION_TIMEOUT_MS)),
-  ]);
+    const completionPromise = candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
+    const timedOut = await Promise.race([
+      completionPromise.then(() => false),
+      new Promise<true>((resolve) => setTimeout(() => resolve(true), CALIBRATION_TIMEOUT_MS)),
+    ]);
 
-  if (timedOut) {
-    // Cuts the actual native work short rather than leaving it running in
-    // the background — without this, a struggling device would keep
-    // burning CPU on the abandoned trial underneath whatever runs next.
-    await candidateContext.stopCompletion().catch(() => {});
-    // The real completion may still resolve or reject shortly after being
-    // asked to stop — swallow it here so it can't surface as an unhandled
-    // rejection later, unobserved. Its result is discarded either way.
-    await completionPromise.catch(() => {});
-    await candidateContext.release().catch(() => {});
-    contextPromise = loadContext(path, label, conservativeThreads);
-    contextPromise.catch(() => {
-      contextPromise = null;
-    });
-    await contextPromise;
-    return { calibrated: false };
-  }
+    if (timedOut) {
+      // Cuts the actual native work short rather than leaving it running in
+      // the background — without this, a struggling device would keep
+      // burning CPU on the abandoned trial underneath whatever runs next.
+      await candidateContext.stopCompletion().catch(() => {});
+      // The real completion may still resolve or reject shortly after being
+      // asked to stop — swallow it here so it can't surface as an unhandled
+      // rejection later, unobserved. Its result is discarded either way.
+      await completionPromise.catch(() => {});
+      await candidateContext.release().catch(() => {});
+      contextPromise = loadContext(path, label, conservativeThreads);
+      contextPromise.catch(() => {
+        contextPromise = null;
+      });
+      await contextPromise;
+      return { calibrated: false };
+    }
 
-  const result = await completionPromise;
-  const tokensPerSecond = result.timings?.predicted_per_second ?? 0;
-  if (tokensPerSecond < MIN_USABLE_TOKENS_PER_SECOND) {
-    // Finished inside the timeout but still not genuinely usable — unlikely
-    // (a device this slow almost always times out first instead), but
-    // handled the same way as a timeout for safety: fall back, don't keep it.
-    await candidateContext.release().catch(() => {});
-    contextPromise = loadContext(path, label, conservativeThreads);
-    contextPromise.catch(() => {
-      contextPromise = null;
-    });
-    await contextPromise;
-    return { calibrated: false };
-  }
+    const result = await completionPromise;
+    const tokensPerSecond = result.timings?.predicted_per_second ?? 0;
+    if (tokensPerSecond < MIN_USABLE_TOKENS_PER_SECOND) {
+      // Finished inside the timeout but still not genuinely usable —
+      // unlikely (a device this slow almost always times out first
+      // instead), but handled the same way as a timeout for safety: fall
+      // back, don't keep it.
+      await candidateContext.release().catch(() => {});
+      contextPromise = loadContext(path, label, conservativeThreads);
+      contextPromise.catch(() => {
+        contextPromise = null;
+      });
+      await contextPromise;
+      return { calibrated: false };
+    }
 
-  contextPromise = Promise.resolve(candidateContext);
-  return { calibrated: true, threads: candidateThreads, tokensPerSecond };
+    contextPromise = Promise.resolve(candidateContext);
+    return { calibrated: true, threads: candidateThreads, tokensPerSecond };
+  });
 }
 
 /**
@@ -637,11 +661,28 @@ export async function getSharedLlamaContext(): Promise<LlamaContext> {
 type CompletionPriority = "interactive" | "background";
 
 type QueuedCompletion = {
+  kind: "completion";
   params: CompletionParams;
   onToken?: (data: TokenData) => void;
   resolve: (result: NativeCompletionResult) => void;
   reject: (err: unknown) => void;
 };
+
+/**
+ * A second job kind sharing this same queue — see `runExclusiveLlamaTask()`
+ * below for why. `run()` gets no context handed to it: a task that needs one
+ * (as every current caller does) resolves it itself, since the whole reason
+ * a task exists is to RECONFIGURE that context (release + reload at a
+ * different thread count), not just read the existing one.
+ */
+type QueuedTask = {
+  kind: "task";
+  run: () => Promise<unknown>;
+  resolve: (result: unknown) => void;
+  reject: (err: unknown) => void;
+};
+
+type QueuedJob = QueuedCompletion | QueuedTask;
 
 let isCompletionRunning = false;
 /** Kept sorted: every "interactive" job before every "background" job;
@@ -649,7 +690,18 @@ let isCompletionRunning = false;
  * is spliced in ahead of any waiting background jobs, but never disturbs
  * whichever job is already running (see this whole block's own doc comment
  * for why that part isn't possible). */
-const waitingCompletions: { priority: CompletionPriority; job: QueuedCompletion }[] = [];
+const waitingCompletions: { priority: CompletionPriority; job: QueuedJob }[] = [];
+
+function enqueue(priority: CompletionPriority, job: QueuedJob): void {
+  if (priority === "interactive") {
+    const firstBackgroundIndex = waitingCompletions.findIndex((w) => w.priority === "background");
+    const insertAt = firstBackgroundIndex === -1 ? waitingCompletions.length : firstBackgroundIndex;
+    waitingCompletions.splice(insertAt, 0, { priority, job });
+  } else {
+    waitingCompletions.push({ priority, job });
+  }
+  processCompletionQueue();
+}
 
 function processCompletionQueue(): void {
   if (isCompletionRunning) {
@@ -661,28 +713,31 @@ function processCompletionQueue(): void {
   }
   isCompletionRunning = true;
   const { job } = next;
-  void getContext()
-    .then((context) => context.completion(job.params, job.onToken))
-    .then(
-      (result) => {
-        // Real-world throughput telemetry — see modelPerformanceTracker.ts.
-        // Skips the throwaway single-token prewarm completion (n_predict: 1):
-        // one predicted token is too noisy a sample, and native `timings` for
-        // it is dominated by fixed per-call overhead rather than sustained
-        // decode speed. `predicted_per_second` comes straight from
-        // llama.cpp's own native timing, not a derived JS wall-clock
-        // measurement, so it isn't polluted by this queue's own wait time.
-        if (job.params.n_predict !== 1 && result.timings) {
-          void recordCompletionSpeed(result.timings.predicted_per_second);
-        }
-        job.resolve(result);
-      },
-      (err) => job.reject(err)
-    )
-    .finally(() => {
-      isCompletionRunning = false;
-      processCompletionQueue();
-    });
+
+  const settled: Promise<void> =
+    job.kind === "completion"
+      ? getContext()
+          .then((context) => context.completion(job.params, job.onToken))
+          .then((result) => {
+            // Real-world throughput telemetry — see modelPerformanceTracker.ts.
+            // Skips the throwaway single-token prewarm completion
+            // (n_predict: 1): one predicted token is too noisy a sample, and
+            // native `timings` for it is dominated by fixed per-call
+            // overhead rather than sustained decode speed.
+            // `predicted_per_second` comes straight from llama.cpp's own
+            // native timing, not a derived JS wall-clock measurement, so it
+            // isn't polluted by this queue's own wait time.
+            if (job.params.n_predict !== 1 && result.timings) {
+              void recordCompletionSpeed(result.timings.predicted_per_second);
+            }
+            job.resolve(result);
+          }, job.reject)
+      : job.run().then(job.resolve, job.reject);
+
+  void settled.finally(() => {
+    isCompletionRunning = false;
+    processCompletionQueue();
+  });
 }
 
 /**
@@ -698,15 +753,43 @@ export function runQueuedLlamaCompletion(
   onToken?: (data: TokenData) => void
 ): Promise<NativeCompletionResult> {
   return new Promise((resolve, reject) => {
-    const job: QueuedCompletion = { params, onToken, resolve, reject };
-    if (priority === "interactive") {
-      const firstBackgroundIndex = waitingCompletions.findIndex((w) => w.priority === "background");
-      const insertAt = firstBackgroundIndex === -1 ? waitingCompletions.length : firstBackgroundIndex;
-      waitingCompletions.splice(insertAt, 0, { priority, job });
-    } else {
-      waitingCompletions.push({ priority, job });
-    }
-    processCompletionQueue();
+    enqueue(priority, { kind: "completion", params, onToken, resolve, reject });
+  });
+}
+
+/**
+ * Runs an arbitrary async task with EXCLUSIVE access to the shared Llama
+ * context — no regular completion (RAG answer, background extraction, the
+ * app-boot prewarm) can start while it's running, and it never starts while
+ * one of those is already running. Exists specifically for
+ * `attemptOptimisticThreadCalibration()`/`attemptThreadEscalation()` below,
+ * both of which need to `releaseLocalLlama()` and reload a candidate
+ * context — an operation that is NOT safe to run concurrently with a
+ * regular completion (see this whole block's own doc comment above: a
+ * native llama.cpp context allows exactly one in-flight operation at a
+ * time, and releasing one out from under an in-flight completion is worse
+ * than the "context is busy" error that motivated this queue in the first
+ * place — confirmed on-device: it hung the app during onboarding, no
+ * error, no crash, just a `release()` call that never returned, because
+ * `prewarmLocalLlama()`'s own 1-token warm-up completion was still
+ * in-flight on the very context being torn down). Routing the whole
+ * release-reload-trial sequence through this same queue, instead of
+ * calling `releaseLocalLlama()` directly, is what actually fixes that: by
+ * the time this task's turn comes up, nothing else can possibly be
+ * mid-completion on the context it's about to tear down.
+ */
+export function runExclusiveLlamaTask<T>(task: () => Promise<T>, priority: CompletionPriority = "interactive"): Promise<T> {
+  return new Promise((resolve, reject) => {
+    enqueue(priority, {
+      kind: "task",
+      run: task,
+      // Safe: this Promise's own executor is the only caller of these, and
+      // `T` here is always exactly what `task()` resolves with — the
+      // `unknown` typing on `QueuedTask` only exists so one shared queue
+      // array can hold task jobs of different result types side by side.
+      resolve: resolve as (result: unknown) => void,
+      reject,
+    });
   });
 }
 

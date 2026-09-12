@@ -38,11 +38,23 @@ function useSetupGate(): [boolean | null, () => void] {
   const [ready, setReady] = useState<boolean | null>(null);
   useEffect(() => {
     let cancelled = false;
-    void isSetupComplete().then((complete) => {
-      if (!cancelled) {
-        setReady(complete);
-      }
-    });
+    // Diagnostic addition: `isSetupComplete()` previously had no `.catch()`
+    // here at all — a genuine failure (rather than just "still loading")
+    // would leave `ready` stuck at `null` forever, rendering nothing, with
+    // no error surfaced anywhere to explain why. Confirmed the hard way:
+    // on a device whose screen is locked, first-ever encryption-key
+    // creation (services/crypto/keyManager.ts, biometric-gated) can never
+    // complete — a completely different, pre-existing constraint, unrelated
+    // to this gate itself, but this gate had no way to ever report it.
+    void isSetupComplete()
+      .then((complete) => {
+        if (!cancelled) {
+          setReady(complete);
+        }
+      })
+      .catch((err) => {
+        console.error("[Setup] isSetupComplete() failed — staying on the splash screen:", err);
+      });
     return () => {
       cancelled = true;
     };
