@@ -14,6 +14,28 @@ export type LocalTranscriptionResult = {
   modelId: WhisperModelId;
 };
 
+/**
+ * whisper.cpp's own literal marker for a non-speech segment — "[BLANK_AUDIO]"
+ * confirmed on-device (a real Handsfree recording came back as "Hey Xayra,
+ * can you remind me to call Papa tonight at 6 p.m. [BLANK_AUDIO]"), plus its
+ * documented siblings ("[SILENCE]", "[MUSIC]", "[NOISE]", "[INAUDIBLE]",
+ * "(silence)"/parenthesized forms — see services/notes/noteManager.ts's own
+ * BLANK_AUDIO_MARKER_PATTERN doc comment for why both bracket styles are
+ * handled). Whisper emits one of these as its own transcript SEGMENT for a
+ * trailing/leading silent stretch of an otherwise-real recording — a distinct
+ * case from noteManager.ts's `isSilentTranscript`, which only ever asks
+ * "is the WHOLE transcript nothing"; that check alone let a genuinely
+ * transcribed note through with this marker still glued onto the end. This
+ * strips just the marker (wherever in the string it lands), not the
+ * surrounding real speech.
+ */
+const NON_SPEECH_MARKER_PATTERN =
+  /[([]\s*(?:blank_audio|silence|music|noise|inaudible|applause|laughter)\s*[)\]]/gi;
+
+function stripNonSpeechMarkers(text: string): string {
+  return text.replace(NON_SPEECH_MARKER_PATTERN, " ").replace(/\s+/g, " ").trim();
+}
+
 let whisperContextPromise: Promise<{ context: WhisperContext; modelId: WhisperModelId }> | null = null;
 let loadedModelId: WhisperModelId | null = null;
 
@@ -96,5 +118,5 @@ export async function transcribeAudioLocal(fileUri: string): Promise<LocalTransc
   const { promise } = context.transcribe(fileUri, { language: "en" });
   const { result } = await promise;
   logDuration("Whisper STT transcription", start);
-  return { transcript: result.trim(), modelId };
+  return { transcript: stripNonSpeechMarkers(result), modelId };
 }
