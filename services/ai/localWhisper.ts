@@ -40,6 +40,28 @@ let whisperContextPromise: Promise<{ context: WhisperContext; modelId: WhisperMo
 let loadedModelId: WhisperModelId | null = null;
 
 /**
+ * A count, not a boolean — recordings can be transcribed back-to-back before
+ * the first finishes (two notes in quick succession), so a simple flag one
+ * call clears could go false while another is still genuinely in flight.
+ * Whisper and Llama are two entirely separate native engines with no shared
+ * queue of their own (unlike Llama's completions, which already serialize
+ * through localLlama.ts's priority queue), so nothing stops them running at
+ * the exact same moment and splitting the CPU between them — this exists so
+ * `transformationEngine.ts`'s background to-do extraction can check it and
+ * hold off starting while a transcription the user is actively watching a
+ * "Transcribing..." spinner for is still using the CPU (see
+ * `waitForTranscriptionIdleIfNeeded()` there, mirroring this file's own
+ * thermal-gate pattern). Never gates transcription itself in the other
+ * direction — a person waiting on their own note should never be delayed by
+ * a background job they don't know is running.
+ */
+let activeTranscriptionCount = 0;
+
+export function isTranscriptionInProgress(): boolean {
+  return activeTranscriptionCount > 0;
+}
+
+/**
  * Not bundled into the app (tens/hundreds of MB) — downloaded automatically
  * in the background shortly after first launch (see
  * services/ai/modelDownloadManager.ts) rather than through any user-facing
@@ -134,9 +156,14 @@ const INITIAL_PROMPT = "Xayra";
  */
 export async function transcribeAudioLocal(fileUri: string): Promise<LocalTranscriptionResult> {
   const start = nowMs();
-  const { context, modelId } = await getWhisperContext();
-  const { promise } = context.transcribe(fileUri, { language: "en", prompt: INITIAL_PROMPT });
-  const { result } = await promise;
-  logDuration("Whisper STT transcription", start);
-  return { transcript: stripNonSpeechMarkers(result), modelId };
+  activeTranscriptionCount += 1;
+  try {
+    const { context, modelId } = await getWhisperContext();
+    const { promise } = context.transcribe(fileUri, { language: "en", prompt: INITIAL_PROMPT });
+    const { result } = await promise;
+    logDuration("Whisper STT transcription", start);
+    return { transcript: stripNonSpeechMarkers(result), modelId };
+  } finally {
+    activeTranscriptionCount -= 1;
+  }
 }

@@ -646,17 +646,29 @@ export async function getSharedLlamaContext(): Promise<LlamaContext> {
  * on-device finding: a live "Ask" answer queued strictly behind several
  * already-pending background to-do extractions waited several extra minutes
  * for its turn, even though the user was actively watching a "Thinking..."
- * spinner and the extractions had no one waiting on them at all. llama.cpp
- * has no API to pause/resume an ALREADY-RUNNING completion (that needs
- * KV-cache save/restore machinery this library doesn't expose), so a job
- * that's already mid-generation always finishes — but a job that's still
- * WAITING can be reordered. `runQueuedLlamaCompletion`'s `priority` param
- * lets `generateLocalRAGAnswer()` (a person is actively watching) jump
- * ahead of any not-yet-started `transformationEngine.ts` extraction (no one
- * waiting, tolerates being delayed) already sitting in the queue — the same
- * "interactive requests preempt queued background work" pattern used by
- * production LLM-serving systems, adapted to what a single mobile
- * llama.cpp context actually allows.
+ * spinner and the extractions had no one waiting on them at all.
+ * `runQueuedLlamaCompletion`'s `priority` param lets `generateLocalRAGAnswer()`
+ * (a person is actively watching) jump ahead of any not-yet-started
+ * `transformationEngine.ts` extraction (no one waiting, tolerates being
+ * delayed) already sitting in the queue — the same "interactive requests
+ * preempt queued background work" pattern used by production LLM-serving
+ * systems, adapted to what a single mobile llama.cpp context actually allows.
+ *
+ * Upgraded a THIRD time after an on-device report (Redmi, Build 35): a live
+ * query still waited out a background extraction that had already started
+ * running before the query arrived — reordering the WAITING list can't help
+ * a job that's already mid-generation. llama.cpp has no API to pause/resume
+ * an in-flight completion (that needs KV-cache save/restore machinery this
+ * library doesn't expose), but `stopCompletion()` (llama.rn) can cut one
+ * short. `enqueue()` now calls it on an in-flight BACKGROUND completion the
+ * instant an interactive one arrives; `processCompletionQueue()` recognizes
+ * the resulting early settle as a preemption (not a real result) and
+ * re-enqueues the same background job to retry from scratch once the
+ * context is free again, rather than resolving its caller with a truncated
+ * answer. A background extraction is a bounded, restartable, idempotent
+ * task (transformationEngine.ts re-derives to-dos from the note's full text
+ * every time), so replaying it from the top costs nothing but a little
+ * extra CPU time — never a wrong or partial result.
  */
 type CompletionPriority = "interactive" | "background";
 
@@ -666,6 +678,11 @@ type QueuedCompletion = {
   onToken?: (data: TokenData) => void;
   resolve: (result: NativeCompletionResult) => void;
   reject: (err: unknown) => void;
+  /** Set true by `enqueue()` the moment this job is preempted mid-run by an
+   * arriving interactive job (see `processCompletionQueue()` below). Lets the
+   * settle handler tell "cut short on purpose, retry it" apart from "a real
+   * result/error" without needing a second out-of-band signal. */
+  preempted?: boolean;
 };
 
 /**
@@ -685,11 +702,21 @@ type QueuedTask = {
 type QueuedJob = QueuedCompletion | QueuedTask;
 
 let isCompletionRunning = false;
+/** The job currently executing, plus the context it's running on once
+ * resolved — tracked specifically so `enqueue()` can reach in and call
+ * `stopCompletion()` on an in-flight BACKGROUND completion the moment an
+ * interactive job arrives (see this block's own doc comment above). `null`
+ * whenever nothing is running, or the running job is a `QueuedTask` (a
+ * release/reload sequence is never a preemption candidate — nothing should
+ * ever interrupt it mid-flight). */
+let runningCompletion: { job: QueuedCompletion; priority: CompletionPriority; context: LlamaContext | null } | null =
+  null;
+
 /** Kept sorted: every "interactive" job before every "background" job;
  * stable (FIFO) within the same priority. A newly-arrived interactive job
- * is spliced in ahead of any waiting background jobs, but never disturbs
- * whichever job is already running (see this whole block's own doc comment
- * for why that part isn't possible). */
+ * is spliced in ahead of any waiting background jobs, and — new in Build
+ * 36 — also preempts a background completion already running, rather than
+ * only ones still waiting (see this whole block's own doc comment). */
 const waitingCompletions: { priority: CompletionPriority; job: QueuedJob }[] = [];
 
 function enqueue(priority: CompletionPriority, job: QueuedJob): void {
@@ -697,6 +724,15 @@ function enqueue(priority: CompletionPriority, job: QueuedJob): void {
     const firstBackgroundIndex = waitingCompletions.findIndex((w) => w.priority === "background");
     const insertAt = firstBackgroundIndex === -1 ? waitingCompletions.length : firstBackgroundIndex;
     waitingCompletions.splice(insertAt, 0, { priority, job });
+
+    if (runningCompletion && runningCompletion.priority === "background" && runningCompletion.context) {
+      runningCompletion.job.preempted = true;
+      // Fire-and-forget: the cut-short completion settles on its own turn
+      // (see processCompletionQueue's "completion" branch), which is what
+      // actually frees the queue for this interactive job — nothing here
+      // needs to await it.
+      void runningCompletion.context.stopCompletion().catch(() => {});
+    }
   } else {
     waitingCompletions.push({ priority, job });
   }
@@ -712,13 +748,33 @@ function processCompletionQueue(): void {
     return;
   }
   isCompletionRunning = true;
-  const { job } = next;
+  const { job, priority } = next;
+
+  if (job.kind === "completion") {
+    runningCompletion = { job, priority, context: null };
+  }
 
   const settled: Promise<void> =
     job.kind === "completion"
       ? getContext()
-          .then((context) => context.completion(job.params, job.onToken))
+          .then((context) => {
+            if (runningCompletion?.job === job) {
+              runningCompletion.context = context;
+            }
+            return context.completion(job.params, job.onToken);
+          })
           .then((result) => {
+            if (job.preempted) {
+              // Cut short on purpose to let an interactive job through, not
+              // a real result — replay the same job from scratch instead of
+              // resolving its caller with a truncated answer. Pushed to the
+              // BACK of its own priority band (plain `enqueue`, not spliced
+              // to the front) so a retried background job can't starve
+              // whatever interactive work is now running ahead of it.
+              job.preempted = false;
+              enqueue(priority, job);
+              return;
+            }
             // Real-world throughput telemetry — see modelPerformanceTracker.ts.
             // Skips the throwaway single-token prewarm completion
             // (n_predict: 1): one predicted token is too noisy a sample, and
@@ -731,11 +787,21 @@ function processCompletionQueue(): void {
               void recordCompletionSpeed(result.timings.predicted_per_second);
             }
             job.resolve(result);
-          }, job.reject)
+          }, (err) => {
+            if (job.preempted) {
+              // stopCompletion() rejecting instead of resolving is just as
+              // much "cut short on purpose" as a resolve — retry either way.
+              job.preempted = false;
+              enqueue(priority, job);
+              return;
+            }
+            job.reject(err);
+          })
       : job.run().then(job.resolve, job.reject);
 
   void settled.finally(() => {
     isCompletionRunning = false;
+    runningCompletion = null;
     processCompletionQueue();
   });
 }

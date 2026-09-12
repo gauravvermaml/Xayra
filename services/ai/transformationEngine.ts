@@ -3,6 +3,7 @@ import { getThermalStatus, ThermalStatus } from "expo-device-cpu";
 
 import { DEFAULT_NOTIFICATION_TIME, RECURRENCE_OPTIONS, type Recurrence } from "../../db/schema";
 import { runQueuedLlamaCompletion } from "./localLlama";
+import { isTranscriptionInProgress } from "./localWhisper";
 import { logDuration, nowMs } from "./perf";
 
 /** One task pulled out of a note's raw text by extractToDosFromText(). Shape
@@ -954,6 +955,34 @@ async function waitForCoolerThermalStateIfNeeded(): Promise<void> {
   console.log("[ThermalGate] still warm after all retries — proceeding with extraction anyway.");
 }
 
+/** Delays tried while a transcription is in progress, before firing
+ * extraction anyway — same shape as `waitForCoolerThermalStateIfNeeded`
+ * above, deliberately shorter: a transcription is a one-off few-second job,
+ * not a sustained thermal condition, so it's worth only a brief wait rather
+ * than the thermal gate's much longer backoff. Whisper (transcription) and
+ * Llama (this extraction) are two separate native engines with no shared
+ * queue of their own — unlike two Llama completions, which already
+ * serialize through localLlama.ts's own priority queue — so without this,
+ * a note's own transcription and a PREVIOUS note's to-do extraction can run
+ * at the exact same moment and split the CPU between them, visibly slowing
+ * down the transcription the user is actively watching a spinner for
+ * (confirmed via a tester's on-device report: a second voice note
+ * transcribed noticeably slower than the first while the first note's
+ * extraction was still running). Extraction has no one waiting on it, so it
+ * yields; transcription never yields to extraction in the other direction. */
+const TRANSCRIPTION_RECHECK_DELAYS_MS = [1000, 2000, 3000];
+
+async function waitForTranscriptionIdleIfNeeded(): Promise<void> {
+  for (const delayMs of TRANSCRIPTION_RECHECK_DELAYS_MS) {
+    if (!isTranscriptionInProgress()) {
+      return;
+    }
+    console.log(`[TranscriptionGate] transcription in progress — deferring extraction ${delayMs}ms.`);
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  console.log("[TranscriptionGate] still transcribing after all retries — proceeding with extraction anyway.");
+}
+
 /**
  * Parses raw note text into structured to-do items entirely on-device, via
  * Xayra's existing llama.rn context (services/ai/localLlama.ts) — no network
@@ -978,6 +1007,7 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
 
   try {
     await waitForCoolerThermalStateIfNeeded();
+    await waitForTranscriptionIdleIfNeeded();
     const prompt = buildPrompt(trimmed, todayISO, detectedPhrases);
 
     const start = nowMs();
