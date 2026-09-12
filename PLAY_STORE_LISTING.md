@@ -2,55 +2,27 @@
 
 ## App Name
 
-Xayra - Private AI Memory
+Xayra - My Pocket Companion
 
 ## Short Description (≤80 chars)
 
-Local-first private memory recall assistant powered by on-device AI.
+Capture thoughts by voice, organize tasks, and recall memories 100% privately.
 
 *(70 characters)*
 
 ## Full Description (≤4000 chars)
 
-**Your memory. Your device. Nobody else.**
+We all lose track of quick ideas, daily to-dos, and important details simply because we don't have the time to stop and type them down.
 
-Xayra is a private, local-first memory recall assistant. Speak a voice note, and it's transcribed, embedded, and indexed — entirely on your phone. Ask a question later and get a spoken, cited answer pulled straight from your own notes — entirely on your phone. No cloud, no account, no network call, ever, in the core experience.
+Xayra acts as your personal voice vault—just speak your mind naturally, and it instantly turns your raw voice notes into organized thoughts and actionable reminders.
 
-**🔒 Truly Private, By Design — Not By Promise**
+Whenever you need to recall something later, just ask Xayra in plain English, and it retrieves the exact answer from your past notes in seconds.
 
-Most "private" apps still phone home for AI processing. Xayra doesn't, because it can't — there's no server wired into the app at all. Voice recognition, semantic search, and chat answers all run using AI models installed directly on your device. Your words never leave your phone to be transcribed, embedded, or understood by a language model. There's no telemetry, no usage tracking, no analytics SDK, and no third-party data sharing of any kind — not because we chose not to use one, but because none exists in this app.
+Because everything runs completely on your phone, your personal memories stay 100% private—no cloud servers, no account sign-ups, and zero data tracking.
 
-**🎙️ Hands-Free Voice Notes**
+It's the ultimate hassle-free second brain built to declutter your mind, keep your day on track, and protect your privacy effortlessly.
 
-Just talk. Xayra's on-device speech recognition captures your thoughts as you speak them, no typing required. Start a note, keep talking, and let Xayra handle the rest — transcription happens instantly, locally, on your hardware.
-
-**🧠 On-Device AI Chat, Grounded in Your Own Notes**
-
-Ask Xayra a question about something you noted last week, last month, or this morning. A local large language model reads through your notes, finds what's relevant using instant vector search, and gives you a spoken, cited answer — telling you exactly which note it pulled the information from. All of this — search, reasoning, and response generation — happens on your device, with zero round-trips to any external server.
-
-**⚡ Instant Vector Search**
-
-Under the hood, every note you take is converted into a semantic vector representation the moment you save it, so Xayra can find what you mean, not just what you typed. Search is fast, local, and private — powered by an on-device embedding model and an encrypted local index.
-
-**🔐 Encrypted at Rest**
-
-Your entire note database is encrypted on your device, with the encryption key protected by your device's secure keystore and, where available, gated behind your fingerprint or face unlock. Even if someone got hold of your phone's storage, your notes remain unreadable without you.
-
-**☁️ Optional, Hidden Google Drive Backup**
-
-Want a backup just in case? Xayra can optionally back up your encrypted data to a special hidden folder in your own Google Drive — one that's invisible in your normal Drive file browser and completely inaccessible to any other app. Backup is entirely opt-in and only ever happens when you tap the button. Nothing is backed up automatically, and Xayra never gains access to any other file in your Drive account.
-
-**🚫 Zero Data Tracking**
-
-No ad trackers. No analytics dashboards. No "anonymized usage data." No account sign-up required to use the app. What you record stays where you recorded it — on your phone.
-
-**Who Xayra Is For**
-
-If you've ever wanted a voice memo app that doubles as a second brain — one that actually remembers what you tell it and can answer questions about it later — without trusting that memory to a company's server, Xayra is built for exactly that.
-
----
-
-*Xayra requires an initial one-time setup to install its on-device AI models. See the in-app setup guide for details.*
+Xayra requires a quick one-time setup on first launch to install its on-device AI models. Just follow the in-app setup guide — it only happens once.
 
 ## Release Notes (v1.0.0)
 
