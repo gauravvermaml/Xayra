@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Dimensions, Image, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Alert, Dimensions, Image, Keyboard, Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -10,9 +10,8 @@ import { CentralRecorderCanvas, type RecorderCanvasState } from "../components/C
 import { ChatSheetContent } from "../components/ChatSheetContent";
 import { ComposeBar } from "../components/ComposeBar";
 import { ExpandedTextOverlay } from "../components/ExpandedTextOverlay";
-import { HistorySheet, SHEET_SNAP_POINTS, type HistoryTab } from "../components/HistorySheet";
+import { HistorySheet, SHEET_SNAP_POINTS } from "../components/HistorySheet";
 import { NoteDetailModal } from "../components/NoteDetailModal";
-import { NotesSheetContent, type DisplayNote } from "../components/NotesSheetContent";
 import { showToast } from "../components/Toast";
 import { TodosOverlay } from "../components/TodosOverlay";
 import { colors } from "../constants/theme";
@@ -31,16 +30,11 @@ import { isAudioTooShort } from "../services/audio/wav";
 import {
   createTextNote,
   createVoiceNote,
-  deleteNote,
   EmptyRecordingError,
   isSilentTranscript,
-  listNotes,
-  purgeAllNotes,
   retryPendingEmbeddings,
   SilentRecordingError,
-  type Note,
 } from "../services/notes/noteManager";
-import { getSyncStatus, restoreFromDrive, signInWithGoogle, type SyncStatus } from "../services/sync/driveSync";
 
 /** Screen goes idle-with-mic-open for this long with zero detected speech
  * before Handsfree auto-disengages — a safety/battery guard, not a UX
@@ -110,6 +104,13 @@ export default function HomeScreen() {
   // navigation state — same conditional-mount pattern as
   // `isTextBoxExpanded`/`ExpandedTextOverlay` below.
   const [isTodosVisible, setIsTodosVisible] = useState(false);
+  // "Quiet Corner" pass: Archive/Settings' shared entry point — a plain
+  // slide-up action sheet (same Modal + backdrop-Pressable-to-dismiss
+  // language as NoteDetailModal, not a coordinate-anchored dropdown popover
+  // pinned to the small icon that opens it, which would need fragile pixel
+  // math against the floating pill cluster's own Reanimated-driven Y
+  // position).
+  const [isQuickMenuOpen, setIsQuickMenuOpen] = useState(false);
 
   // Cold-start layout guard (Requirement 3): the header/compose bar/sheet
   // all depend on `insets` for correct placement — rendering them before
@@ -144,20 +145,20 @@ export default function HomeScreen() {
     });
   }, []);
 
-  const [historyTab, setHistoryTab] = useState<HistoryTab>("notes");
   // Build 22 EXPLICIT MODE SWITCHING: the single source of truth for what a
   // submission does — no classification, just this. Defaults to "record"
   // (the more common action — most sessions are jotting a thought, not
   // asking a question of past ones).
   const [inputMode, setInputMode] = useState<"record" | "ask">("record");
   const [inputText, setInputText] = useState("");
-  const [allNotes, setAllNotes] = useState<Note[]>([]);
+  // The one remaining use for this pair on the home screen: opening a note
+  // from a chat citation chip (handleShowCitation below). The home screen's
+  // own full notes list/browse/delete/Drive-restore state moved to
+  // app/archive.tsx entirely — see the "Quiet Corner" placement discussion.
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [processingState, setProcessingState] = useState<"idle" | "processing">("idle");
   const [processingLabel, setProcessingLabel] = useState<"note" | "query" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [syncStatus, setSyncStatus] = useState<SyncStatus>({ isConnected: false });
-  const [isRestoring, setIsRestoring] = useState(false);
 
   const sheetRef = useRef<BottomSheet>(null);
   const sheetAnimatedIndex = useSharedValue(0);
@@ -236,73 +237,17 @@ export default function HomeScreen() {
     sheetRef.current?.snapToIndex(0);
   }, []);
 
-  const refreshNotes = useCallback(async () => {
-    try {
-      setAllNotes(await listNotes());
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load notes.");
-    }
-  }, []);
-
-  const refreshSyncStatus = useCallback(async () => {
-    try {
-      setSyncStatus(await getSyncStatus());
-    } catch (err) {
-      console.error("[Sync] Failed to load status", err);
-    }
-  }, []);
-
+  // Catches up any note saved while the embedding model wasn't available
+  // (offline first run, etc.) — independent of whether the user ever opens
+  // Archive (app/archive.tsx), since RAG/Ask search quality depends on
+  // every note eventually being embedded regardless of whether its list is
+  // ever browsed. Archive's own focus effect runs this again too (cheap,
+  // harmless) so newly-restored/embedded notes show up promptly there.
   useFocusEffect(
     useCallback(() => {
-      void refreshNotes();
-      void refreshSyncStatus();
-      void retryPendingEmbeddings().then((count) => {
-        if (count > 0) {
-          void refreshNotes();
-        }
-      });
-    }, [refreshNotes, refreshSyncStatus])
+      void retryPendingEmbeddings();
+    }, [])
   );
-
-  // Security audit finding: this had no re-entrancy guard of its own — only
-  // the `isRestoring` REACT STATE the "Restore from Drive" link disables on
-  // (see NotesSheetContent). Exactly the same closure-staleness window
-  // documented on `useChatSession`'s `isSendingRef` applies here: a fast
-  // double-tap can fire this callback twice before `setIsRestoring(true)`
-  // has actually committed and re-rendered the disabled button, letting both
-  // calls race into `restoreFromDrive()` → `mergeMissingNotes()` at once.
-  // `INSERT OR IGNORE` there stops a duplicate *note* row either way, but the
-  // two calls' own fire-and-forget embedding passes would then both try to
-  // embed the same newly-restored notes concurrently. A plain ref is
-  // checked and set synchronously, with no such window — same fix shape as
-  // every other duplicate-execution guard in this file.
-  const isRestoringRef = useRef(false);
-  const handleRestoreFromDrive = useCallback(() => {
-    if (isRestoringRef.current) {
-      return;
-    }
-    isRestoringRef.current = true;
-    void (async () => {
-      setIsRestoring(true);
-      setError(null);
-      try {
-        if (!syncStatus.isConnected) {
-          await signInWithGoogle();
-        }
-        const { message } = await restoreFromDrive();
-        await refreshNotes();
-        await refreshSyncStatus();
-        Alert.alert("Vault Restored", message);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Failed to restore from Google Drive.";
-        setError(message);
-        Alert.alert("Restore Failed", message);
-      } finally {
-        isRestoringRef.current = false;
-        setIsRestoring(false);
-      }
-    })();
-  }, [syncStatus.isConnected, refreshNotes, refreshSyncStatus]);
 
   // ---- Explicit mode routing ----------------------------------------------
   //
@@ -319,9 +264,7 @@ export default function HomeScreen() {
         const note = audioUri
           ? await createVoiceNote(audioUri, text, whisperModelId)
           : await createTextNote(text);
-        await refreshNotes();
         showToast("Saved thought to memory");
-        setHistoryTab("notes");
         sheetRef.current?.snapToIndex(0);
         if (note.status !== "embedded") {
           setError(null);
@@ -335,7 +278,7 @@ export default function HomeScreen() {
         }
       }
     },
-    [refreshNotes]
+    []
   );
 
   /** Shared by ComposeBar's typed submit and both voice paths. `audioUri`
@@ -383,11 +326,6 @@ export default function HomeScreen() {
           await routeRecord(text, audioUri, whisperModelId);
           return { intent };
         }
-        // ASK flips the active tab to QA History so the streaming answer
-        // is what's actually visible once the sheet reaches its 50%
-        // auto-peek, rather than leaving Notes selected underneath it.
-        setHistoryTab("qa");
-        sheetRef.current?.snapToIndex(1);
         if (audioUri) {
           // Voice-sourced: run the RAG exchange via `ask()`, which has no
           // speech side effect of its own — the caller (finishUtterance)
@@ -706,45 +644,6 @@ export default function HomeScreen() {
 
   const handleLongPressCenterButton = handleToggleHandsfree;
 
-  const handleDeleteNote = useCallback((noteId: string) => {
-    Alert.alert("Delete Note", "Are you sure you want to permanently delete this note?", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: () => {
-          void deleteNote(noteId)
-            .then(() => setAllNotes((prev) => prev.filter((note) => note.id !== noteId)))
-            .catch((err) => {
-              const message = err instanceof Error ? err.message : "Failed to delete note.";
-              setError(message);
-              Alert.alert("Delete Error", message);
-            });
-        },
-      },
-    ]);
-  }, []);
-
-  useEffect(() => {
-    if (!__DEV__) {
-      return;
-    }
-    (globalThis as { __purgeAllNotes?: () => Promise<void> }).__purgeAllNotes = () =>
-      purgeAllNotes().then(() => setAllNotes([]));
-  }, []);
-
-  const displayedNotes: DisplayNote[] = useMemo(
-    () =>
-      allNotes.map((note) => ({
-        id: note.id,
-        content: note.content,
-        audioUri: note.audioUri,
-        transcriptionModel: note.transcriptionModel,
-        createdAt: note.createdAt,
-      })),
-    [allNotes]
-  );
-
   const canvasState: RecorderCanvasState = recorder.isRecording
     ? "recording"
     : processingState === "processing"
@@ -759,41 +658,28 @@ export default function HomeScreen() {
         : "Searching your thoughts..."
       : null;
 
-  const handleSelectNote = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
+  // Opens a citation chip's source note from the chat view — the one
+  // remaining "view a note" path on this screen, unrelated to Archive's own
+  // full browse/delete list (app/archive.tsx).
   const handleShowCitation = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
   const handleSettingsPress = useCallback(() => router.push("/settings"), [router]);
-  const handleInputFocus = useCallback(() => sheetRef.current?.snapToIndex(1), []);
+  const handleOpenArchive = useCallback(() => router.push("/archive"), [router]);
+  // Explicit forced-collapse (index 0), not the previous auto-*expand* to
+  // 50% — a tester found the Recorded/Searched-notes card(s) and the
+  // floating pills all crowding the screen the instant they tapped in to
+  // type, on top of the keyboard. Whatever "Recent Answers" content the
+  // sheet might already have been showing (e.g. left expanded from a
+  // previous Ask) is deliberately hidden the moment composing starts —
+  // IDLE PEEK ISOLATION already renders nothing below the sticky header at
+  // index 0, so collapsing here is what keeps the keyboard the only thing
+  // sharing the screen with the compose bar while actually typing. The
+  // post-submission auto-peek (routeFreeformInput, above) is unrelated and
+  // unchanged — that's a deliberate "here's your answer" reveal, not the
+  // "about to type" moment this handler covers.
+  const handleInputFocus = useCallback(() => sheetRef.current?.snapToIndex(0), []);
 
-  // Build 23 SYNCHRONIZE MODE PILLS WITH DRAWER TABS: tapping a mode pill
-  // sets both the deterministic routing mode AND which drawer segment is
-  // showing, in one action — Record -> "Recorded notes", Ask -> "Searched
-  // notes". These were two independent state variables before (inputMode
-  // drove routing, historyTab drove the drawer, only ever linked indirectly
-  // through routeFreeformInput's own post-submission tab flip); this handler
-  // is the single place that keeps them in lockstep the moment the pill
-  // itself is tapped, before any submission happens at all.
   const handleSelectMode = useCallback((mode: "record" | "ask") => {
     setInputMode(mode);
-    setHistoryTab(mode === "record" ? "notes" : "qa");
-  }, []);
-
-  // Build 29 fix: the Build 23 comment above claimed inputMode/historyTab
-  // stayed "in lockstep the moment the pill itself is tapped" — true only
-  // for the floating [Record|Ask] pill. HistorySheet's own drawer segment
-  // pill ("Recorded notes"/"Searched notes") was wired straight to the raw
-  // `setHistoryTab` setter, which flips which list is visible but leaves
-  // `inputMode` — and with it the floating pill's highlighted state —
-  // untouched. Concretely: tap the floating pill to "Record", then tap the
-  // drawer's "Searched notes" segment to browse old Q&A; the drawer now
-  // correctly shows QA history, but the floating pill still highlights
-  // "Record", and the NEXT submission (compose bar or mic) would silently
-  // try to save a note instead of asking a question — routeFreeformInput
-  // only ever reads `inputMode`, which never moved. Mirrors handleSelectMode
-  // in the other direction so BOTH pills — and the routing they drive —
-  // move together regardless of which one the user actually taps.
-  const handleHistoryTabChange = useCallback((tab: HistoryTab) => {
-    setHistoryTab(tab);
-    setInputMode(tab === "notes" ? "record" : "ask");
   }, []);
 
   const handleSubmitText = useCallback(
@@ -880,11 +766,22 @@ export default function HomeScreen() {
           pointerEvents="box-none"
           style={[styles.drawerFloatingStack, { right: 24 }, drawerFloatingStackAnimatedStyle]}
         >
-          <Pressable onPress={() => setIsTodosVisible(true)} style={styles.todosPill}>
-            <Text style={styles.todosPillText}>
-              {pendingCount > 0 ? `To-Dos (${pendingCount})` : "To-Dos"}
-            </Text>
-          </Pressable>
+          {/* "Quiet Corner" pass: Archive and Settings are both deliberate,
+              infrequent visits — never something reached for mid-recording —
+              so they don't get their own permanent pills in this cluster.
+              One small icon, inline with To-Dos (the cluster's own
+              least-frequent existing member), opens a two-row popover
+              instead. Record/Ask/Handsfree below are unchanged. */}
+          <View style={styles.topRow}>
+            <Pressable onPress={() => setIsQuickMenuOpen(true)} hitSlop={10} style={styles.quickMenuButton}>
+              <Text style={styles.quickMenuButtonText}>•••</Text>
+            </Pressable>
+            <Pressable onPress={() => setIsTodosVisible(true)} style={styles.todosPill}>
+              <Text style={styles.todosPillText}>
+                {pendingCount > 0 ? `To-Dos (${pendingCount})` : "To-Dos"}
+              </Text>
+            </Pressable>
+          </View>
 
           <Pressable
             onPress={handleToggleHandsfree}
@@ -913,8 +810,6 @@ export default function HomeScreen() {
 
       <HistorySheet
         ref={sheetRef}
-        historyTab={historyTab}
-        onHistoryTabChange={handleHistoryTabChange}
         animatedIndex={sheetAnimatedIndex}
         sheetIndex={sheetIndex}
         onIndexChange={handleSheetIndexChange}
@@ -929,21 +824,9 @@ export default function HomeScreen() {
             onInputFocus={handleInputFocus}
             onSubmit={handleSubmitText}
             placeholder={inputMode === "record" ? "Type your thoughts..." : "Search your thoughts..."}
-            onSettingsPress={handleSettingsPress}
           />
         }
-        notesContent={
-          <NotesSheetContent
-            notes={displayedNotes}
-            isSearchActive={false}
-            onSelectNote={handleSelectNote}
-            onDeleteNote={handleDeleteNote}
-            isRestoring={isRestoring}
-            onRestoreFromDrive={handleRestoreFromDrive}
-            bottomInset={insets.bottom}
-          />
-        }
-        qaContent={
+        content={
           <ChatSheetContent
             messages={chatSession.messages}
             isSending={chatSession.isSending}
@@ -978,38 +861,27 @@ export default function HomeScreen() {
           header, center button, floating pills, the sheet itself, even the
           nav-bar inset strip above. See ExpandedTextOverlay.tsx's own doc
           comment for why this is a separate component entirely rather than
-          a stage of `<HistorySheet>`. Builds its OWN fresh
-          NotesSheetContent/ChatSheetContent element (not the same instances
-          passed to `<HistorySheet>` above) since only one of the two
-          copies is ever actually mounted at a time — this one, while
-          expanded; HistorySheet's own copy, otherwise. */}
+          a stage of `<HistorySheet>`. Builds its OWN fresh ChatSheetContent
+          element (not the same instance passed to `<HistorySheet>` above)
+          since only one of the two copies is ever actually mounted at a
+          time — this one, while expanded; HistorySheet's own copy,
+          otherwise. Only ever Q&A content now — the Notes/QA segment choice
+          this once branched on is gone along with the home screen's own
+          Notes list (see app/archive.tsx). */}
       {isTextBoxExpanded && (
         <ExpandedTextOverlay topInset={insets.top} bottomInset={insets.bottom} onClose={handleToggleExpand}>
-          {historyTab === "notes" ? (
-            <NotesSheetContent
-              notes={displayedNotes}
-              isSearchActive={false}
-              onSelectNote={handleSelectNote}
-              onDeleteNote={handleDeleteNote}
-              isRestoring={isRestoring}
-              onRestoreFromDrive={handleRestoreFromDrive}
-              bottomInset={insets.bottom}
-              usePlainList
-            />
-          ) : (
-            <ChatSheetContent
-              messages={chatSession.messages}
-              isSending={chatSession.isSending}
-              speakingMessageId={chatSession.speakingMessageId}
-              modelDownload={chatSession.modelDownload}
-              isModelReady={chatSession.isModelReady}
-              onSubmitStarterPrompt={(prompt) => void chatSession.submitQuery(prompt, "text")}
-              onToggleSpeech={chatSession.toggleSpeech}
-              onShowCitation={handleShowCitation}
-              bottomInset={insets.bottom}
-              usePlainList
-            />
-          )}
+          <ChatSheetContent
+            messages={chatSession.messages}
+            isSending={chatSession.isSending}
+            speakingMessageId={chatSession.speakingMessageId}
+            modelDownload={chatSession.modelDownload}
+            isModelReady={chatSession.isModelReady}
+            onSubmitStarterPrompt={(prompt) => void chatSession.submitQuery(prompt, "text")}
+            onToggleSpeech={chatSession.toggleSpeech}
+            onShowCitation={handleShowCitation}
+            bottomInset={insets.bottom}
+            usePlainList
+          />
         </ExpandedTextOverlay>
       )}
 
@@ -1017,7 +889,7 @@ export default function HomeScreen() {
         noteId={selectedNoteId}
         visible={selectedNoteId !== null}
         onClose={() => setSelectedNoteId(null)}
-        onDeleted={(noteId) => setAllNotes((prev) => prev.filter((note) => note.id !== noteId))}
+        onDeleted={() => setSelectedNoteId(null)}
       />
 
       {/* Rendered last so it paints above absolutely everything — header,
@@ -1026,6 +898,37 @@ export default function HomeScreen() {
           components/TodosOverlay.tsx's doc comment for why this is a plain
           sibling overlay rather than a pushed route. */}
       {isTodosVisible && <TodosOverlay onClose={() => setIsTodosVisible(false)} />}
+
+      {/* "Quiet Corner" quick menu — Archive + Settings, opened from the
+          small "•••" icon next to the To-Dos pill. A plain slide-up action
+          sheet, same Modal + backdrop-Pressable-dismiss language as
+          NoteDetailModal above, deliberately not a coordinate-anchored
+          dropdown (see isQuickMenuOpen's own doc comment for why). */}
+      <Modal visible={isQuickMenuOpen} transparent animationType="slide" onRequestClose={() => setIsQuickMenuOpen(false)}>
+        <Pressable style={styles.quickMenuBackdrop} onPress={() => setIsQuickMenuOpen(false)}>
+          <Pressable style={styles.quickMenuSheet} onPress={(e) => e.stopPropagation()}>
+            <View style={styles.quickMenuHandle} />
+            <Pressable
+              style={({ pressed }) => [styles.quickMenuRow, pressed && styles.quickMenuRowPressed]}
+              onPress={() => {
+                setIsQuickMenuOpen(false);
+                handleOpenArchive();
+              }}
+            >
+              <Text style={styles.quickMenuRowText}>🗄️ Archive</Text>
+            </Pressable>
+            <Pressable
+              style={({ pressed }) => [styles.quickMenuRow, pressed && styles.quickMenuRowPressed]}
+              onPress={() => {
+                setIsQuickMenuOpen(false);
+                handleSettingsPress();
+              }}
+            >
+              <Text style={styles.quickMenuRowText}>⚙️ Settings</Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </Pressable>
   );
 }
@@ -1080,8 +983,34 @@ const styles = StyleSheet.create({
   // Record/Ask pill. Styled as a plain dark pill, deliberately unstyled by
   // pendingCount (no accent tint at >0) — the badge NUMBER inside the label
   // is the whole affordance per spec, not a color change on top of it.
-  todosPill: {
+  // Wraps the new "•••" quick-menu icon and the To-Dos pill side by side —
+  // inline, not stacked as its own row, so the cluster's total height
+  // doesn't grow past what it was before this pass (see the "Quiet Corner"
+  // placement discussion for why inline-with-To-Dos won out over a plain
+  // 4th stacked row).
+  topRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
     marginBottom: 10, // gap above the Handsfree pill
+  },
+  quickMenuButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(28, 28, 30, 0.85)",
+    borderColor: "rgba(255,255,255,0.1)",
+  },
+  quickMenuButtonText: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#8E8E93",
+    letterSpacing: 1,
+  },
+  todosPill: {
     borderRadius: 999,
     paddingHorizontal: 12,
     paddingVertical: 7,
@@ -1167,5 +1096,39 @@ const styles = StyleSheet.create({
     // sheet-tracked position brings it this low on screen.
     zIndex: 30,
     elevation: 30,
+  },
+  quickMenuBackdrop: {
+    flex: 1,
+    backgroundColor: "rgba(2, 6, 23, 0.6)",
+    justifyContent: "flex-end",
+  },
+  quickMenuSheet: {
+    backgroundColor: "#1C1C1E",
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingHorizontal: 12,
+    paddingTop: 10,
+    paddingBottom: 28,
+  },
+  quickMenuHandle: {
+    alignSelf: "center",
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: "rgba(255,255,255,0.3)",
+    marginBottom: 12,
+  },
+  quickMenuRow: {
+    paddingVertical: 16,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+  },
+  quickMenuRowPressed: {
+    backgroundColor: "rgba(255,255,255,0.06)",
+  },
+  quickMenuRowText: {
+    color: "#F8FAFC",
+    fontSize: 16,
+    fontWeight: "600",
   },
 });

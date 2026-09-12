@@ -1,11 +1,11 @@
 import { forwardRef, useCallback } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Pressable, StyleSheet, View } from "react-native";
 import BottomSheet, { type BottomSheetProps } from "@gorhom/bottom-sheet";
 import type { SharedValue } from "react-native-reanimated";
 import { Feather } from "@expo/vector-icons";
 
 import { ModelDownloadCard } from "./ModelDownloadCard";
-import { colors, radius, spacing } from "../constants/theme";
+import { spacing } from "../constants/theme";
 import type { ModelDownloadStatus } from "../services/ai/modelDownloadManager";
 
 /**
@@ -53,8 +53,6 @@ import type { ModelDownloadStatus } from "../services/ai/modelDownloadManager";
  */
 export const SHEET_SNAP_POINTS = ["20%", "50%"];
 
-export type HistoryTab = "notes" | "qa";
-
 /**
  * A trivial, permanently-stable component — no props that change on every
  * keystroke or every render ever reach it — passed directly as
@@ -77,20 +75,22 @@ const SheetDragHandle = forwardRef<View, { onPress: () => void }>(function Sheet
 });
 
 export type HistorySheetProps = {
-  historyTab: HistoryTab;
-  onHistoryTabChange: (tab: HistoryTab) => void;
   /** Build 21 — STICKY DRAWER HEADER: a pre-built `<ComposeBar />` element,
    * rendered here as an ordinary child inside `<BottomSheet>`, directly below
-   * the drag handle and above the segment pills/history content. Passed as a
-   * `ReactNode` rather than constructed in this file for the same reason
-   * `notesContent`/`qaContent` already are — app/index.tsx owns all of its
-   * state and callbacks, this file only decides where it's positioned. See
-   * ComposeBar.tsx's own doc comment for why rendering it this way (a plain
-   * prop/child, never `handleComponent`) doesn't reintroduce the Build 18
-   * keyboard-focus-drop bug. */
+   * the drag handle and above the history content. Passed as a `ReactNode`
+   * rather than constructed in this file for the same reason `content`
+   * already is — app/index.tsx owns all of its state and callbacks, this
+   * file only decides where it's positioned. See ComposeBar.tsx's own doc
+   * comment for why rendering it this way (a plain prop/child, never
+   * `handleComponent`) doesn't reintroduce the Build 18 keyboard-focus-drop
+   * bug. */
   composeBarSlot: React.ReactNode;
-  notesContent: React.ReactNode;
-  qaContent: React.ReactNode;
+  /** The sheet's one scrollable list — Q&A history ("Recent Answers"). Used
+   * to show a Notes/QA segment toggle with a second list alongside this one
+   * ("Recorded notes"); that card was demoted off the landing screen
+   * entirely as of the "Quiet Corner" pass (see app/archive.tsx) — there's
+   * only ever one list here now. */
+  content: React.ReactNode;
   onIndexChange?: BottomSheetProps["onChange"];
   animatedIndex: SharedValue<number>;
   /** Current snap index, tracked in JS state (app/index.tsx) alongside
@@ -133,23 +133,16 @@ export type HistorySheetProps = {
  * gesture-reachable snap points (see SHEET_SNAP_POINTS) — the 50% stage is
  * what `app/index.tsx` snaps to automatically while an ASK-classified
  * request is processing, and is also as far as any manual swipe can ever
- * go. A Notes/QA History segment control filters which scrollable list is
- * shown inside the monochromatic glass box; both segments' underlying state
- * (`allNotes` in app/index.tsx, and the chat session from
- * services/ai/useChatSession.ts) lives above this component either way, so
- * switching segments never loses anything, only which is visible. The glass
- * box's own micro-chip opens `ExpandedTextOverlay` — a separate, full-screen
- * component app/index.tsx renders outside this sheet entirely; see
- * SHEET_SNAP_POINTS's doc comment above for why that state doesn't live
- * here.
+ * go. `content` (Q&A/"Recent Answers" history) sits inside the
+ * monochromatic glass box; its own micro-chip opens `ExpandedTextOverlay` —
+ * a separate, full-screen component app/index.tsx renders outside this
+ * sheet entirely; see SHEET_SNAP_POINTS's doc comment above for why that
+ * state doesn't live here.
  */
 export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function HistorySheet(
   {
-    historyTab,
-    onHistoryTabChange,
     composeBarSlot,
-    notesContent,
-    qaContent,
+    content,
     onIndexChange,
     animatedIndex,
     sheetIndex,
@@ -237,58 +230,40 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       <View style={styles.header}>{composeBarSlot}</View>
 
       {/* IDLE PEEK ISOLATION (cont.): at index 0 (20%), everything below the
-          sticky header renders nothing at all — not the segment pill, not
-          either history list. Both only mount once the sheet reaches its
+          sticky header renders nothing at all — not the glass box, not the
+          list inside it. Both only mount once the sheet reaches its
           expanded 50% stage. PADDING & CLEARANCE: `body`'s `marginTop`
           (16dp, below) is a real flex margin, not a clipping trick — the
-          segment pills/list can structurally never render behind the
-          sticky header above them (there's no absolute positioning or
-          negative margin anywhere in this tree that could cause that), so
-          this gap holds regardless of scroll position or sheet index,
-          matching the Apple Maps reference. */}
+          list can structurally never render behind the sticky header above
+          it (there's no absolute positioning or negative margin anywhere in
+          this tree that could cause that), so this gap holds regardless of
+          scroll position or sheet index, matching the Apple Maps
+          reference. */}
       {sheetIndex > 0 && (
         <View style={styles.body}>
-          <View style={styles.segmentRow}>
-            {(["notes", "qa"] as const).map((tab) => (
-              <Pressable
-                key={tab}
-                onPress={() => onHistoryTabChange(tab)}
-                style={[styles.segmentOption, historyTab === tab && styles.segmentOptionActive]}
-              >
-                {/* Labels only — the underlying "notes"/"qa" identifiers
-                    (HistoryTab, state, routing) are unchanged; this is a
-                    display-text rename, not a rename of what the tabs are. */}
-                <Text style={[styles.segmentText, historyTab === tab && styles.segmentTextActive]}>
-                  {tab === "notes" ? "Recorded notes" : "Searched notes"}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-
-          {/* Monochromatic glass container: wraps whichever list is active
-              in one translucent, bordered box rather than either list
-              rendering directly against the sheet's own jet-black
-              background. This box's own micro-chip only ever shows the
-              arrow and only ever calls `onToggleExpand` — the "expanded,
-              full-screen" state it opens is `ExpandedTextOverlay`, a
-              completely separate component app/index.tsx renders outside
-              this sheet (see SHEET_SNAP_POINTS's doc comment above for
-              why). */}
+          {/* Monochromatic glass container: one translucent, bordered box
+              rather than the list rendering directly against the sheet's
+              own jet-black background. This box's own micro-chip only ever
+              shows the arrow and only ever calls `onToggleExpand` — the
+              "expanded, full-screen" state it opens is
+              `ExpandedTextOverlay`, a completely separate component
+              app/index.tsx renders outside this sheet (see
+              SHEET_SNAP_POINTS's doc comment above for why). */}
           <View style={styles.textContainerBox}>
             <Pressable onPress={onToggleExpand} hitSlop={8} style={styles.microChip}>
               <Feather name="arrow-up-right" size={18} color="#E2E8F0" />
             </Pressable>
             {/* CHIP CLEARANCE: found on-device — the chip (top:12, 32px tall,
                 so it occupies the box's own top 12-44px) was overlapping the
-                very top of the first note/message card, since the box's own
-                16px padding alone wasn't enough clearance below it. This
-                fixed extra top offset (chip's own 44px bottom edge + a 12px
-                gap) reserves real layout space above the list instead, so
+                very top of the first message card, since the box's own 16px
+                padding alone wasn't enough clearance below it. This fixed
+                extra top offset (chip's own 44px bottom edge + a 12px gap)
+                reserves real layout space above the list instead, so
                 content structurally starts below the chip rather than
                 merely being visually covered by it. `ExpandedTextOverlay`
                 uses this exact same offset for its own copy of this box, so
                 the gap reads identically in both places. */}
-            <View style={styles.listClearance}>{historyTab === "notes" ? notesContent : qaContent}</View>
+            <View style={styles.listClearance}>{content}</View>
           </View>
 
           <View style={{ paddingBottom: bottomInset }}>
@@ -329,41 +304,16 @@ const styles = StyleSheet.create({
   body: {
     flex: 1,
     // PADDING & CLEARANCE: 16dp gap between the sticky header (search bar)
-    // above and the segment pills/list content that starts here — matches
-    // the Apple Maps reference screenshot's spacing between its search bar
-    // and its "Find Nearby" result grid.
+    // above and the list content that starts here — matches the Apple Maps
+    // reference screenshot's spacing between its search bar and its "Find
+    // Nearby" result grid.
     marginTop: 16,
   },
-  segmentRow: {
-    flexDirection: "row",
-    backgroundColor: "#1C1C1E",
-    borderRadius: radius.pill,
-    padding: 3,
-    marginHorizontal: spacing.base,
-    marginBottom: spacing.sm,
-  },
-  segmentOption: {
-    flex: 1,
-    alignItems: "center",
-    paddingVertical: 7,
-    borderRadius: radius.pill,
-  },
-  segmentOptionActive: {
-    backgroundColor: colors.accent,
-  },
-  segmentText: {
-    color: "rgba(235,235,245,0.6)",
-    fontSize: 13,
-    fontWeight: "600",
-  },
-  segmentTextActive: {
-    color: colors.onAccent,
-  },
   // MONOCHROMATIC GLASS: a single translucent, subtly-bordered box wrapping
-  // whichever list (notes or QA) is currently active — `flex: 1` and
-  // `overflow: "hidden"` are additive to the requested spec (not part of
-  // it), needed for a real scrollable list to actually fill the box's
-  // height and for its content to respect the box's own rounded corners.
+  // the Q&A history list — `flex: 1` and `overflow: "hidden"` are additive
+  // to the requested spec (not part of it), needed for a real scrollable
+  // list to actually fill the box's height and for its content to respect
+  // the box's own rounded corners.
   textContainerBox: {
     flex: 1,
     position: "relative",
