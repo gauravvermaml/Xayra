@@ -455,10 +455,19 @@ export default function HomeScreen() {
       // leaves the file on disk.
       try {
         if (await isAudioTooShort(audioUri)) {
+          // DIAGNOSTIC — see the wake-word rejection log below for why this
+          // is worth logging: without it, a recording discarded THIS early
+          // (before Whisper ever runs) leaves no trace of why at all.
+          if (options?.isHandsfree) {
+            console.log("[Handsfree] Rejected — audio too short to transcribe");
+          }
           return;
         }
         const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
         if (isSilentTranscript(transcript)) {
+          if (options?.isHandsfree) {
+            console.log(`[Handsfree] Rejected — transcript counted as silent: "${transcript}"`);
+          }
           return;
         }
       // Build 25 STRICT DUAL-MODE WAKE-WORD GATEKEEPER: scoped to Handsfree
@@ -471,6 +480,14 @@ export default function HomeScreen() {
       // either pipeline: no note saved, no query run, no card appended to
       // "Recorded notes" or "Searched notes".
       if (options?.isHandsfree && !containsWakeWord(transcript)) {
+        // DIAGNOSTIC: the actual transcript text is otherwise never logged
+        // anywhere (asrRouter.ts only logs which tier/timing, not the
+        // string itself), and the audio that produced it is deleted right
+        // after this — without this log, a rejected Handsfree utterance
+        // leaves literally no trace of what Whisper actually heard, making
+        // "why did it reject this" undiagnosable after the fact. adb logcat
+        // only, never sent anywhere.
+        console.log(`[Handsfree] Rejected — no wake word match in transcript: "${transcript}"`);
         showToast("Ignored — wake word \"Xayra\" not detected");
         return;
       }

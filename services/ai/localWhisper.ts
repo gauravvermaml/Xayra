@@ -104,6 +104,26 @@ async function getWhisperContext(): Promise<{ context: WhisperContext; modelId: 
 }
 
 /**
+ * whisper.cpp's `initial_prompt` mechanism (exposed here via whisper.rn's
+ * `prompt` option) — text fed to the decoder as prior context BEFORE it
+ * starts transcribing the actual audio, biasing its language-model
+ * probabilities toward words/spellings that appear in the prompt without
+ * those words needing to be in the model's training vocabulary at all. This
+ * is the real fix for a confirmed on-device failure mode: "Xayra" is an
+ * invented brand name, and saying "Hey Xayra, ..." got transcribed as "his
+ * error, ..." / "Here is the error, ..." / "Here's that up, ..." — the
+ * common-English-phrase bias winning outright over an out-of-vocabulary
+ * word, badly enough that no "xayra"-like token survived AT ALL for
+ * activeMode.ts's fuzzy wake-word matcher to catch (confirmed: the SAME
+ * phrase said as just "Xayra, ..." with no leading "Hey" transcribed
+ * correctly as "Zaira, ..." every time — this is specifically a "Hey" +
+ * OOV-word combination problem). Priming the decoder with the exact
+ * spelling up front costs nothing extra (no bigger model, no extra
+ * inference pass) and is exactly what this whisper.cpp feature exists for.
+ */
+const INITIAL_PROMPT = "Xayra";
+
+/**
  * Transcribes a local audio file entirely on-device via whisper.cpp — no
  * network round-trip, no OpenAI API key. Callers are expected to run the
  * result through `isSilentTranscript()` (services/notes/noteManager.ts)
@@ -115,7 +135,7 @@ async function getWhisperContext(): Promise<{ context: WhisperContext; modelId: 
 export async function transcribeAudioLocal(fileUri: string): Promise<LocalTranscriptionResult> {
   const start = nowMs();
   const { context, modelId } = await getWhisperContext();
-  const { promise } = context.transcribe(fileUri, { language: "en" });
+  const { promise } = context.transcribe(fileUri, { language: "en", prompt: INITIAL_PROMPT });
   const { result } = await promise;
   logDuration("Whisper STT transcription", start);
   return { transcript: stripNonSpeechMarkers(result), modelId };
