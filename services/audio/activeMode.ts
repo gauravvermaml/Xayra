@@ -223,6 +223,36 @@ export class ActiveModeManager {
   private noiseFloorSamples: number[] = [];
   private speechRmsThreshold = MAX_SPEECH_RMS_THRESHOLD;
 
+  /**
+   * Confirmed on-device via adb logcat: the wake word was being dropped
+   * entirely (transcripts coming back as "", ".", or a bare leading comma)
+   * specifically at the very START of an utterance, while the REST of the
+   * same sentence — spoken moments later — transcribed correctly. That
+   * pattern doesn't fit "quiet audio" (already addressed separately by
+   * wav.ts's peak normalization); it fits a native audio-hardware
+   * cold-start. `armListening()` used to call `AudioRecord.init()` +
+   * `.start()` FRESH on every single utterance boundary (right after
+   * `finalizeUtterance()`'s own `AudioRecord.stop()`) — a full native
+   * mic-session teardown/rebuild before every utterance, not just the very
+   * first one after engaging Handsfree. Real Android audio hardware takes a
+   * non-zero moment to actually start delivering samples after a fresh
+   * `AudioRecord.start()`, and the wake word — always the first syllable(s)
+   * of a freshly re-opened stream — is exactly what has no room to survive
+   * that gap.
+   *
+   * Fix: the native session is now opened exactly ONCE, in `start()`, and
+   * kept running continuously for as long as Handsfree stays engaged —
+   * `armListening()`/`finalizeUtterance()` no longer touch `AudioRecord` at
+   * all between utterances, only this JS-side flag. While `capturing` is
+   * false (processing/speaking a previous utterance), the native stream
+   * keeps flowing but every incoming chunk is discarded immediately — this
+   * is what still stops the mic from picking up the assistant's own TTS
+   * playback as a new "utterance" (no echo cancellation exists here; see
+   * this file's other doc comments), just via a flag check instead of an
+   * actual hardware stop/restart.
+   */
+  private capturing = false;
+
   constructor(callbacks: ActiveModeCallbacks) {
     this.callbacks = callbacks;
   }
@@ -253,6 +283,15 @@ export class ActiveModeManager {
     // materially larger native undertaking not implemented here.
     await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
     this.stopped = false;
+
+    // The ONE native session for this entire Handsfree engagement — see
+    // `capturing`'s own doc comment for why this is deliberately not
+    // repeated in `armListening()` anymore.
+    AudioRecord.init({ sampleRate: SAMPLE_RATE, channels: CHANNELS, bitsPerSample: BITS_PER_SAMPLE });
+    this.subscription?.remove();
+    this.subscription = AudioRecord.on("data", (base64Chunk: string) => this.handleAudioChunk(base64Chunk));
+    AudioRecord.start();
+
     this.armListening();
   }
 
@@ -261,6 +300,7 @@ export class ActiveModeManager {
       return;
     }
     this.stopped = true;
+    this.capturing = false;
     this.clearSilenceCheck();
     try {
       AudioRecord.stop();
@@ -274,6 +314,49 @@ export class ActiveModeManager {
     this.setState("idle");
   }
 
+  /** The native "data" event handler — split out of `start()` so it reads
+   * cleanly, but still just a thin dispatcher: while not `capturing`
+   * (Handsfree is mid processing/speaking a previous utterance), every
+   * chunk is discarded immediately without even computing its RMS — this is
+   * what keeps the assistant's own TTS playback from being picked up as a
+   * new utterance now that the native stream is never actually stopped. */
+  private handleAudioChunk(base64Chunk: string): void {
+    if (!this.capturing) {
+      return;
+    }
+    const chunk = Buffer.from(base64Chunk, "base64");
+    this.chunks.push(chunk);
+    const rms = computeRms(chunk);
+
+    if (Date.now() < this.calibrationEndsAt) {
+      // Still sampling ambient noise — a speech-or-not decision isn't made
+      // on this chunk at all yet, it just feeds the floor estimate.
+      this.noiseFloorSamples.push(rms);
+      return;
+    }
+    if (this.noiseFloorSamples.length > 0) {
+      // Calibration window just ended — fold the samples into this cycle's
+      // actual threshold exactly once, then clear them so this branch
+      // doesn't re-run every chunk for the rest of the utterance.
+      const noiseFloor =
+        this.noiseFloorSamples.reduce((sum, sample) => sum + sample, 0) / this.noiseFloorSamples.length;
+      this.speechRmsThreshold = Math.min(
+        MAX_SPEECH_RMS_THRESHOLD,
+        Math.max(MIN_SPEECH_RMS_THRESHOLD, noiseFloor * SPEECH_ABOVE_FLOOR_MULTIPLIER)
+      );
+      this.noiseFloorSamples = [];
+    }
+
+    if (rms > this.speechRmsThreshold) {
+      this.hasDetectedSpeech = true;
+      this.lastVoiceAt = Date.now();
+    }
+  }
+
+  /** Starts (or restarts, after an utterance) a listen cycle. Purely
+   * JS-side state now — see `capturing`'s doc comment for why this no
+   * longer touches `AudioRecord` at all; the native session is opened once,
+   * in `start()`, and stays open until `stop()`. */
   private armListening(): void {
     if (this.stopped) {
       return;
@@ -291,38 +374,7 @@ export class ActiveModeManager {
     this.noiseFloorSamples = [];
     this.speechRmsThreshold = MAX_SPEECH_RMS_THRESHOLD;
 
-    AudioRecord.init({ sampleRate: SAMPLE_RATE, channels: CHANNELS, bitsPerSample: BITS_PER_SAMPLE });
-    this.subscription?.remove();
-    this.subscription = AudioRecord.on("data", (base64Chunk: string) => {
-      const chunk = Buffer.from(base64Chunk, "base64");
-      this.chunks.push(chunk);
-      const rms = computeRms(chunk);
-
-      if (Date.now() < this.calibrationEndsAt) {
-        // Still sampling ambient noise — a speech-or-not decision isn't made
-        // on this chunk at all yet, it just feeds the floor estimate.
-        this.noiseFloorSamples.push(rms);
-        return;
-      }
-      if (this.noiseFloorSamples.length > 0) {
-        // Calibration window just ended — fold the samples into this
-        // cycle's actual threshold exactly once, then clear them so this
-        // branch doesn't re-run every chunk for the rest of the utterance.
-        const noiseFloor =
-          this.noiseFloorSamples.reduce((sum, sample) => sum + sample, 0) / this.noiseFloorSamples.length;
-        this.speechRmsThreshold = Math.min(
-          MAX_SPEECH_RMS_THRESHOLD,
-          Math.max(MIN_SPEECH_RMS_THRESHOLD, noiseFloor * SPEECH_ABOVE_FLOOR_MULTIPLIER)
-        );
-        this.noiseFloorSamples = [];
-      }
-
-      if (rms > this.speechRmsThreshold) {
-        this.hasDetectedSpeech = true;
-        this.lastVoiceAt = Date.now();
-      }
-    });
-    AudioRecord.start();
+    this.capturing = true;
     this.setState("listening");
 
     this.clearSilenceCheck();
@@ -359,13 +411,10 @@ export class ActiveModeManager {
       return;
     }
 
-    try {
-      AudioRecord.stop();
-    } catch {
-      // Already stopped — fine.
-    }
-    this.subscription?.remove();
-    this.subscription = null;
+    // No native call here anymore — see `capturing`'s doc comment. The
+    // hardware stream keeps running; this just stops treating its incoming
+    // chunks as part of an utterance until the next `armListening()`.
+    this.capturing = false;
 
     const hadSpeech = this.hasDetectedSpeech;
     const chunks = this.chunks;
