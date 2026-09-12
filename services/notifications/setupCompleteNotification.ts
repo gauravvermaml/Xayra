@@ -60,8 +60,8 @@ export async function showSetupCompleteNotification(): Promise<void> {
   await Notifications.scheduleNotificationAsync({
     identifier: NOTIFICATION_ID,
     content: {
-      title: "Xayra is Ready! 🧠",
-      body: "Your on-device AI setup is complete. Tap to start capturing thoughts.",
+      title: "Xayra is ready for you! ✨",
+      body: "Your private memory vault is set up. Tap to capture your first thought!",
       data: { kind: "setup-complete" },
       sound: true,
       priority: Notifications.AndroidNotificationPriority.HIGH,

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
+import { AnimatedEmoji } from "./AnimatedEmoji";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { resumeDownloads, useModelDownload } from "../services/ai/modelDownloadManager";
 import { markSetupComplete } from "../services/settings/appSettings";
@@ -12,21 +13,32 @@ import { showSetupCompleteNotification } from "../services/notifications/setupCo
  * the app until Whisper, the embedding model, AND the Llama chat model are
  * ALL on disk and warm. app/_layout.tsx's root guard renders this in place
  * of the normal Stack until `onComplete` fires; there is no partial/locked
- * state of the real app to peek at from here.
+ * state of the real app to peek at from here. Crossing that door is now an
+ * explicit tap on the "Start Capturing Thoughts ✨" button once everything
+ * is ready, rather than an automatic hand-off after a timed pause — the
+ * underlying setup work is still 100% automatic either way, only the very
+ * last "ok, go" step became a deliberate user action instead of one that
+ * just happens to them.
  *
- * The last two checklist rows ("Warming up" / "Finalizing privacy sandbox")
- * are deliberately COSMETIC pacing, not a real measured step — by the time
- * the three real downloads finish, `prewarmLocalLlama()` has already been
- * triggered by modelDownloadManager's own `setStatus` side effect, so
- * there's no separate real "warm-up" operation left for this screen to
- * await. They exist purely so the transition from "99% downloaded" to
- * "ready" doesn't feel like it happened suspiciously instantly.
+ * The last two checklist rows ("Tuning quick-recall..." / "Locking in
+ * 100% offline privacy...") are deliberately COSMETIC pacing, not a real
+ * measured step — by the time the three real downloads finish,
+ * `prewarmLocalLlama()` has already been triggered by
+ * modelDownloadManager's own `setStatus` side effect, so there's no
+ * separate real "warm-up" operation left for this screen to await. They
+ * exist purely so the transition from "99% downloaded" to "ready" doesn't
+ * feel like it happened suspiciously instantly.
+ *
+ * Warm, human-centered copy + `AnimatedEmoji` (pulse/rotate/bounce, built on
+ * React Native's own `Animated` API) throughout this screen are a
+ * deliberate product/tone pass — the underlying setup logic and step
+ * sequencing are unchanged from before.
  */
 
 type CosmeticStep = { key: string; label: string };
 const COSMETIC_STEPS: CosmeticStep[] = [
-  { key: "warmup", label: "Warming up local inference pipeline" },
-  { key: "sandbox", label: "Finalizing local privacy sandbox" },
+  { key: "warmup", label: "✨ Tuning quick-recall for your device" },
+  { key: "sandbox", label: "🛡️ Locking in 100% offline privacy" },
 ];
 const COSMETIC_STEP_DURATION_MS = 1100;
 
@@ -40,6 +52,14 @@ function formatEta(etaSeconds: number): string {
 
 type StepRowState = "done" | "active" | "pending";
 
+/**
+ * `key={state}` on the icon is what makes the two animated states actually
+ * animate: React remounts a fresh element (rather than patching props onto
+ * the same one) whenever `state` changes, so `AnimatedEmoji`'s "bounce"
+ * (one-shot, plays on mount — see its own doc comment) fires exactly at the
+ * moment a row flips to "done", and "rotate" naturally restarts cleanly if a
+ * row ever re-enters "active" rather than continuing a stale loop.
+ */
 function StepRow({
   label,
   state,
@@ -49,10 +69,15 @@ function StepRow({
   state: StepRowState;
   detail?: string;
 }) {
-  const icon = state === "done" ? "✓" : state === "active" ? "⏳" : "○";
   return (
     <View style={styles.stepRow}>
-      <Text style={[styles.stepIcon, state === "done" && styles.stepIconDone]}>{icon}</Text>
+      {state === "done" ? (
+        <AnimatedEmoji key={state} emoji="✓" type="bounce" size={15} style={[styles.stepIcon, styles.stepIconDone]} />
+      ) : state === "active" ? (
+        <AnimatedEmoji key={state} emoji="⏳" type="rotate" size={15} style={styles.stepIcon} />
+      ) : (
+        <Text style={styles.stepIcon}>○</Text>
+      )}
       <View style={styles.stepTextColumn}>
         <Text style={[styles.stepLabel, state === "pending" && styles.stepLabelPending]}>{label}</Text>
         {detail ? <Text style={styles.stepDetail}>{detail}</Text> : null}
@@ -64,7 +89,14 @@ function StepRow({
 export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }) {
   const modelDownload = useModelDownload();
   const [cosmeticStepIndex, setCosmeticStepIndex] = useState(0);
-  const [isReadyPillShown, setIsReadyPillShown] = useState(false);
+  // Renamed from the old isReadyPillShown: this now gates a real tappable
+  // "Start Capturing Thoughts ✨" button rather than a passive pill that
+  // auto-advanced past itself — see the completion sequence below, which no
+  // longer calls `onComplete()` on a timer. The user crossing the "One
+  // Door" is now an explicit, deliberate tap rather than something that
+  // just happens to them after a pause; the setup work finishing is still
+  // fully automatic either way.
+  const [isReadyToStart, setIsReadyToStart] = useState(false);
   const completionStarted = useRef(false);
 
   useEffect(() => {
@@ -85,19 +117,14 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
 
       await markSetupComplete();
       void showSetupCompleteNotification();
-      setIsReadyPillShown(true);
-      // Brief beat on the "Xayra Ready" pill before handing off to the
-      // normal app, rather than an instant cut the moment it appears.
-      await new Promise((resolve) => setTimeout(resolve, 900));
-      if (cancelled) return;
-      onComplete();
+      setIsReadyToStart(true);
     }
     void runCompletionSequence();
 
     return () => {
       cancelled = true;
     };
-  }, [modelDownload.status, onComplete]);
+  }, [modelDownload.status]);
 
   const llamaActive = modelDownload.status === "downloading" && modelDownload.phasesReady.embedding;
   const llamaDetail =
@@ -113,12 +140,13 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
   return (
     <View style={styles.container}>
       <View style={styles.card}>
-        <Text style={styles.title}>🧠 Setting Up Xayra On-Device Intelligence</Text>
+        <View style={styles.titleRow}>
+          <AnimatedEmoji emoji="🧠" type="pulse" size={19} style={styles.titleEmoji} />
+          <Text style={styles.title}>Preparing Xayra - Your Pocket Companion</Text>
+        </View>
         <Text style={styles.body}>
-          All processing happens locally on your hardware. Zero cloud leaks. Zero external servers.
-        </Text>
-        <Text style={styles.body}>
-          Feel free to minimize the app — we'll notify you the second Xayra is 100% ready.
+          Everything Xayra needs is loading directly onto your phone so your thoughts and notes
+          stay 100% private. Feel free to minimize the app—we’ll notify you the moment it’s ready!
         </Text>
 
         {isPaused && (
@@ -140,13 +168,16 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
 
         <View style={styles.divider} />
 
-        <StepRow label="Speech-to-Text Engine (Whisper)" state={modelDownload.phasesReady.whisper ? "done" : "active"} />
         <StepRow
-          label="Local Database & Security Vault"
+          label="🎙️ Setting up hands-free voice listener"
+          state={modelDownload.phasesReady.whisper ? "done" : "active"}
+        />
+        <StepRow
+          label="🔐 Building your encrypted private vault"
           state={modelDownload.phasesReady.embedding ? "done" : modelDownload.phasesReady.whisper ? "active" : "pending"}
         />
         <StepRow
-          label="AI Intelligence Engine"
+          label="⏳ Loading Xayra's memory engine"
           state={modelDownload.phasesReady.llama ? "done" : llamaActive ? "active" : "pending"}
           detail={llamaDetail}
         />
@@ -159,10 +190,13 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
           state={cosmeticStepIndex > 1 ? "done" : cosmeticStepIndex === 1 ? "active" : "pending"}
         />
 
-        {isReadyPillShown && (
-          <View style={styles.readyPill}>
-            <Text style={styles.readyPillText}>Xayra Ready</Text>
-          </View>
+        {isReadyToStart && (
+          <Pressable
+            style={({ pressed }) => [styles.startButton, pressed && styles.startButtonPressed]}
+            onPress={onComplete}
+          >
+            <Text style={styles.startButtonText}>Start Capturing Thoughts ✨</Text>
+          </Pressable>
         )}
       </View>
     </View>
@@ -186,10 +220,18 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     padding: spacing.xl,
   },
+  titleRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: spacing.md,
+  },
+  titleEmoji: {
+    marginRight: spacing.xs,
+  },
   title: {
     ...typography.heading,
     color: colors.textPrimary,
-    marginBottom: spacing.md,
+    flexShrink: 1,
   },
   body: {
     ...typography.body,
@@ -261,15 +303,19 @@ const styles = StyleSheet.create({
     color: colors.textSecondary,
     marginTop: 2,
   },
-  readyPill: {
-    alignSelf: "center",
+  startButton: {
+    alignSelf: "stretch",
     marginTop: spacing.md,
     paddingVertical: spacing.sm,
     paddingHorizontal: spacing.lg,
     borderRadius: radius.pill,
     backgroundColor: colors.success,
+    alignItems: "center",
   },
-  readyPillText: {
+  startButtonPressed: {
+    opacity: 0.85,
+  },
+  startButtonText: {
     ...typography.label,
     color: "#08221A",
   },
