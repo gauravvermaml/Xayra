@@ -2,7 +2,7 @@
 
 *(The app was originally built and shipped internally as "Silent Confidant," then briefly "Remi," before the full rebrand to **Xayra** documented below. Historical sections further down in this file predate the rename and refer to the app by whichever name was current at the time — that's intentional, not an inconsistency to fix; each section is an accurate record of what was true when it was written.)*
 
-**Last updated:** Build 34 — "Quiet Corner" home-screen decluttering (the "Recorded notes" browse card demoted off the landing screen entirely into a new `app/archive.tsx`; Settings moved out of the compose row into a small anchored popover shared with Archive; the sheet simplified to a single "Recent Answers" list), a chain of three compose-bar/keyboard bugs found via live tester feedback, and a warm-copy + animated-emoji pass on the onboarding screen and its completion notification. **Shipped as production build 1.0.28** (versionCode auto-incremented by EAS from 34 — see the build record at the bottom of this file for the exact number and dashboard link). Details below.
+**Last updated:** Build 34 — "Quiet Corner" home-screen decluttering (the "Recorded notes" browse card demoted off the landing screen entirely into a new `app/archive.tsx`; Settings moved out of the compose row into a small anchored popover shared with Archive; the sheet simplified to a single "Recent Answers" list), a chain of three compose-bar/keyboard bugs found via live tester feedback, and a warm-copy + animated-emoji pass on the onboarding screen and its completion notification. **Shipped as production build 1.0.28, versionCode 35** (EAS build `c1d3885f-28f6-47f0-bdad-e9d0077f893b`; `.aab` built successfully, not yet submitted to Play Console — see the build record at the bottom of this file). Details below.
 
 ## Build 34 — "Quiet Corner" Home Declutter, Compose-Bar/Keyboard Fixes, Onboarding Tone Pass
 
@@ -550,3 +550,15 @@ What's left is hands-on-device verification and Phase 5 scoping:
 - **Signing**: used existing EAS-managed remote Android keystore (`Build Credentials lp_i--wIup`, default) — no new keystore was generated, so this build is signed consistently with any prior builds under this project.
 - **Known non-blocking warning**: `eas.json`'s `cli.appVersionSource` is unset; EAS currently defaults this but will require it explicitly in a future CLI version — worth setting (`"appVersionSource": "remote"` or `"local"`) before the next release cycle.
 - **Next step**: check the dashboard URL above for final build status (success/failure) and, once green, retrieve the `.aab` download link from that same page for Play Console upload.
+
+## v1.0.28 / Build 34 Production Release Build
+
+- **Build ID**: `c1d3885f-28f6-47f0-bdad-e9d0077f893b`
+- **Date built**: 2026-09-12
+- **Platform / profile**: Android, `production` profile (App Bundle, EAS-managed remote signing credentials — same keystore, `Build Credentials lp_i--wIup`, as every prior build)
+- **`app.json` version**: `1.0.28`; **versionCode**: `35` (auto-incremented from `34` by EAS itself — `eas.json`'s `cli.appVersionSource` is `"local"` and `build.production.autoIncrement` is `true`, so EAS read `34` out of the committed `app.json`, bumped it, wrote `35` back locally, and that bumped value was committed separately from the code changes it ships)
+- **Status**: build succeeded (`✔ Build finished`, exit code 0)
+- **Dashboard / logs URL**: https://expo.dev/accounts/gauravsinghverma/projects/silent-confidant/builds/c1d3885f-28f6-47f0-bdad-e9d0077f893b
+- **`.aab` download**: https://expo.dev/artifacts/eas/8lQJzMZ1to411zXmaKRknUnT8gUo_hvuv7ES_0XOGow.aab
+- **NOT yet submitted to Play Console** — `eas.json`'s `submit.production` is an empty config block (`{}`), and this project has never had `eas submit`'s Play Console service-account credentials configured; every prior release's path from a built `.aab` to Play Store has been a manual upload (Internal Testing track) via the Play Console web UI, using the dashboard URL above to grab the `.aab` link. No native module was touched to produce this build — it exists purely so this session's JS/TS-only changes (Build 33 + Build 34, all of it — Drive to-do restore, text-only note storage, the wake-word root-cause chain, the "Quiet Corner" home declutter, keyboard fixes, onboarding tone pass) reach a real signed release artifact.
+- **Next step**: download the `.aab` from the link above and upload it to Play Console's Internal Testing track (or ask for `eas submit` to be set up with real service-account credentials if this should be automated going forward).
