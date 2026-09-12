@@ -102,6 +102,21 @@ export type HistorySheetProps = {
    * not mounting it at index 0 avoids all three. `composeBarSlot` is exempt
    * from this — it's the one thing that IS visible at index 0 (see below). */
   sheetIndex: number;
+  /** True while the compose bar's text input is focused and not yet
+   * submitted (app/index.tsx's `isComposing`) — hides the glass box (list +
+   * its ModelDownloadCard) even at an expanded `sheetIndex`, WITHOUT
+   * changing the sheet's own snap index. Kept deliberately separate from
+   * `sheetIndex`/IDLE PEEK ISOLATION above: an earlier attempt tried to get
+   * the same "hide the list while typing" result by force-collapsing the
+   * sheet to index 0 on focus, but that broke the sheet's own
+   * keyboard-avoidance — the compose bar stopped reliably clearing the
+   * keyboard, a regression on a mechanism (`android_keyboardInputMode`
+   * "adjustResize" + this sheet's own index-1 auto-peek) that took real
+   * on-device debugging to get right in the first place (see this file's
+   * own long-standing keyboard comments below). Leaving the sheet at
+   * whichever index it's actually at and only hiding the CONTENT keeps that
+   * proven-working keyboard behavior completely untouched. */
+  contentHidden?: boolean;
   /** Build 25 CARD POSITIONING: rendered once here, beneath whichever
       list is currently visible — see ModelDownloadCard.tsx's own doc
       comment for why this replaced the old QA-tab-only setup bar. */
@@ -146,6 +161,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     onIndexChange,
     animatedIndex,
     sheetIndex,
+    contentHidden,
     modelDownload,
     bottomInset,
     onToggleExpand,
@@ -239,7 +255,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           this tree that could cause that), so this gap holds regardless of
           scroll position or sheet index, matching the Apple Maps
           reference. */}
-      {sheetIndex > 0 && (
+      {sheetIndex > 0 && !contentHidden && (
         <View style={styles.body}>
           {/* Monochromatic glass container: one translucent, bordered box
               rather than the list rendering directly against the sheet's

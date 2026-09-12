@@ -8,6 +8,11 @@ export type ComposeBarProps = {
   inputText: string;
   onInputChange: (text: string) => void;
   onInputFocus: () => void;
+  /** Fires when the input loses focus (tapping away, not submitting —
+   * `blurOnSubmit={false}` below means a submit never triggers this on its
+   * own). Used by app/index.tsx to re-reveal the history list that gets
+   * hidden while composing — see its own `isComposing` doc comment. */
+  onInputBlur: () => void;
   onSubmit: (text: string) => void;
   /** Build 22 DYNAMIC SEARCH PLACEHOLDER: driven by app/index.tsx's explicit
    * Record/Ask pill state — "Type your thoughts..." while Record is active,
@@ -83,6 +88,7 @@ export const ComposeBar = memo(function ComposeBar({
   inputText,
   onInputChange,
   onInputFocus,
+  onInputBlur,
   onSubmit,
   placeholder,
 }: ComposeBarProps) {
@@ -121,6 +127,7 @@ export const ComposeBar = memo(function ComposeBar({
             value={inputText}
             onChangeText={onInputChange}
             onFocus={onInputFocus}
+            onBlur={onInputBlur}
             placeholder={placeholder}
             placeholderTextColor="rgba(235,235,245,0.45)"
             style={styles.input}

@@ -104,14 +104,36 @@ export default function HomeScreen() {
   // navigation state — same conditional-mount pattern as
   // `isTextBoxExpanded`/`ExpandedTextOverlay` below.
   const [isTodosVisible, setIsTodosVisible] = useState(false);
-  // "Quiet Corner" pass: Archive/Settings' shared entry point — a plain
-  // slide-up action sheet rendered as a conditionally-mounted sibling View
-  // (see its own render-site doc comment for why this can never be a real
-  // native `<Modal>` — TodosOverlay below hit the exact same bug class),
-  // not a coordinate-anchored dropdown popover pinned to the small icon
-  // that opens it, which would need fragile pixel math against the
-  // floating pill cluster's own Reanimated-driven Y position.
+  // "Quiet Corner" pass: Archive/Settings' shared entry point — a small
+  // popover anchored to the "•••" icon that opens it (quickMenuAnchor
+  // below), rendered as a conditionally-mounted sibling View (see its own
+  // render-site doc comment for why this can never be a real native
+  // `<Modal>` — TodosOverlay below hit the exact same bug class). An
+  // earlier version was a plain slide-up action sheet instead, to avoid
+  // needing to track the icon's own on-screen position at all — replaced
+  // after feedback that a full-width sheet read as an unrelated system
+  // tray rather than a menu belonging to that specific icon.
   const [isQuickMenuOpen, setIsQuickMenuOpen] = useState(false);
+  // Measured at the moment the "•••" icon is actually tapped (not derived
+  // from any static layout value) — the icon lives inside an
+  // Animated.View whose position is driven by Reanimated on the UI thread
+  // (drawerFloatingStackAnimatedStyle), so `measureInWindow` on the real
+  // native node is what lets the popover below anchor to wherever the icon
+  // ACTUALLY is on screen right now, without this file needing to
+  // duplicate that animation's math itself.
+  const quickMenuButtonRef = useRef<View>(null);
+  const [quickMenuAnchor, setQuickMenuAnchor] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const handleOpenQuickMenu = useCallback(() => {
+    quickMenuButtonRef.current?.measureInWindow((x, y, width, height) => {
+      setQuickMenuAnchor({ x, y, width, height });
+      setIsQuickMenuOpen(true);
+    });
+  }, []);
 
   // Cold-start layout guard (Requirement 3): the header/compose bar/sheet
   // all depend on `insets` for correct placement — rendering them before
@@ -152,6 +174,14 @@ export default function HomeScreen() {
   // asking a question of past ones).
   const [inputMode, setInputMode] = useState<"record" | "ask">("record");
   const [inputText, setInputText] = useState("");
+  // True from the moment the compose input is focused until it's either
+  // blurred (handleInputBlur) or submitted (handleSubmitText) — passed to
+  // HistorySheet as `contentHidden` so the "Recent Answers" list (and its
+  // glass box) disappears the instant typing starts, without touching the
+  // sheet's own snap index/keyboard-avoidance at all. See handleInputFocus's
+  // own doc comment for why this is deliberately NOT done by changing which
+  // index the sheet snaps to.
+  const [isComposing, setIsComposing] = useState(false);
   // The one remaining use for this pair on the home screen: opening a note
   // from a chat citation chip (handleShowCitation below). The home screen's
   // own full notes list/browse/delete/Drive-restore state moved to
@@ -665,19 +695,25 @@ export default function HomeScreen() {
   const handleShowCitation = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
   const handleSettingsPress = useCallback(() => router.push("/settings"), [router]);
   const handleOpenArchive = useCallback(() => router.push("/archive"), [router]);
-  // Explicit forced-collapse (index 0), not the previous auto-*expand* to
-  // 50% — a tester found the Recorded/Searched-notes card(s) and the
-  // floating pills all crowding the screen the instant they tapped in to
-  // type, on top of the keyboard. Whatever "Recent Answers" content the
-  // sheet might already have been showing (e.g. left expanded from a
-  // previous Ask) is deliberately hidden the moment composing starts —
-  // IDLE PEEK ISOLATION already renders nothing below the sticky header at
-  // index 0, so collapsing here is what keeps the keyboard the only thing
-  // sharing the screen with the compose bar while actually typing. The
-  // post-submission auto-peek (routeFreeformInput, above) is unrelated and
-  // unchanged — that's a deliberate "here's your answer" reveal, not the
-  // "about to type" moment this handler covers.
-  const handleInputFocus = useCallback(() => sheetRef.current?.snapToIndex(0), []);
+  // Sheet still snaps to index 1 on focus — same as always, and load-bearing:
+  // this is the mechanism (paired with `android_keyboardInputMode=
+  // "adjustResize"` in HistorySheet.tsx) that took real on-device debugging
+  // to get the compose bar reliably clearing the keyboard at all. A first
+  // attempt at the "hide the list while typing" fix below force-collapsed to
+  // index 0 instead, which broke that — the compose bar stopped rising
+  // above the keyboard properly. The list is now hidden via `isComposing` +
+  // HistorySheet's `contentHidden` prop instead, entirely independent of
+  // which index the sheet is actually at.
+  const handleInputFocus = useCallback(() => {
+    sheetRef.current?.snapToIndex(1);
+    setIsComposing(true);
+  }, []);
+  // Blur (tapping away without submitting) un-hides the list again — a
+  // submission does the same via handleSubmitText/finishUtterance below,
+  // since submitting never blurs the input (`blurOnSubmit={false}`,
+  // ComposeBar.tsx) and the post-submit reveal needs the list visible
+  // regardless.
+  const handleInputBlur = useCallback(() => setIsComposing(false), []);
 
   const handleSelectMode = useCallback((mode: "record" | "ask") => {
     setInputMode(mode);
@@ -686,6 +722,7 @@ export default function HomeScreen() {
   const handleSubmitText = useCallback(
     (text: string) => {
       setInputText("");
+      setIsComposing(false);
       void routeFreeformInput(text, null, null).catch((err) => {
         const message = err instanceof Error ? err.message : "Something went wrong.";
         setError(message);
@@ -774,7 +811,7 @@ export default function HomeScreen() {
               least-frequent existing member), opens a two-row popover
               instead. Record/Ask/Handsfree below are unchanged. */}
           <View style={styles.topRow}>
-            <Pressable onPress={() => setIsQuickMenuOpen(true)} hitSlop={10} style={styles.quickMenuButton}>
+            <Pressable ref={quickMenuButtonRef} onPress={handleOpenQuickMenu} hitSlop={10} style={styles.quickMenuButton}>
               <Text style={styles.quickMenuButtonText}>•••</Text>
             </Pressable>
             <Pressable onPress={() => setIsTodosVisible(true)} style={styles.todosPill}>
@@ -813,6 +850,7 @@ export default function HomeScreen() {
         ref={sheetRef}
         animatedIndex={sheetAnimatedIndex}
         sheetIndex={sheetIndex}
+        contentHidden={isComposing}
         onIndexChange={handleSheetIndexChange}
         modelDownload={chatSession.modelDownload}
         bottomInset={insets.bottom}
@@ -823,6 +861,7 @@ export default function HomeScreen() {
             inputText={inputText}
             onInputChange={setInputText}
             onInputFocus={handleInputFocus}
+            onInputBlur={handleInputBlur}
             onSubmit={handleSubmitText}
             placeholder={inputMode === "record" ? "Type your thoughts..." : "Search your thoughts..."}
           />
@@ -916,11 +955,23 @@ export default function HomeScreen() {
           a plain View, never `<Modal>`. Confirmed broken on-device with the
           native-Modal version: Settings' own Back button went dead the
           instant it was reached from here. */}
-      {isQuickMenuOpen && (
+      {isQuickMenuOpen && quickMenuAnchor && (
         <View style={styles.quickMenuBackdropView} pointerEvents="box-none">
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setIsQuickMenuOpen(false)} />
-          <View style={styles.quickMenuSheet}>
-            <View style={styles.quickMenuHandle} />
+          {/* Anchored to the icon's actual measured position (quickMenuAnchor),
+              not a fixed corner — grows UPWARD (bottom-anchored, per the
+              screen-height math below) since the icon sits low on screen,
+              and right-aligns its own right edge to the icon's, so it never
+              spills off the right edge of the screen. */}
+          <View
+            style={[
+              styles.quickMenuPopover,
+              {
+                right: Dimensions.get("window").width - (quickMenuAnchor.x + quickMenuAnchor.width),
+                bottom: Dimensions.get("window").height - quickMenuAnchor.y + 8,
+              },
+            ]}
+          >
             <Pressable
               style={({ pressed }) => [styles.quickMenuRow, pressed && styles.quickMenuRowPressed]}
               onPress={() => {
@@ -1113,42 +1164,48 @@ const styles = StyleSheet.create({
   quickMenuBackdropView: {
     // Written out directly rather than via StyleSheet.absoluteFillObject —
     // same note as TodosOverlay.tsx/ExpandedTextOverlay.tsx: this RN
-    // version's type declarations don't expose that helper.
+    // version's type declarations don't expose that helper. No
+    // background tint here (unlike a real action-sheet scrim) — an
+    // anchored popover reads as "part of the pill cluster," not a
+    // separate modal moment; the Pressable inside still covers the full
+    // screen purely to catch an outside tap and dismiss.
     position: "absolute",
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: "rgba(2, 6, 23, 0.6)",
-    justifyContent: "flex-end",
   },
-  quickMenuSheet: {
+  // Anchored via quickMenuAnchor (measured from the real "•••" icon at tap
+  // time) — `right`/`bottom` are set inline at the render site, not here.
+  quickMenuPopover: {
+    position: "absolute",
+    minWidth: 168,
     backgroundColor: "#1C1C1E",
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingHorizontal: 12,
-    paddingTop: 10,
-    paddingBottom: 28,
-  },
-  quickMenuHandle: {
-    alignSelf: "center",
-    width: 36,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: "rgba(255,255,255,0.3)",
-    marginBottom: 12,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.1)",
+    paddingVertical: 6,
+    // Same shadow language as NoteDetailModal/other floating surfaces in
+    // this app — a popover specifically needs to visibly lift off the
+    // canvas behind it, more than the always-docked pill cluster does.
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 12,
   },
   quickMenuRow: {
-    paddingVertical: 16,
-    paddingHorizontal: 12,
-    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 10,
+    marginHorizontal: 4,
   },
   quickMenuRowPressed: {
-    backgroundColor: "rgba(255,255,255,0.06)",
+    backgroundColor: "rgba(255,255,255,0.08)",
   },
   quickMenuRowText: {
     color: "#F8FAFC",
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: "600",
   },
 });
