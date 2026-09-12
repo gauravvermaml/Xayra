@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Dimensions, Image, Keyboard, Modal, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, Dimensions, Image, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
@@ -105,11 +105,12 @@ export default function HomeScreen() {
   // `isTextBoxExpanded`/`ExpandedTextOverlay` below.
   const [isTodosVisible, setIsTodosVisible] = useState(false);
   // "Quiet Corner" pass: Archive/Settings' shared entry point — a plain
-  // slide-up action sheet (same Modal + backdrop-Pressable-to-dismiss
-  // language as NoteDetailModal, not a coordinate-anchored dropdown popover
-  // pinned to the small icon that opens it, which would need fragile pixel
-  // math against the floating pill cluster's own Reanimated-driven Y
-  // position).
+  // slide-up action sheet rendered as a conditionally-mounted sibling View
+  // (see its own render-site doc comment for why this can never be a real
+  // native `<Modal>` — TodosOverlay below hit the exact same bug class),
+  // not a coordinate-anchored dropdown popover pinned to the small icon
+  // that opens it, which would need fragile pixel math against the
+  // floating pill cluster's own Reanimated-driven Y position.
   const [isQuickMenuOpen, setIsQuickMenuOpen] = useState(false);
 
   // Cold-start layout guard (Requirement 3): the header/compose bar/sheet
@@ -900,13 +901,25 @@ export default function HomeScreen() {
       {isTodosVisible && <TodosOverlay onClose={() => setIsTodosVisible(false)} />}
 
       {/* "Quiet Corner" quick menu — Archive + Settings, opened from the
-          small "•••" icon next to the To-Dos pill. A plain slide-up action
-          sheet, same Modal + backdrop-Pressable-dismiss language as
-          NoteDetailModal above, deliberately not a coordinate-anchored
-          dropdown (see isQuickMenuOpen's own doc comment for why). */}
-      <Modal visible={isQuickMenuOpen} transparent animationType="slide" onRequestClose={() => setIsQuickMenuOpen(false)}>
-        <Pressable style={styles.quickMenuBackdrop} onPress={() => setIsQuickMenuOpen(false)}>
-          <Pressable style={styles.quickMenuSheet} onPress={(e) => e.stopPropagation()}>
+          small "•••" icon next to the To-Dos pill.
+          NOT a real native `<Modal>` — a plain conditionally-mounted
+          sibling `<View>` overlay instead, same pattern as TodosOverlay
+          above (see that component's own doc comment for the full
+          root-cause writeup, worth reading before touching this again): on
+          this app's Android/react-native-screens stack, any extra native
+          window — an IME popup, a native `<Modal>` — gaining and then
+          losing focus while a PUSHED route (router.push, e.g. Settings or
+          Archive below) comes up on top reproducibly leaves that pushed
+          screen's Fragment never reclaiming touch input again. This quick
+          menu's whole job is "close, then immediately push a route" — the
+          exact trigger for that bug — so it inherits TodosOverlay's fix:
+          a plain View, never `<Modal>`. Confirmed broken on-device with the
+          native-Modal version: Settings' own Back button went dead the
+          instant it was reached from here. */}
+      {isQuickMenuOpen && (
+        <View style={styles.quickMenuBackdropView} pointerEvents="box-none">
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setIsQuickMenuOpen(false)} />
+          <View style={styles.quickMenuSheet}>
             <View style={styles.quickMenuHandle} />
             <Pressable
               style={({ pressed }) => [styles.quickMenuRow, pressed && styles.quickMenuRowPressed]}
@@ -926,9 +939,9 @@ export default function HomeScreen() {
             >
               <Text style={styles.quickMenuRowText}>⚙️ Settings</Text>
             </Pressable>
-          </Pressable>
-        </Pressable>
-      </Modal>
+          </View>
+        </View>
+      )}
     </Pressable>
   );
 }
@@ -1097,8 +1110,15 @@ const styles = StyleSheet.create({
     zIndex: 30,
     elevation: 30,
   },
-  quickMenuBackdrop: {
-    flex: 1,
+  quickMenuBackdropView: {
+    // Written out directly rather than via StyleSheet.absoluteFillObject —
+    // same note as TodosOverlay.tsx/ExpandedTextOverlay.tsx: this RN
+    // version's type declarations don't expose that helper.
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
     backgroundColor: "rgba(2, 6, 23, 0.6)",
     justifyContent: "flex-end",
   },
