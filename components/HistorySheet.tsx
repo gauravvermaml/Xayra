@@ -191,7 +191,22 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       onChange={onIndexChange}
       enableDynamicSizing={false}
       keyboardBehavior="interactive"
-      keyboardBlurBehavior="restore"
+      // "restore" (the library's own default-adjacent option — snap back to
+      // wherever the sheet was before the keyboard opened, once it closes)
+      // was live here until ComposeBar.tsx started calling
+      // `Keyboard.dismiss()` on every submit. That's the whole point of this
+      // component's own snapToIndex(1) call inside routeFreeformInput
+      // (app/index.tsx) firing on submit — the sheet is supposed to STAY
+      // open at 50% to reveal the note-saved confirmation/streaming answer
+      // — but a real blur event now fires moments later as the keyboard
+      // actually finishes closing, and "restore" would then independently
+      // snap the sheet right back down to wherever it was before typing
+      // started, undoing that reveal out from under it. "none" leaves blur
+      // with no sheet-position opinion of its own; every snap on this sheet
+      // is already deliberately driven by app/index.tsx's own explicit
+      // calls (drag handle, backdrop tap, keyboard focus, post-submit
+      // reveal) — the sheet never needs to guess a position for itself.
+      keyboardBlurBehavior="none"
       // Build 22.2 — the actual fix for "search bar shoots to the top status
       // bar on focus" (confirmed on-device, contradicting Build 22's
       // assumption that this was already working). Root cause, found in

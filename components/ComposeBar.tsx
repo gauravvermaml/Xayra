@@ -1,5 +1,5 @@
 import { memo, useEffect, useRef } from "react";
-import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 import { BottomSheetTextInput } from "@gorhom/bottom-sheet";
 
 import { colors, radius, spacing } from "../constants/theme";
@@ -115,6 +115,15 @@ export const ComposeBar = memo(function ComposeBar({
       return;
     }
     hasPendingSubmitRef.current = true;
+    // Dismiss on every submit, Record or Ask alike — `blurOnSubmit={false}`
+    // below only stops the TextInput's own AUTOMATIC blur-on-submit (which
+    // would've fired even for a wanted mid-typing "Enter" in a multiline
+    // future, say); it was never a statement that the keyboard should stay
+    // up after a real send. A submitted note/question is done — same "get
+    // out of the way" instinct as this pass's other fixes (the history list
+    // hiding while composing, the mis-tap-prone settings gear moving out of
+    // this row): once you've sent it, the keyboard has nothing left to do.
+    Keyboard.dismiss();
     onSubmit(inputText.trim());
   };
 
@@ -135,8 +144,11 @@ export const ComposeBar = memo(function ComposeBar({
             blurOnSubmit={false}
             onSubmitEditing={handleSubmit}
           />
-          {/* The keyboard is dismissed ONLY here, on an explicit tap — never
-              as a side effect of typing (see the component doc above). */}
+          {/* The keyboard is dismissed by handleSubmit itself (Keyboard.
+              dismiss()), on an explicit submit — never as a side effect of
+              typing (see the component doc above). onSubmitEditing below
+              (the keyboard's own "send" key) goes through the exact same
+              handleSubmit, so both paths dismiss identically. */}
           <Pressable
             onPress={handleSubmit}
             disabled={!canSubmit}
