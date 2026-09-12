@@ -1,11 +1,18 @@
 import { useEffect, useState } from "react";
 import * as Device from "expo-device";
+import { getCpuCoreCount } from "expo-device-cpu";
 import { deleteNativeFile, enqueueDownload, queryDownload } from "expo-download-bridge";
 import * as FileSystem from "expo-file-system/legacy";
 import * as Network from "expo-network";
 
 import { downloadEmbeddingAssets, isEmbeddingModelDownloaded } from "./embeddingModel";
-import { attemptTierUpgrade, LLAMA_MODEL_FILENAMES, prewarmLocalLlama } from "./localLlama";
+import {
+  attemptThreadEscalation,
+  attemptTierUpgrade,
+  computeInferenceThreadCount,
+  LLAMA_MODEL_FILENAMES,
+  prewarmLocalLlama,
+} from "./localLlama";
 import { resetWhisperContext } from "./localWhisper";
 import { MODEL_CDN_BASE_URL } from "./modelCdn";
 import { getAverageTokensPerSecond, MIN_USABLE_TOKENS_PER_SECOND, resetPerformanceSamples } from "./modelPerformanceTracker";
@@ -213,10 +220,20 @@ function setStatus(patch: Partial<ModelDownloadStatus>): void {
   // every later status read once the app is already warm and idle.
   if (currentStatus.status === "ready" && previousStatus !== "ready") {
     void prewarmLocalLlama();
-    // See maybeAttemptTierUpgrade's own doc comment — a cheap no-op for most
-    // calls, and deliberately fired from this same "just became ready" hook
-    // as prewarmLocalLlama so it only ever runs at a quiet moment.
-    void maybeAttemptTierUpgrade();
+    // See maybeAttemptTierUpgrade's/maybeAttemptThreadEscalation's own doc
+    // comments — both are cheap no-ops for most calls, and deliberately
+    // fired from this same "just became ready" hook as prewarmLocalLlama so
+    // they only ever run at a quiet moment. SEQUENCED, not fired
+    // concurrently (both `void`'d separately would race): both mutate the
+    // same shared Llama context singleton (release + reload), so running
+    // them at the same time risked one's reload clobbering the other's
+    // in-flight trial. Thread escalation running after any tier-upgrade
+    // resolves is also the right order semantically — it should measure
+    // against whichever model tier is actually active by then.
+    void (async () => {
+      await maybeAttemptTierUpgrade();
+      await maybeAttemptThreadEscalation();
+    })();
   }
 }
 
@@ -696,6 +713,87 @@ async function maybeAttemptTierUpgrade(): Promise<void> {
     await writePreferences({ tier3BStatus: "rejected" });
     deleteNativeFile(candidatePath);
     console.log(`[ModelTier] Rejected 3B — measured ${tokensPerSecond.toFixed(1)} tok/s, below usable floor. Staying on 1B.`);
+  }
+}
+
+/**
+ * A device needs at least this many logical cores before a thread-escalation
+ * trial is even considered — the candidate thread count below reserves a
+ * hard floor of 2 full cores for OS/UI no matter what (never fewer than the
+ * `computeInferenceThreadCount()` default already reserves on an 8-core
+ * device), so this also guarantees there's real room to escalate INTO
+ * without immediately violating that floor on a small-core device where
+ * "double the threads" would leave nothing for the OS.
+ */
+const MIN_CORES_FOR_THREAD_ESCALATION = 6;
+
+/**
+ * Opportunistic thread-count escalation — see `computeInferenceThreadCount()`
+ * in localLlama.ts for the full root-cause writeup this exists to fix: a
+ * fixed quarter-of-cores formula, tuned against a 2019 budget 8-core chip
+ * that froze at HALF that many threads, hands the exact same starved thread
+ * count to a modern flagship with cores to spare (confirmed on-device: a
+ * Pixel 9, 12GB RAM, measuring ~2-minute retrievals on just 48 notes).
+ *
+ * Same shape as `maybeAttemptTierUpgrade()` right above, deliberately: a
+ * cheap RAM/core-count/history pre-filter gates whether a real trial is even
+ * worth running, then a real measured trial (`attemptThreadEscalation` in
+ * localLlama.ts) decides whether to keep it — never a static guess alone.
+ * Fired from the same "just became ready" hook, sequenced after any
+ * tier-upgrade attempt (see that call site's own comment for why this can't
+ * run concurrently with it).
+ */
+async function maybeAttemptThreadEscalation(): Promise<void> {
+  const prefs = await readPreferences();
+  if (prefs.threadEscalationStatus !== "not_attempted") {
+    return;
+  }
+
+  const totalMemory = Device.totalMemory;
+  // Same "not worth guessing on hardware we already have direct freeze
+  // evidence for" floor already trusted for the 1B->3B tier decision above
+  // — the original freeze device (a 4GB Galaxy A50) doesn't clear this at
+  // all, and the Redmi Note 8 Pro that barely does (7.48GB) never actually
+  // regressed from the existing default in on-device testing, since a
+  // rejected trial here always reloads back to it.
+  const isModernEnough = totalMemory !== null && totalMemory !== undefined && totalMemory >= RAM_FLOOR_FOR_3B_BYTES;
+  if (!isModernEnough) {
+    return;
+  }
+
+  const cores = getCpuCoreCount();
+  if (!cores || cores < MIN_CORES_FOR_THREAD_ESCALATION) {
+    return;
+  }
+
+  const averageTokensPerSecond = await getAverageTokensPerSecond();
+  if (averageTokensPerSecond === null) {
+    return; // Not enough real usage history yet at the current thread count to judge anything from.
+  }
+
+  const currentThreads = await computeInferenceThreadCount();
+  // Doubling is the escalation step (matching the "one step at a time, then
+  // measure" caution `maybeAttemptTierUpgrade` also uses) — capped so at
+  // least 2 full cores are always left for the OS/UI, the exact reservation
+  // the original freeze-fix already proved necessary.
+  const candidateThreads = Math.min(cores - 2, currentThreads * 2);
+  if (candidateThreads <= currentThreads) {
+    return; // No headroom left to try more without dropping below that reservation.
+  }
+
+  const { passed, tokensPerSecond } = await attemptThreadEscalation(candidateThreads, averageTokensPerSecond);
+  await resetPerformanceSamples(); // A throughput history from one thread count says nothing about another.
+
+  if (passed) {
+    await writePreferences({ llamaThreadCount: candidateThreads, threadEscalationStatus: "accepted" });
+    console.log(
+      `[ThreadTuning] Escalated to ${candidateThreads} threads — measured ${tokensPerSecond.toFixed(1)} tok/s (was ~${averageTokensPerSecond.toFixed(1)} at ${currentThreads}).`
+    );
+  } else {
+    await writePreferences({ threadEscalationStatus: "rejected" });
+    console.log(
+      `[ThreadTuning] Rejected ${candidateThreads}-thread trial — measured ${tokensPerSecond.toFixed(1)} tok/s, not meaningfully faster than the ~${averageTokensPerSecond.toFixed(1)} baseline at ${currentThreads}. Staying at ${currentThreads} threads.`
+    );
   }
 }
 

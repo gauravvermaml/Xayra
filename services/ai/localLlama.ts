@@ -4,6 +4,7 @@ import { initLlama, LlamaContext, type CompletionParams, type NativeCompletionRe
 
 import { MIN_USABLE_TOKENS_PER_SECOND, recordCompletionSpeed } from "./modelPerformanceTracker";
 import { logDuration, nowMs } from "./perf";
+import { readPreferences } from "../settings/preferences";
 
 /**
  * Sizes the inference thread pool to the ACTUAL device, not a number tuned
@@ -40,8 +41,31 @@ import { logDuration, nowMs } from "./perf";
  * actually matters more: the app staying responsive while either runs. If
  * the native call ever fails, 2 threads is a safe floor for an unknown
  * device.
+ *
+ * THE SAME FLAW THE RAM-ONLY TIER HEURISTIC HAD: a Pixel 9 (8-9 cores) and
+ * this exact Galaxy A50 (8 cores, 2019 budget Exynos) get the IDENTICAL "2
+ * threads" from this formula, despite one being a modern flagship with
+ * cores to spare and the other being the specific device that froze at
+ * DOUBLE that thread count. Confirmed on-device: a Pixel 9 tester (12GB
+ * RAM, otherwise idle) measured ~2-minute retrievals with only 48 notes —
+ * consistent with this same 2-thread starvation, not a device that's
+ * actually slow. Core count alone can't tell these two devices apart any
+ * more than RAM alone could tell a capable device from an incapable one
+ * for model-tier selection (see [[ram-tier-bad-proxy-for-cpu]]) — so this
+ * function no longer tries to guess harder from static specs. It still
+ * returns this same conservative default, UNCHANGED, unless
+ * `maybeAttemptThreadEscalation()` (services/ai/modelDownloadManager.ts)
+ * has already run a REAL trial on THIS device and measured a higher
+ * thread count as genuinely, meaningfully faster — see that function and
+ * `attemptThreadEscalation()` below for the measured-not-guessed escalation
+ * this now defers to, mirroring `attemptTierUpgrade`'s own trial/keep/
+ * rollback shape exactly.
  */
-function computeInferenceThreadCount(): number {
+export async function computeInferenceThreadCount(): Promise<number> {
+  const prefs = await readPreferences();
+  if (prefs.llamaThreadCount !== null) {
+    return prefs.llamaThreadCount;
+  }
   const cores = getCpuCoreCount();
   if (!cores) {
     return 2;
@@ -285,28 +309,27 @@ async function resolveModelPath(): Promise<ResolvedModel> {
 /**
  * Loads a GGUF file at `path` into a fresh native context — the one place
  * `initLlama()` is actually called, shared by the normal lazy singleton
- * below AND `attemptTierUpgrade()`'s trial load, so both pay the exact same
- * cold-start cost/logging rather than two subtly different code paths.
+ * below, `attemptTierUpgrade()`'s trial load, AND `attemptThreadEscalation()`'s
+ * trial load, so all three pay the exact same cold-start cost/logging rather
+ * than subtly different code paths. `threadsOverride` is only ever passed by
+ * `attemptThreadEscalation()`, to load a specific CANDIDATE thread count for
+ * measurement before it's been accepted/persisted — every other caller omits
+ * it and gets whatever `computeInferenceThreadCount()` currently resolves to.
  */
-function loadContext(path: string, label: string): Promise<LlamaContext> {
+async function loadContext(path: string, label: string, threadsOverride?: number): Promise<LlamaContext> {
   const coldStart = nowMs();
   console.log(`[Llama] Initialized Model: ${label} (q4_k_m)`);
+  const threads = threadsOverride ?? (await computeInferenceThreadCount());
   // Build 26: `use_mmap: true` maps the GGUF file straight into the
   // process's address space instead of reading it into a heap buffer — the
   // OS page-caches it, so a released-then-reloaded context (or a second cold
   // start after a background app kill) is materially faster to reload since
   // the pages are often still resident. (Named `use_mmap`, not `useMmap` —
   // llama.rn's option names mirror llama.cpp's own C API snake_case, same as
-  // n_ctx/n_threads below.) n_threads is sized to this actual device's core
-  // count — see computeInferenceThreadCount()'s doc comment above for why a
-  // flat number here was the real cause of a much bigger bug than slow
-  // extraction.
-  return initLlama({ model: path, n_ctx: 4096, n_threads: computeInferenceThreadCount(), use_mmap: true }).then(
-    (context) => {
-      logDuration("Llama cold-start (GGUF model load from disk)", coldStart);
-      return context;
-    }
-  );
+  // n_ctx/n_threads below.)
+  const context = await initLlama({ model: path, n_ctx: 4096, n_threads: threads, use_mmap: true });
+  logDuration("Llama cold-start (GGUF model load from disk)", coldStart);
+  return context;
 }
 
 /**
@@ -365,6 +388,66 @@ export async function attemptTierUpgrade(
   } else {
     await candidateContext.release();
     contextPromise = loadContext(fallbackPath, fallbackLabel);
+    contextPromise.catch(() => {
+      contextPromise = null;
+    });
+    await contextPromise;
+  }
+
+  return { passed, tokensPerSecond };
+}
+
+/**
+ * A device needs to beat its own current baseline by at least this multiple
+ * for a thread-escalation trial to count as a real, meaningful win — not
+ * merely "above `MIN_USABLE_TOKENS_PER_SECOND`" the way `attemptTierUpgrade`
+ * checks. The two questions are genuinely different: tier upgrade asks "is
+ * 3B usable at all," a fixed absolute bar; thread escalation asks "did
+ * MORE THREADS help THIS device," which only a comparison against this same
+ * device's own prior measured speed can answer — a device already well
+ * above the usable floor could still be pushed backwards by over-threading
+ * (contention, thermal throttling from sustaining more cores at once), and
+ * comparing only against the fixed floor would miss that regression
+ * entirely. 1.3x (not just >1.0x) leaves room for ordinary run-to-run noise
+ * — a candidate that's merely "about the same" isn't worth having traded
+ * away 2+ more cores of OS/UI headroom for.
+ */
+const THREAD_ESCALATION_MIN_IMPROVEMENT_MULTIPLE = 1.3;
+
+/**
+ * Opportunistic thread-count escalation trial — see
+ * services/ai/modelDownloadManager.ts's `maybeAttemptThreadEscalation()` for
+ * the eligibility gating (RAM floor, minimum core count, real throughput
+ * history at the CURRENT thread count) that decides WHETHER to call this at
+ * all. Mirrors `attemptTierUpgrade()`'s exact trial/keep/rollback shape,
+ * applied to `n_threads` instead of model size: load a candidate thread
+ * count, run one real trial completion, keep it only if it's a genuine,
+ * meaningful win over this device's own prior measured baseline — otherwise
+ * reload at the previous (already-known-safe) thread count and leave this
+ * device on its existing default, permanently (the caller marks this
+ * "rejected" — same reasoning as a failed tier trial: the underlying CPU/
+ * core layout doesn't change between app launches, so there's nothing to
+ * gain by re-trying the same candidate later).
+ */
+export async function attemptThreadEscalation(
+  candidateThreads: number,
+  baselineTokensPerSecond: number
+): Promise<{ passed: boolean; tokensPerSecond: number }> {
+  const { path, label } = await resolveModelPath();
+  const previousThreads = await computeInferenceThreadCount();
+
+  await releaseLocalLlama();
+
+  const candidateContext = await loadContext(path, label, candidateThreads);
+  const result = await candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
+  const tokensPerSecond = result.timings?.predicted_per_second ?? 0;
+  const passed = tokensPerSecond >= baselineTokensPerSecond * THREAD_ESCALATION_MIN_IMPROVEMENT_MULTIPLE;
+
+  if (passed) {
+    contextPromise = Promise.resolve(candidateContext);
+  } else {
+    await candidateContext.release();
+    contextPromise = loadContext(path, label, previousThreads);
     contextPromise.catch(() => {
       contextPromise = null;
     });

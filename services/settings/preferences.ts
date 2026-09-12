@@ -33,6 +33,22 @@ export type Preferences = {
    * under the usable floor isn't worth re-trying, since the underlying CPU
    * doesn't change. */
   tier3BStatus: "not_attempted" | "rejected" | "accepted";
+  /** `null` (the default, for every device) means "use
+   * `computeInferenceThreadCount()`'s conservative quarter-of-cores
+   * formula" — a fixed number here is a MEASURED override, only ever
+   * written by `maybeAttemptThreadEscalation()` (modelDownloadManager.ts)
+   * after a real on-device trial proved it's genuinely faster than this
+   * device's own prior baseline (see `attemptThreadEscalation()` in
+   * localLlama.ts). Confirmed on a Pixel 9 (12GB RAM, 8+ cores): the flat
+   * quarter-of-cores formula was tuned against a 2019 budget 8-core chip
+   * that froze at HALF its cores, and gives that exact same "2 threads" to
+   * a modern flagship with cores to spare — a ~2-minute retrieval on
+   * hardware that should easily clear a few seconds. */
+  llamaThreadCount: number | null;
+  /** Same shape/semantics as `tier3BStatus`, for the thread-escalation
+   * trial above — "rejected" is permanent for this install for the same
+   * reason (the CPU/core layout doesn't change between launches). */
+  threadEscalationStatus: "not_attempted" | "rejected" | "accepted";
 };
 
 const DEFAULT_PREFERENCES: Preferences = {
@@ -40,6 +56,8 @@ const DEFAULT_PREFERENCES: Preferences = {
   nativeDownloadIds: {},
   performanceSamples: [],
   tier3BStatus: "not_attempted",
+  llamaThreadCount: null,
+  threadEscalationStatus: "not_attempted",
 };
 
 function preferencesPath(): string {
