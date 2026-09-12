@@ -112,23 +112,85 @@ const KEEP_AWAKE_TAG = "remi-active-mode";
  * Build 25 tightens that: EVERY Handsfree utterance, in both Record and Ask
  * mode, must contain something recognizable as the wake word or it's
  * discarded before it ever reaches SQLite (Record) or the RAG pipeline
- * (Ask) — see app/index.tsx's `finishUtterance`. `WAKE_WORD_GATE_PATTERN`
- * also recognizes a handful of phonetically-close near-misses ("Zaira",
- * "Cyra", "Zyra", "Exayra") the on-device Whisper model has been observed to
- * mishear "Xayra" as — still purely a post-transcription text match, not an
- * acoustic wake-word engine (see the long comment above; that gap is
- * unchanged). There is no more word-count leniency: a two-word "Xayra, stop"
- * still passes (it contains the word), but a wake-word-free "Any notes
- * today?" no longer does, regardless of length. This is a blunt text match,
- * not a semantic classifier — that tradeoff is the actual, honest scope of a
- * filter that costs no model call and needs no native dependency.
+ * (Ask) — see app/index.tsx's `finishUtterance`. There is no more word-count
+ * leniency: a two-word "Xayra, stop" still passes (it contains the word),
+ * but a wake-word-free "Any notes today?" no longer does, regardless of
+ * length. This is a blunt text match, not a semantic classifier — that
+ * tradeoff is the actual, honest scope of a filter that costs no model call
+ * and needs no native dependency.
+ *
+ * Post-Build-25 fix: a fixed literal list of near-misses ("Zaira", "Cyra",
+ * "Zyra", "Exayra") turned out not to be enough — confirmed on-device at an
+ * 8-in-10 miss rate even with clear, close-range speech. "Xayra" is an
+ * invented brand name with no real pronunciation the on-device `base.en`
+ * Whisper model has ever seen in training, so it doesn't consistently
+ * mishear it as any small fixed set of alternate spellings — it mishears it
+ * as whatever real-word-shaped guess its language-model bias favors on a
+ * given pass, which is a much larger and less predictable space than 4
+ * literal strings can cover (chasing it string-by-string is whack-a-mole).
+ * `containsWakeWord` now does a bounded Levenshtein-distance fuzzy match
+ * (`WAKE_WORD_MAX_EDIT_DISTANCE`) against "xayra" over every word-like token
+ * in the transcript, rather than exact substring matching against a fixed
+ * list — this catches near-miss spellings tolerantly, e.g. "Sierra" or
+ * "Zyra" or "Xyra" or "Zaira," without hardcoding each one. Still a blunt
+ * text heuristic, not a semantic/phonetic model: it operates on how the
+ * mis-transcription is SPELLED, not how it SOUNDS, so an edit-distance-2
+ * match happens to catch most of what Whisper actually produces for this
+ * word in practice but isn't guaranteed to catch every possible
+ * mis-spelling, and (see `MAX_EDIT_DISTANCE`'s own doc comment) is
+ * deliberately kept tight enough that unrelated 5-letter words don't
+ * false-positive as the wake word.
  */
-export const WAKE_WORD_GATE_PATTERN = /(xayra|zaira|cyra|zyra|exayra)/i;
+export const WAKE_WORD_CANONICAL = "xayra";
 
-/** True if `transcript` contains the wake word or one of its known
- * phonetic near-misses — see the long comment above. */
+/**
+ * How many single-character edits (insert/delete/substitute) a transcript
+ * token may differ from "xayra" by and still count as the wake word.
+ * 2 was chosen by checking it against real confusable words: "sarah" (a
+ * common name someone might actually say) sits at edit-distance 3 from
+ * "xayra", safely outside this gate, while every near-miss spelling from
+ * the old literal list ("zaira", "cyra", "zyra", "exayra") sits at distance
+ * 1-2, safely inside it. Raising this further starts pulling in genuinely
+ * unrelated short words as false positives; lowering it re-introduces the
+ * whack-a-mole problem this fuzzy match exists to avoid.
+ */
+const MAX_EDIT_DISTANCE = 2;
+
+/** Classic full Levenshtein DP — `a`/`b` are typically single short words
+ * here (wake-word tokens), so the O(len(a)*len(b)) cost is negligible. */
+function levenshteinDistance(a: string, b: string): number {
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const dp: number[][] = Array.from({ length: rows }, (_, i) => {
+    const row = new Array<number>(cols).fill(0);
+    row[0] = i;
+    return row;
+  });
+  for (let j = 0; j < cols; j++) {
+    dp[0][j] = j;
+  }
+  for (let i = 1; i < rows; i++) {
+    for (let j = 1; j < cols; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1, // deletion
+        dp[i][j - 1] + 1, // insertion
+        dp[i - 1][j - 1] + cost // substitution
+      );
+    }
+  }
+  return dp[rows - 1][cols - 1];
+}
+
+/** True if `transcript` contains the wake word or something close enough to
+ * be a plausible Whisper mis-transcription of it — see the long comment
+ * above for why this is fuzzy rather than a fixed literal list. */
 export function containsWakeWord(transcript: string): boolean {
-  return WAKE_WORD_GATE_PATTERN.test(transcript.trim());
+  const tokens = transcript.toLowerCase().match(/[a-z']+/g);
+  if (!tokens) {
+    return false;
+  }
+  return tokens.some((token) => levenshteinDistance(token, WAKE_WORD_CANONICAL) <= MAX_EDIT_DISTANCE);
 }
 
 /**
