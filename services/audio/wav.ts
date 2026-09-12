@@ -63,10 +63,84 @@ export async function ensureRecordingsDirExists(): Promise<void> {
   }
 }
 
+/**
+ * Confirmed on-device: at ~1m from the phone, Handsfree recordings
+ * transcribe fine; at ~3m, results were "a mixed bag" — several came back
+ * with the wake-word portion missing entirely (`""`, `"."`, a bare leading
+ * comma), while the REST of the same sentence still transcribed correctly.
+ * Root cause is nothing in the VAD/wake-word logic (both already tuned
+ * separately) — it's that the raw mic PCM was written to the WAV completely
+ * unamplified, at whatever level it happened to arrive at. Speech amplitude
+ * falls off sharply with distance (inverse-square law), and a genuine,
+ * well-documented speech phenomenon — an utterance's OWN first word/syllable
+ * is typically spoken more softly than what follows ("onset softness") — is
+ * exactly what a low-SNR distant recording has the least headroom to
+ * survive. Whisper doesn't fail loudly on a too-quiet segment; it just
+ * produces nothing for it.
+ *
+ * Fix: peak-normalize the finalized recording before it's ever written to
+ * disk — scale every sample up toward (not past) full-scale by whatever
+ * factor its own loudest moment needs, exactly like normalizing a music
+ * track. This can only help intelligibility (it changes level, not
+ * waveform shape) and costs one linear pass over audio that's at most a
+ * handful of seconds long. `MAX_GAIN` caps how far a near-silent buffer can
+ * be amplified — without it, a recording that's mostly just noise floor
+ * (peak near zero) would get blown up into loud hiss/static, which would
+ * make Whisper's output WORSE (more likely to hallucinate a non-speech
+ * marker — see localWhisper.ts's NON_SPEECH_MARKER_PATTERN) rather than
+ * better.
+ */
+const TARGET_PEAK_RATIO = 0.9;
+const MAX_GAIN = 8;
+const INT16_MAX = 32767;
+const INT16_MIN = -32768;
+
+/** Scales 16-bit little-endian mono PCM samples up toward (never past)
+ * `TARGET_PEAK_RATIO` of full scale, based on the buffer's own loudest
+ * sample — a no-op (gain 1) if the recording is already at or above that
+ * level, so this only ever helps a quiet recording, never alters an
+ * already-good one. Mutates and returns a new Buffer rather than the input. */
+function normalizePcmGain(pcmData: Buffer): Buffer {
+  const sampleCount = Math.floor(pcmData.length / 2);
+  if (sampleCount === 0) {
+    return pcmData;
+  }
+
+  let peak = 0;
+  for (let i = 0; i < sampleCount; i++) {
+    const sample = Math.abs(pcmData.readInt16LE(i * 2));
+    if (sample > peak) {
+      peak = sample;
+    }
+  }
+  if (peak === 0) {
+    // Genuinely all-zero buffer (shouldn't normally happen) — amplifying
+    // silence by any factor is still silence, and dividing by peak below
+    // would be a division by zero.
+    return pcmData;
+  }
+
+  const gain = Math.min(MAX_GAIN, (INT16_MAX * TARGET_PEAK_RATIO) / peak);
+  if (gain <= 1) {
+    // Already loud enough (or louder) — leave it exactly as captured.
+    return pcmData;
+  }
+
+  const normalized = Buffer.alloc(pcmData.length);
+  for (let i = 0; i < sampleCount; i++) {
+    const scaled = Math.round(pcmData.readInt16LE(i * 2) * gain);
+    // Clamp rather than let a rounding edge case wrap around Int16's range.
+    normalized.writeInt16LE(Math.max(INT16_MIN, Math.min(INT16_MAX, scaled)), i * 2);
+  }
+  return normalized;
+}
+
 /** Assembles raw PCM chunks into a playable WAV file on disk and returns its
- * uri. Shared by the manual recorder and Active Mode's auto-segmented loop. */
+ * uri. Shared by the manual recorder and Active Mode's auto-segmented loop —
+ * both benefit from `normalizePcmGain` equally, since both feed whatever
+ * they capture straight to the same on-device Whisper model. */
 export async function writePcmChunksAsWav(chunks: Buffer[], filenamePrefix: string): Promise<string> {
-  const pcmData = Buffer.concat(chunks);
+  const pcmData = normalizePcmGain(Buffer.concat(chunks));
   const wavBytes = Buffer.concat([Buffer.from(buildWavHeader(pcmData.length)), pcmData]);
 
   await ensureRecordingsDirExists();
