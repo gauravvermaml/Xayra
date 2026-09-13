@@ -2,7 +2,7 @@
   "expo": {
     "name": "Xayra",
     "slug": "silent-confidant",
-    "version": "1.0.30",
+    "version": "1.0.31",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -20,7 +20,7 @@
         "backgroundColor": "#0E0F12"
       },
       "predictiveBackGestureEnabled": false,
-      "versionCode": 36,
+      "versionCode": 37,
       "navigationBarColor": "#1C1C1E",
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [

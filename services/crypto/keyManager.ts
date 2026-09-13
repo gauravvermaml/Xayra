@@ -35,45 +35,54 @@ async function isBiometricAuthAvailable(): Promise<boolean> {
   }
 }
 
-async function promptBiometric(promptMessage: string): Promise<void> {
-  const result = await LocalAuthentication.authenticateAsync({
-    promptMessage,
-    disableDeviceFallback: false,
-    cancelLabel: "Cancel",
-  });
-  if (!result.success) {
-    throw new AuthenticationFailedError();
-  }
-}
-
+/**
+ * Build 38 fix: this used to ALSO call an explicit
+ * `LocalAuthentication.authenticateAsync()` prompt before ever touching
+ * SecureStore — but `requireAuthentication: true` below already gates the
+ * SecureStore read/write itself behind its own native biometric prompt at
+ * the OS/Keystore level. The two were fully redundant: a user had to
+ * unlock TWICE for one database-key access, with the first prompt never
+ * protecting anything the second didn't already cover on its own.
+ * Confirmed as real friction during testing on both the Redmi and Pixel 9.
+ * Removing the separate prompt cuts this to the one SecureStore already
+ * requires — the exact same security guarantee (the key is still
+ * completely inaccessible without a successful biometric check), just
+ * without asking twice. A cancelled/failed SecureStore auth still throws
+ * from the call below, which the catch here normalizes into
+ * `AuthenticationFailedError` so callers get the same distinguishable
+ * error type as before.
+ */
 async function readOrCreateKey(biometricAvailable: boolean): Promise<string> {
-  if (biometricAvailable) {
-    await promptBiometric("Unlock Silent Confidant");
-  }
-
   // Only gate the SecureStore item behind biometrics when they're actually
   // enrolled; otherwise `requireAuthentication` would throw on every call.
   const secureStoreOptions: SecureStore.SecureStoreOptions = biometricAvailable
     ? {
         requireAuthentication: true,
-        authenticationPrompt: "Unlock Silent Confidant",
+        authenticationPrompt: "Unlock Xayra",
         keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
       }
     : {
         keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
       };
 
-  const existingKey = await SecureStore.getItemAsync(DB_ENCRYPTION_KEY_ID, secureStoreOptions);
-  if (existingKey) {
-    return existingKey;
+  try {
+    const existingKey = await SecureStore.getItemAsync(DB_ENCRYPTION_KEY_ID, secureStoreOptions);
+    if (existingKey) {
+      return existingKey;
+    }
+
+    const randomBytes = await Crypto.getRandomBytesAsync(KEY_BYTE_LENGTH);
+    const newKey = toHex(randomBytes);
+
+    await SecureStore.setItemAsync(DB_ENCRYPTION_KEY_ID, newKey, secureStoreOptions);
+
+    return newKey;
+  } catch (err) {
+    if (biometricAvailable) {
+      throw new AuthenticationFailedError(err instanceof Error ? err.message : String(err));
+    }
+    throw err;
   }
-
-  const randomBytes = await Crypto.getRandomBytesAsync(KEY_BYTE_LENGTH);
-  const newKey = toHex(randomBytes);
-
-  await SecureStore.setItemAsync(DB_ENCRYPTION_KEY_ID, newKey, secureStoreOptions);
-
-  return newKey;
 }
 
 let cachedEphemeralKey: string | null = null;
@@ -140,7 +149,7 @@ export async function setDatabaseKey(key: string): Promise<void> {
   const secureStoreOptions: SecureStore.SecureStoreOptions = biometricAvailable
     ? {
         requireAuthentication: true,
-        authenticationPrompt: "Unlock Silent Confidant",
+        authenticationPrompt: "Unlock Xayra",
         keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
       }
     : {

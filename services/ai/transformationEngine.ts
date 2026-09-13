@@ -2,7 +2,7 @@ import * as chrono from "chrono-node";
 import { getThermalStatus, ThermalStatus } from "expo-device-cpu";
 
 import { DEFAULT_NOTIFICATION_TIME, RECURRENCE_OPTIONS, type Recurrence } from "../../db/schema";
-import { runQueuedLlamaCompletion } from "./localLlama";
+import { runQueuedLlamaCompletion, SHARED_XAYRA_PREAMBLE } from "./localLlama";
 import { isTranscriptionInProgress } from "./localWhisper";
 import { logDuration, nowMs } from "./perf";
 
@@ -506,7 +506,14 @@ function buildSystemPrompt(todayISO: string, detectedPhrases: string[]): string 
       : "";
 
   return (
-    "You are a task-extraction engine for a personal notes app. Read the note text the user " +
+    // Build 38 PREFIX HARMONIZATION — see SHARED_XAYRA_PREAMBLE's own doc
+    // comment in localLlama.ts. This exact string must stay word-for-word
+    // identical to the opening of that file's SYSTEM_PROMPT, or the whole
+    // point (letting a query right after this extraction reuse cached KV
+    // state instead of re-evaluating its system prompt from scratch) is
+    // silently lost the next time either string is edited.
+    SHARED_XAYRA_PREAMBLE +
+    "Right now your job is structured extraction, not conversation. Read the note text the user " +
     "provides and extract EVERY actionable to-do item mentioned in it — an actionable item is " +
     "something the user needs to DO, not just something they mentioned in passing. A note very " +
     "often names several separate tasks run together in one sentence, joined by \"and\", \"also\", " +

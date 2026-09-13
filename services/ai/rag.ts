@@ -55,6 +55,35 @@ function resolveNoteText(note: HybridSearchResult): string {
 }
 
 /**
+ * Caps how much of a single note's text is actually fed to the LLM as
+ * context — real profiling (see [[thread-count-adaptive-calibration]] and
+ * its Build 38 follow-up) found the model's TIME-TO-FIRST-TOKEN, not decode
+ * speed, is what actually dominates a query's wall-clock time: 40+ of 47
+ * seconds on one measured Redmi query was spent on PROMPT PROCESSING before
+ * generation even began, not generating the answer itself. Prefill time
+ * scales directly with how many tokens the model has to read, on every
+ * device regardless of how fast or slow it is — cutting a bloated note down
+ * to a sane length is a device-agnostic win, unlike thread/battery tuning,
+ * which only ever helps unevenly depending on a chip's specific
+ * capabilities. 200 words is generous for what a retrieved note actually
+ * needs to answer a question from (this app's notes are short, spoken
+ * voice-note text, not documents) while guarding against the worst case: an
+ * unusually long note blowing up a single query's prefill cost by itself.
+ * Deliberately only applied here, to the LLM-facing context string — never
+ * to `citations[].content` above, which the UI's citation chips still show
+ * in full; a user tapping a citation should always see their whole note.
+ */
+const MAX_NOTE_CONTEXT_WORDS = 200;
+
+function truncateForContext(text: string): string {
+  const words = text.trim().split(/\s+/);
+  if (words.length <= MAX_NOTE_CONTEXT_WORDS) {
+    return text;
+  }
+  return `${words.slice(0, MAX_NOTE_CONTEXT_WORDS).join(" ")}…`;
+}
+
+/**
  * Notes arrive already ordered by reciprocal-rank-fusion score (descending)
  * from `hybridSearchNotes` — that order is preserved here and in the
  * citation list below, so "[Note 1]" is always the strongest match.
@@ -75,7 +104,7 @@ function formatNoteContext(notes: HybridSearchResult[]): string {
   return notes
     .map(
       (note, i) =>
-        `--- NOTE ${i + 1} [Recorded: ${formatNoteDate(note.createdAt)}] ---\n${resolveNoteText(note)}`
+        `--- NOTE ${i + 1} [Recorded: ${formatNoteDate(note.createdAt)}] ---\n${truncateForContext(resolveNoteText(note))}`
     )
     .join("\n\n");
 }

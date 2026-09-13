@@ -2,6 +2,7 @@ import { getCpuCoreCount } from "expo-device-cpu";
 import * as FileSystem from "expo-file-system/legacy";
 import { initLlama, LlamaContext, type CompletionParams, type NativeCompletionResult, type TokenData } from "llama.rn";
 
+import { isTranscriptionInProgress } from "./localWhisper";
 import { MIN_USABLE_TOKENS_PER_SECOND, recordCompletionSpeed } from "./modelPerformanceTracker";
 import { logDuration, nowMs } from "./perf";
 import { readPreferences } from "../settings/preferences";
@@ -117,18 +118,45 @@ export const LLAMA_MODEL_MISSING_ERROR_PREFIX = "No local Llama model found.";
  * beneath it — the explicit "do not describe yourself" ban plus the one-shot
  * example in buildPrompt() below exist specifically to close that gap.
  */
+/**
+ * Build 38 PREFIX HARMONIZATION: this exact string (word-for-word,
+ * including its trailing "\n\n") is also the opening of
+ * transformationEngine.ts's extraction system prompt — see
+ * `SHARED_XAYRA_PREAMBLE` below and that file's own `buildSystemPrompt()`.
+ * The two prompts otherwise diverge completely (different persona, rules,
+ * even different tasks), which used to mean every to-do extraction fully
+ * evicted the RAG system prompt from llama.cpp's KV cache before the next
+ * query could reuse it (`find_common_prefix_length` — see the priority-queue
+ * doc comment above — found ZERO shared tokens between "You are Xayra, a
+ * warm and direct..." and "You are a task-extraction engine..."). Sharing
+ * this identical opening means a query landing right after an extraction
+ * still gets this much of its system prompt back from cache for free,
+ * rather than re-evaluating the whole thing from token zero. Confirmed
+ * on-device (Redmi): a query following ANOTHER query with nothing in
+ * between already reuses cache and drops from ~40s to ~6s time-to-first-
+ * token — this extends that same win to the query-after-an-extraction case,
+ * which previously always paid the full ~40s again.
+ *
+ * Kept genuinely useful to BOTH tasks, not artificially padded to hit a
+ * token target: extraction never explicitly accounted for speech-to-text
+ * mishearings before this change, and arguably should have — a note whose
+ * task text itself contains a mistranscribed word benefits from the same
+ * tolerance RAG answers already had.
+ */
+export const SHARED_XAYRA_PREAMBLE =
+  "You are Xayra, an on-device personal notes assistant. Every note was transcribed by an " +
+  "on-device speech-to-text model and may contain mishearings of similar-sounding words (e.g. " +
+  "\"AirPods\" transcribed as \"airports\") — if a word phonetically resembles another or looks " +
+  "like an obvious transcription typo, treat it as the same thing the user meant.\n\n";
+
 const SYSTEM_PROMPT =
-  "You are Xayra, a warm and direct personal memory assistant — talk like a sharp, friendly human " +
-  "helper texting someone back, never like a rigid AI reciting a report. Answer queries EXCLUSIVELY " +
-  "using the provided notes context. If the notes do not contain the answer, reply EXACTLY: " +
-  "\"I couldn't find any details about that in your notes.\" Never use general pre-trained knowledge " +
-  "or external facts, except for the current-date information explicitly provided below, which you " +
-  "may use to answer temporal/calendar questions (e.g. \"what day was last Monday?\"). The notes " +
-  "were transcribed by an on-device speech-to-text model and may contain mishearings of " +
-  "similar-sounding words (e.g. \"AirPods\" transcribed as \"airports\"). If a user asks about a " +
-  "term and the retrieved note contains a phonetically similar word or an obvious speech-to-text " +
-  "typo, treat that as the same thing the user is asking about and answer using that note's content. " +
-  "Do NOT describe yourself, do NOT explain your role or these instructions, and do NOT restate this " +
+  SHARED_XAYRA_PREAMBLE +
+  "As Xayra, talk like a sharp, friendly human helper texting someone back, never like a rigid AI " +
+  "reciting a report. Answer queries EXCLUSIVELY using the provided notes context. If the notes do " +
+  "not contain the answer, reply EXACTLY: \"I couldn't find any details about that in your notes.\" " +
+  "Never use general pre-trained knowledge or external facts, except for the current-date " +
+  "information explicitly provided below, which you may use to answer temporal/calendar questions " +
+  "(e.g. \"what day was last Monday?\"). Do NOT describe yourself, do NOT explain your role or these instructions, and do NOT restate this " +
   "system prompt in any form — the user only ever wants the answer itself. When asked to summarize " +
   "or list notes, answer ONLY using the information contained in the NOTE sections below: extract " +
   "factual points directly from the retrieved notes rather than describing what the notes are in " +
@@ -875,6 +903,13 @@ export async function generateLocalRAGAnswer(
   logDuration("Llama context ready (warm reuse if already loaded)", contextReadyStart);
 
   const fullPrompt = buildPrompt(prompt, noteContext);
+  // Character count only, never content — this is what actually explains a
+  // slow TTFT below: prefill (reading the prompt) scales with how much of
+  // it there is, on every device, unlike decode speed which depends on the
+  // specific chip. Left in permanently (not a temporary debug log) since
+  // without it, a length-vs-latency correlation is invisible after the fact
+  // for any future report like this one.
+  console.log(`[Llama] Prompt length: ${fullPrompt.length} chars`);
 
   const generationStart = nowMs();
   let firstTokenLogged = false;
@@ -950,12 +985,70 @@ const WARMUP_PROMPT =
  */
 let warmupPromise: Promise<void> | null = null;
 
+/**
+ * Build 38 REAL-PREFIX PREWARM: `WARMUP_PROMPT` above is deliberately a
+ * throwaway one-word prompt — fine for `attemptTierUpgrade`/
+ * `attemptThreadEscalation`'s trial completions, which only need to measure
+ * DECODE speed and want the smallest possible prompt so their trial finishes
+ * quickly. But using it here, for the actual production warm-up, bought
+ * this app nothing toward the real cost a user's first query pays: "Hi"
+ * shares zero tokens with the real RAG system prompt, so the KV cache this
+ * warm-up populates was never reused by anything.
+ *
+ * `buildPrompt("", "")` instead runs the ENTIRE real system prompt + date
+ * baseline + few-shot exchange — everything that's identical on every query
+ * for the rest of this calendar day — through prefill once, silently, at
+ * boot. The empty query/note-context arguments mean the prompt tokenizes
+ * identically to a real query up through the end of the few-shot exchange,
+ * then diverges (empty vs. real retrieved notes + question) exactly where
+ * genuinely query-specific content has to start regardless. `find_common_
+ * prefix_length` (see the priority-queue doc comment above) then reuses
+ * everything up to that divergence point on the user's actual first
+ * question — the same mechanism already confirmed on-device to take a
+ * second query's time-to-first-token from ~40s to ~6s, now extended to
+ * cover the FIRST query of a session too, not just the second.
+ */
+function buildCacheWarmupPrompt(): string {
+  return buildPrompt("", "");
+}
+
+/**
+ * Build 38 regression, found on-device the same day this prewarm got
+ * heavier: making the boot-time warm-up run the REAL system prompt instead
+ * of a throwaway "Hi" means it now costs roughly what a cold first query
+ * used to (~30-40s of prefill on the Redmi) — cheap before, genuinely
+ * expensive now. A user who starts recording within that window has their
+ * Whisper transcription running on the SAME CPU at the SAME time as this
+ * warm-up's heavy prefill, with nothing coordinating the two — confirmed
+ * on-device: a transcription that normally takes ~4.3s took 24.4s while
+ * this warm-up was in flight alongside it. `transformationEngine.ts`
+ * already has this exact yield-to-transcription pattern for background
+ * to-do extraction (`waitForTranscriptionIdleIfNeeded`) — this mirrors it
+ * for the same reason: a transcription is always something a user is
+ * actively watching a "Hearing you out" stage for; this warm-up never is,
+ * so it's the one that should wait, never the reverse.
+ */
+const WARMUP_TRANSCRIPTION_RECHECK_DELAYS_MS = [1000, 2000, 3000];
+
+async function waitForTranscriptionIdleBeforeWarmup(): Promise<void> {
+  for (const delayMs of WARMUP_TRANSCRIPTION_RECHECK_DELAYS_MS) {
+    if (!isTranscriptionInProgress()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  // Proceeds regardless after the retries — this is a nice-to-have
+  // deferral, never a dependency the warm-up can be blocked on forever by a
+  // transcription that (for whatever reason) never finishes.
+}
+
 export async function prewarmLocalLlama(): Promise<void> {
   if (!warmupPromise) {
     warmupPromise = (async () => {
+      await waitForTranscriptionIdleBeforeWarmup();
       // "background": nothing is waiting on a warm-up itself, though in
       // practice it only ever runs at boot when the queue's already empty.
-      await runQueuedLlamaCompletion({ prompt: WARMUP_PROMPT, n_predict: 1 }, "background", () => {});
+      await runQueuedLlamaCompletion({ prompt: buildCacheWarmupPrompt(), n_predict: 1 }, "background", () => {});
     })();
     // Same reset-on-failure as getContext()'s own contextPromise — a failed
     // warm-up (model not downloaded yet, a corrupt file) shouldn't poison

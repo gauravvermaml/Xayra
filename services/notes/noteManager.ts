@@ -560,6 +560,40 @@ export type HybridSearchResult = Pick<
 const RRF_K = 60;
 
 /**
+ * Build 38 RELEVANCE FLOOR: RRF fusion below ranks whatever the vector
+ * search returns, but never asks whether the TOP result is actually a good
+ * match in absolute terms — with a small vault, the vector query below
+ * always returns something for every requested slot (it's `ORDER BY
+ * distance ASC LIMIT poolSize`, not "only if close enough"), so
+ * `CONTEXT_NOTE_LIMIT` (rag.ts) silently pads a genuinely irrelevant note
+ * into the LLM's context just to hit its quota. Confirmed on-device: asking
+ * "when do I have to call Papa?" against a 3-note vault retrieved an
+ * unrelated note about testing a Pixel build, and the model (imperfectly)
+ * folded a fragment of it into the answer — the RAG system prompt's
+ * RELEVANCE FILTER rule (localLlama.ts) is meant to catch exactly this, but
+ * a 1B model doesn't reliably enforce it once the noise is already sitting
+ * in front of it. Filtering it out of the retrieval pool entirely is a more
+ * reliable fix than asking the model to notice and ignore it after the
+ * fact — it also means a genuinely narrow question can retrieve FEWER than
+ * `CONTEXT_NOTE_LIMIT` notes, or zero, rather than being padded to a fixed
+ * count regardless of quality.
+ *
+ * `vec_distance_cosine` (sqlite-vec) returns 1 − cosine similarity, so 0 is
+ * an identical vector and 1 is orthogonal/unrelated. The first version of
+ * this floor (0.9) was a blind guess and confirmed on-device to be far too
+ * permissive to exclude anything — real distances measured on this app's
+ * own vault via the diagnostic log below: a genuinely relevant note landed
+ * at 0.281, while three unrelated notes all clustered tightly between
+ * 0.501 and 0.531. 0.9 let every one of them through; 0.4 sits cleanly in
+ * that real gap. Based on exactly one calibration sample, though — worth
+ * revisiting if further on-device testing shows either a genuinely
+ * relevant note being cut (raise it) or an obviously irrelevant one still
+ * getting through (lower it further). The system prompt's own relevance
+ * filter remains a second line of defense either way.
+ */
+const MAX_NOTE_VECTOR_DISTANCE = 0.4;
+
+/**
  * Whisper hallucinates this exact phrase (and close variants) on
  * silence/near-silence audio. A `pending`/`transcribed`-but-not-yet-`failed`
  * row with this content isn't useful grounding for anything and otherwise
@@ -576,16 +610,61 @@ function isUsableNoteRow(row: { content?: unknown; transcript?: unknown }): bool
 }
 
 /**
+ * Build 38: a spoken question is full of function words ("can", "you",
+ * "did", "what", "about", "my", "in") that carry almost no topical meaning
+ * on their own — but every one of them was still being OR'd into the FTS5
+ * query verbatim, so any note sharing even ONE of them (nearly guaranteed —
+ * these are the most common words in English) matched and got ranked.
+ * Confirmed on-device: "what did I put about Varun in my notes?" pulled in
+ * a completely unrelated note about testing a Pixel build, purely because
+ * it happened to share words like "did"/"you"/"in" with the question —
+ * genuine content overlap ("varun") wasn't what surfaced it. With a small
+ * vault (this app's common case — most users have tens of notes, not
+ * thousands), BM25's own IDF weighting doesn't reliably down-rank these
+ * matches enough on its own; RRF fusion below only cares about RANK
+ * POSITION, not the score's actual magnitude, so even a weak stopword-only
+ * match still contributes a real, nonzero fused score. Stripping them
+ * before building the query means an FTS match now has to be on an actual
+ * content word, same principle as the vector relevance floor above —
+ * retrieval should have to earn a note's inclusion, not default to it.
+ */
+const FTS_STOPWORDS = new Set([
+  "a", "about", "after", "again", "all", "am", "an", "and", "any", "are", "as", "at",
+  "be", "been", "being", "but", "by",
+  "can", "could",
+  "did", "do", "does", "doing", "down",
+  "for", "from",
+  "had", "has", "have", "having", "he", "her", "here", "him", "his", "how",
+  "i", "if", "in", "into", "is", "it", "its",
+  "just",
+  "me", "my",
+  "no", "not", "now",
+  "of", "on", "once", "only", "or", "our", "out",
+  "please",
+  "she", "so", "some", "sorry",
+  "than", "that", "the", "their", "them", "then", "there", "these", "they", "this", "to", "too",
+  "up",
+  "was", "we", "were", "what", "when", "where", "which", "who", "why", "will", "with", "would",
+  "yes", "you", "your",
+]);
+
+/**
  * Wraps free-form user text as an FTS5 query that can't throw a syntax
  * error: each token is quoted as a literal (escaping embedded quotes) and
  * OR'd together, so operators/punctuation in the input (AND, -, *, ") are
- * treated as plain text instead of FTS5 query syntax.
+ * treated as plain text instead of FTS5 query syntax. Stopwords are
+ * dropped first (see FTS_STOPWORDS above) — unless doing so would leave
+ * nothing at all (a query that's ENTIRELY function words, e.g. "what did
+ * you say"), in which case falling back to the unfiltered terms is safer
+ * than returning a query that matches nothing.
  */
 function toFtsQuery(text: string): string {
-  const terms = text
+  const allTerms = text
     .split(/\s+/)
     .map((term) => term.replace(/"/g, '""').trim())
     .filter(Boolean);
+  const contentTerms = allTerms.filter((term) => !FTS_STOPWORDS.has(term.toLowerCase()));
+  const terms = contentTerms.length > 0 ? contentTerms : allTerms;
   if (terms.length === 0) {
     return '""';
   }
@@ -613,17 +692,39 @@ export async function hybridSearchNotes(
   const embedding = await generateEmbeddingLocal(trimmed);
 
   const searchStart = nowMs();
-  const vectorResult = await db.execute(
+  const unfilteredVectorResult = await db.execute(
     `
-      SELECT n.id, n.content, n.transcript, n.audio_uri, n.transcription_model, n.created_at
+      SELECT n.id, n.content, n.transcript, n.audio_uri, n.transcription_model, n.created_at,
+             vec_distance_cosine(e.embedding, ?) AS distance
       FROM note_embeddings e
       JOIN notes n ON n.rowid = e.rowid
       WHERE n.status = 'embedded'
-      ORDER BY vec_distance_cosine(e.embedding, ?) ASC
+      ORDER BY distance ASC
       LIMIT ?
     `,
     [JSON.stringify(embedding), poolSize]
   );
+
+  // Diagnostic only — see MAX_NOTE_VECTOR_DISTANCE's own doc comment: that
+  // threshold was picked without real distance data and confirmed on-device
+  // to be too permissive. Logs every candidate's raw distance (filtered or
+  // not) so the floor can actually be calibrated against real numbers next
+  // time, instead of guessed a second time. Never logs note content.
+  if (__DEV__) {
+    console.log(
+      "[Retrieval] Vector candidates (distance, passed-floor):",
+      unfilteredVectorResult.rows.map((row) => ({
+        id: row.id,
+        distance: row.distance,
+        passed: (row.distance as number) < MAX_NOTE_VECTOR_DISTANCE,
+      }))
+    );
+  }
+
+  const vectorResult = {
+    ...unfilteredVectorResult,
+    rows: unfilteredVectorResult.rows.filter((row) => (row.distance as number) < MAX_NOTE_VECTOR_DISTANCE),
+  };
 
   let ftsRows: typeof vectorResult.rows = [];
   if (await isFtsAvailable()) {
