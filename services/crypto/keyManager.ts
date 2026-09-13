@@ -22,8 +22,24 @@ function toHex(bytes: Uint8Array): string {
  * Emulators and devices with nothing enrolled can't satisfy a
  * `requireAuthentication`-gated SecureStore read/write — it throws instead
  * of prompting. Callers check this first to decide whether to gate at all.
+ *
+ * Build 38: also skips the gate in `__DEV__` (a Metro-connected development
+ * build, like the ones this app is tested through on the Redmi and Pixel
+ * 9) — real physical test devices DO have biometrics enrolled, so the
+ * emulator/unenrolled check above doesn't cover them, and repeated
+ * fresh-install/uninstall test cycles were hitting a genuine, real friction
+ * point: a fingerprint scan interrupted mid-authentication (a stray touch,
+ * a screen timeout, an adb-driven activity switch mid-test) left the app
+ * stuck on a blank splash screen with no retry UI. `__DEV__` is compiled to
+ * `false` and dead in a release JS bundle, so this can never affect a real
+ * production/Play-Store build — the encrypted-database-behind-biometrics
+ * guarantee stays fully intact for actual users; it only ever relaxes for
+ * this project's own test devices running a development client.
  */
 async function isBiometricAuthAvailable(): Promise<boolean> {
+  if (__DEV__) {
+    return false;
+  }
   try {
     const [hasHardware, isEnrolled] = await Promise.all([
       LocalAuthentication.hasHardwareAsync(),
