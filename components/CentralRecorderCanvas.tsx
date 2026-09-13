@@ -7,6 +7,7 @@ import Animated, {
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
+  withSpring,
   withTiming,
 } from "react-native-reanimated";
 
@@ -96,6 +97,18 @@ export function CentralRecorderCanvas({
 }: CentralRecorderCanvasProps) {
   const amplitudeShared = useSharedValue(0);
   const pulsePhase = useSharedValue(0);
+  // Build 39 "make it feel 3D, not a sticker": 0 at rest, 1 while a finger is
+  // actually down. Snaps up fast (a real button shouldn't feel laggy to
+  // depress) and springs back with real overshoot on release (the "comes
+  // back up" the user asked for) rather than a linear ease — see
+  // buttonAnimatedStyle below for what it actually drives.
+  const pressedProgress = useSharedValue(0);
+  const handlePressIn = () => {
+    pressedProgress.value = withTiming(1, { duration: 80, easing: Easing.out(Easing.quad) });
+  };
+  const handlePressOut = () => {
+    pressedProgress.value = withSpring(0, { damping: 9, stiffness: 220, mass: 0.6 });
+  };
 
   useEffect(() => {
     amplitudeShared.value = withTiming(state === "recording" ? amplitude : 0, { duration: 80 });
@@ -114,8 +127,24 @@ export function CentralRecorderCanvas({
     }
   }, [state, pulsePhase]);
 
-  const buttonScaleStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: state === "recording" ? 1 + amplitudeShared.value * 0.06 : 1 }],
+  // Build 39: was scale-only (the recording-amplitude pulse). Now also
+  // shrinks slightly and nudges down on press, and — the actual "3D" part —
+  // the highlight sheen (buttonHighlight below) dims as it depresses, as if
+  // the glossy top surface is tilting away from the light. Multiplying the
+  // two scale sources (rather than picking one) means a press during active
+  // recording still shrinks a little further from wherever the amplitude
+  // pulse currently has it, instead of the press fighting/overriding it.
+  const buttonScaleStyle = useAnimatedStyle(() => {
+    const recordingPulse = state === "recording" ? 1 + amplitudeShared.value * 0.06 : 1;
+    const pressScale = interpolate(pressedProgress.value, [0, 1], [1, 0.93]);
+    const pressTranslateY = interpolate(pressedProgress.value, [0, 1], [0, 3]);
+    return {
+      transform: [{ scale: recordingPulse * pressScale }, { translateY: pressTranslateY }],
+    };
+  });
+
+  const highlightAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(pressedProgress.value, [0, 1], [1, 0.35]),
   }));
 
   return (
@@ -129,6 +158,8 @@ export function CentralRecorderCanvas({
           <Pressable
             onPress={onPress}
             onLongPress={onLongPress}
+            onPressIn={handlePressIn}
+            onPressOut={handlePressOut}
             disabled={disabled}
             hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
             style={({ pressed }) => [
@@ -148,7 +179,11 @@ export function CentralRecorderCanvas({
               // reserved for other disabled reasons (recorder.isTransitioning
               // while otherwise idle).
               disabled && state !== "transcribing" && styles.buttonDisabled,
-              pressed && styles.buttonPressed,
+              // Build 39: the flat `opacity: 0.9` dim this used to be is gone
+              // — `buttonScaleStyle`'s real depress-and-spring-back (plus the
+              // highlight dimming below) is what "pressed" looks like now;
+              // pressed's only remaining job here was that same flat opacity,
+              // which read as a sticker dimming, not a button moving.
             ]}
           >
             {/* Build 23 REPLACE WHITE CENTRAL BUTTON WITH XAYRA LOGO ASSET:
@@ -162,6 +197,15 @@ export function CentralRecorderCanvas({
                 `overflow: "hidden"` + `borderRadius` is what actually clips
                 this rectangular image into a circle. */}
             <Image source={require("../assets/xayra-logo.png")} style={styles.buttonLogo} resizeMode="cover" />
+            {/* Build 39 "looks like a sticker, not 3D": a plain flat-colored
+                circle reads as a decal no matter how good its own shadow is —
+                a real button's surface catches light unevenly. This glossy
+                highlight (a lighter, blurred arc sitting in the upper portion
+                of the circle, clipped by the button's own overflow:hidden)
+                fakes that without a gradient library: brightest at rest,
+                dimming on press (highlightAnimatedStyle) as if the surface
+                tilted away from the light source. */}
+            <Animated.View style={[styles.buttonHighlight, highlightAnimatedStyle]} pointerEvents="none" />
           </Pressable>
         </Animated.View>
       </View>
@@ -233,14 +277,26 @@ const styles = StyleSheet.create({
     width: "100%",
     height: "100%",
   },
+  // Build 39: an oversized circle positioned so only its lower edge grazes
+  // the button's actual visible area — `button`'s own `overflow: "hidden"`
+  // clips the rest away, leaving a soft, blurred-looking bright arc across
+  // the top of the circle rather than a hard-edged shape. Semi-transparent
+  // white over the logo's own colors reads as a light source glinting off a
+  // domed surface, which a single flat fill color never can.
+  buttonHighlight: {
+    position: "absolute",
+    top: -BUTTON_SIZE * 0.55,
+    left: -BUTTON_SIZE * 0.1,
+    width: BUTTON_SIZE * 1.2,
+    height: BUTTON_SIZE * 1.2,
+    borderRadius: BUTTON_SIZE * 0.6,
+    backgroundColor: "rgba(255,255,255,0.28)",
+  },
   buttonRecording: {
     backgroundColor: colors.danger,
   },
   buttonDisabled: {
     opacity: 0.5,
-  },
-  buttonPressed: {
-    opacity: 0.9,
   },
   waveform: {
     width: WAVEFORM_WIDTH,
