@@ -644,3 +644,23 @@ What's left is hands-on-device verification and Phase 5 scoping:
 - **`.aab` download**: https://expo.dev/artifacts/eas/8lQJzMZ1to411zXmaKRknUnT8gUo_hvuv7ES_0XOGow.aab
 - **NOT yet submitted to Play Console** — `eas.json`'s `submit.production` is an empty config block (`{}`), and this project has never had `eas submit`'s Play Console service-account credentials configured; every prior release's path from a built `.aab` to Play Store has been a manual upload (Internal Testing track) via the Play Console web UI, using the dashboard URL above to grab the `.aab` link. No native module was touched to produce this build — it exists purely so this session's JS/TS-only changes (Build 33 + Build 34, all of it — Drive to-do restore, text-only note storage, the wake-word root-cause chain, the "Quiet Corner" home declutter, keyboard fixes, onboarding tone pass) reach a real signed release artifact.
 - **Next step**: download the `.aab` from the link above and upload it to Play Console's Internal Testing track (or ask for `eas submit` to be set up with real service-account credentials if this should be automated going forward).
+
+## v1.0.32 / Build 39 Production Release Build
+
+- **Build ID**: `e5f45d62-0944-4faf-a30d-6b61b93663c1`
+- **Date built**: 2026-09-13
+- **Platform / profile**: Android, `production` profile (App Bundle, EAS-managed remote signing credentials — same keystore, `Build Credentials lp_i--wIup`, as every prior build)
+- **`app.json` version**: `1.0.32`; **versionCode**: `38` (auto-incremented from `37` by EAS)
+- **Status**: build succeeded (`✔ Build finished`, exit code 0)
+- **Dashboard / logs URL**: https://expo.dev/accounts/gauravsinghverma/projects/silent-confidant/builds/e5f45d62-0944-4faf-a30d-6b61b93663c1
+- **`.aab` download**: https://expo.dev/artifacts/eas/f0aHmTebVKhm6zbeGjObrgfVLMRuhdioSvQrVwUTh3A.aab
+- **NOT yet submitted to Play Console** — same manual-upload path as every prior release (`eas.json`'s `submit.production` remains an empty `{}`, no service-account credentials configured).
+- **First production build to ship Build 38 AND Build 39 together** — neither had previously reached a production release: real-prefix boot warmup + prefix harmonization + retrieval relevance floor + single-prompt biometric unlock (Build 38), plus to-do search, home-screen launch greeting, splash screen text (now baked into the native image — this build is the first one where that will actually be visible), mid-flight cancel, biometric fully restored, and the 3D record-button press effect (Build 39). No native module dependency was added or changed — the splash image swap is an asset change, not a native code change, so no new prebuild step was required beyond what EAS already does per build.
+- **Suggested Play Console release notes** (drafted, not yet posted):
+  > Faster responses, especially right after opening the app
+  > More accurate answers — better at ignoring notes unrelated to your question
+  > A personal touch: Xayra greets you by name when you open the app
+  > Changed your mind mid-recording? Tap the record button again to cancel — nothing gets saved
+  > Fingerprint unlock now asks only once per launch, not twice
+  > Search your to-dos by keyword from the To-Dos screen
+- **Next step**: download the `.aab` from the link above and upload it to Play Console's Internal Testing track.
