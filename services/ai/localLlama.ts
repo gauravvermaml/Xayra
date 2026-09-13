@@ -191,7 +191,17 @@ const SYSTEM_PROMPT =
   "\"Thursday\", \"last week\") into an exact calendar date. When the user asks \"when\" something " +
   "happened, answer with the actual calculated calendar date (e.g. \"on Thursday, August 14\") — " +
   "derived from that note's Recorded timestamp — never with the relative word alone and never with " +
-  "the raw \"[Recorded: ...]\" label text itself.";
+  "the raw \"[Recorded: ...]\" label text itself.\n\n" +
+  "DATE FILTER (a stricter rule than DATE RESOLUTION above — this one EXCLUDES notes, not just " +
+  "resolves their wording): if the user's question itself names a time window (\"today\", " +
+  "\"yesterday\", \"this week\", \"last Tuesday\"), first work out the exact calendar date(s) that " +
+  "window covers using the Today/Current Week Baseline below, then check EVERY retrieved note's own " +
+  "\"[Recorded: ...]\" date against it BEFORE using that note at all. A note recorded outside the " +
+  "window the user asked about must be treated exactly like an irrelevant note under RELEVANCE " +
+  "FILTER above — left out entirely, never described as if it happened during the asked-about " +
+  "window just because it was retrieved. If NONE of the retrieved notes actually fall inside the " +
+  "window the user asked about, say so with the fixed \"I couldn't find any details about that in " +
+  "your notes\" line rather than answering from a note recorded on a different day.";
 
 /**
  * A fixed one-shot example, injected as a real prior user/assistant turn
@@ -698,6 +708,20 @@ export async function getSharedLlamaContext(): Promise<LlamaContext> {
  * every time), so replaying it from the top costs nothing but a little
  * extra CPU time — never a wrong or partial result.
  */
+/**
+ * Build 39: thrown when a completion the USER explicitly asked to stop
+ * (via `cancelActiveLlamaCompletion()`) settles — as opposed to a genuine
+ * model/native error. Callers (generateRAGAnswer/rag.ts) catch this
+ * specifically to skip showing a broken/partial answer and skip speaking
+ * anything, rather than surfacing it as a failure toast.
+ */
+export class LlamaCancelledError extends Error {
+  constructor(message = "Cancelled by user.") {
+    super(message);
+    this.name = "LlamaCancelledError";
+  }
+}
+
 type CompletionPriority = "interactive" | "background";
 
 type QueuedCompletion = {
@@ -711,6 +735,12 @@ type QueuedCompletion = {
    * settle handler tell "cut short on purpose, retry it" apart from "a real
    * result/error" without needing a second out-of-band signal. */
   preempted?: boolean;
+  /** Set true by `cancelActiveLlamaCompletion()` (Build 39) — the user
+   * themselves asked for this exact answer to stop, as opposed to being
+   * bumped by a higher-priority job. Unlike `preempted`, this does NOT
+   * retry: the caller never wanted this completion to finish at all, so the
+   * settle handler rejects with `LlamaCancelledError` instead. */
+  userCancelled?: boolean;
 };
 
 /**
@@ -792,6 +822,13 @@ function processCompletionQueue(): void {
             return context.completion(job.params, job.onToken);
           })
           .then((result) => {
+            if (job.userCancelled) {
+              // The user themselves asked this exact answer to stop — never
+              // retry, never resolve with whatever partial text streamed
+              // before the cut. See LlamaCancelledError's own doc comment.
+              job.reject(new LlamaCancelledError());
+              return;
+            }
             if (job.preempted) {
               // Cut short on purpose to let an interactive job through, not
               // a real result — replay the same job from scratch instead of
@@ -816,6 +853,10 @@ function processCompletionQueue(): void {
             }
             job.resolve(result);
           }, (err) => {
+            if (job.userCancelled) {
+              job.reject(new LlamaCancelledError());
+              return;
+            }
             if (job.preempted) {
               // stopCompletion() rejecting instead of resolving is just as
               // much "cut short on purpose" as a resolve — retry either way.
@@ -849,6 +890,25 @@ export function runQueuedLlamaCompletion(
   return new Promise((resolve, reject) => {
     enqueue(priority, { kind: "completion", params, onToken, resolve, reject });
   });
+}
+
+/**
+ * Build 39: lets the UI stop whatever RAG answer is CURRENTLY GENERATING
+ * the moment a user realizes they misspoke and wants it to not go through
+ * — see app/index.tsx's "tap the record button again to cancel" handler.
+ * A no-op if nothing is running, or if what's running is a background
+ * extraction/task rather than the user's own interactive query (this is
+ * deliberately scoped to "cancel MY OWN in-flight answer," never someone
+ * else's background work). Marking `userCancelled` here, rather than
+ * rejecting directly, is what lets `processCompletionQueue()`'s own settle
+ * handler turn the native cut-short into a clean `LlamaCancelledError`
+ * instead of resolving with whatever partial text had streamed so far.
+ */
+export function cancelActiveLlamaCompletion(): void {
+  if (runningCompletion && runningCompletion.priority === "interactive" && runningCompletion.context) {
+    runningCompletion.job.userCancelled = true;
+    void runningCompletion.context.stopCompletion().catch(() => {});
+  }
 }
 
 /**

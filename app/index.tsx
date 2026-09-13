@@ -18,6 +18,7 @@ import { colors } from "../constants/theme";
 import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
+import { cancelActiveLlamaCompletion } from "../services/ai/localLlama";
 import {
   PIPELINE_STAGE_LABELS,
   setPipelineStage,
@@ -41,6 +42,8 @@ import {
   retryPendingEmbeddings,
   SilentRecordingError,
 } from "../services/notes/noteManager";
+import { getGreetingFirstName } from "../services/sync/driveSync";
+import { getTimeBasedGreeting } from "../utils/greeting";
 
 /** Screen goes idle-with-mic-open for this long with zero detected speech
  * before Handsfree auto-disengages — a safety/battery guard, not a UX
@@ -48,6 +51,10 @@ import {
  * keep the mic (and the screen, via ActiveModeManager's own keep-awake) on
  * indefinitely. */
 const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** How long the launch greeting ("Good morning, ...") stays up before
+ * cross-fading into the header's normal persistent subtitle. */
+const GREETING_VISIBLE_MS = 3500;
 
 // Percentage snap points (SHEET_SNAP_POINTS = ['20%', '50%'] — see
 // HistorySheet.tsx's own doc comment for why the monochromatic glass box's
@@ -154,6 +161,22 @@ export default function HomeScreen() {
 
   useEffect(() => {
     prewarmEngines();
+  }, []);
+
+  // Launch greeting — computed once per mount (a fresh app open), shown in
+  // place of the header's normal subtitle for a few seconds, then
+  // cross-fades into it. Deliberately transient, not a permanent banner —
+  // see "Quiet Corner" (quiet-corner-ui-overhaul memory): this home screen
+  // was carefully decluttered, and a greeting that never goes away would
+  // work against that. `getGreetingFirstName()` reads whatever Google
+  // account is already signed in for Drive backup (no new sign-in flow) and
+  // returns null before a first sign-in, in which case the greeting simply
+  // omits the name rather than showing a placeholder.
+  const [greetingText] = useState(() => getTimeBasedGreeting(getGreetingFirstName()));
+  const [showGreeting, setShowGreeting] = useState(true);
+  useEffect(() => {
+    const timer = setTimeout(() => setShowGreeting(false), GREETING_VISIBLE_MS);
+    return () => clearTimeout(timer);
   }, []);
 
   // Phase 2 Step 4: requests the Android notification permission and primes
@@ -420,6 +443,15 @@ export default function HomeScreen() {
   const lastVoiceQueryRef = useRef<{ normalizedText: string; at: number } | null>(null);
   const DUPLICATE_VOICE_QUERY_WINDOW_MS = 3000;
 
+  // Build 39 "stop, don't execute this": set the instant a user re-taps the
+  // center button while something's already processing (see
+  // handleRecordPress below). Checked at the one checkpoint that actually
+  // matters for a note (right after transcription resolves, before a note
+  // is ever created or a query ever routed) — a plain ref, not state, since
+  // it has to be visible synchronously inside `finishUtterance`'s own
+  // still-running closure, not on the next render.
+  const cancelRequestedRef = useRef(false);
+
   const finishUtterance = useCallback(
     async (
       audioUri: string,
@@ -459,7 +491,19 @@ export default function HomeScreen() {
         setProcessingState("processing");
         setProcessingLabel(inputMode === "record" ? "note" : "query");
         setPipelineStage("transcribing");
+        cancelRequestedRef.current = false;
         const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
+        if (cancelRequestedRef.current) {
+          // The user tapped cancel while transcription was still running —
+          // transcription itself has no interrupt API (whisper.cpp runs to
+          // completion once started), but nothing REQUIRES acting on its
+          // result once it's back. Bailing here means no note is ever
+          // created and no query is ever routed — the cleanest possible
+          // "as if it never happened" for this stage, since there's nothing
+          // to undo yet.
+          showToast("Cancelled");
+          return;
+        }
         if (isSilentTranscript(transcript)) {
           if (options?.isHandsfree) {
             console.log(`[Handsfree] Rejected — transcript counted as silent: "${transcript}"`);
@@ -640,6 +684,20 @@ export default function HomeScreen() {
     if (recorder.isTransitioning || activeMode.isActive) {
       return;
     }
+    // Build 39 "stop, don't execute this": a tap while something's already
+    // processing (not recording, not idle) means cancel, not "start a new
+    // recording" — the canvas is deliberately no longer disabled during
+    // this window (see its own `disabled` prop comment) specifically so
+    // this tap can land. `cancelRequestedRef` is checked at the one point
+    // in finishUtterance where a note/query would otherwise get created;
+    // `cancelActiveLlamaCompletion()` additionally cuts an already-running
+    // RAG answer off immediately rather than letting it keep generating for
+    // several more seconds before the cancellation is even noticed.
+    if (processingState === "processing") {
+      cancelRequestedRef.current = true;
+      cancelActiveLlamaCompletion();
+      return;
+    }
     setError(null);
     try {
       if (recorder.isRecording) {
@@ -658,13 +716,28 @@ export default function HomeScreen() {
         // Tapping to start recording collapses the sheet to its resting
         // peek immediately.
         sheetRef.current?.snapToIndex(0);
-        asrRouter.startListening();
+        // Build 39: `recorder.startRecording()` now runs FIRST, not after
+        // `asrRouter.startListening()` — confirmed on-device (Pixel 9) that
+        // Tier 1 (native on-device speech recognition) failed with
+        // "no-speech" on every single attempt, always silently falling back
+        // to Whisper. `recorder.startRecording()` calls expo-audio's
+        // `setAudioModeAsync()` to (re)configure the device's whole audio
+        // session for recording — reconfiguring that session WHILE Tier 1's
+        // SpeechRecognizer session was already open and listening (the old
+        // order) is a plausible way to starve it of real audio input:
+        // Android's audio focus can hand off exclusively to whichever
+        // client most recently claimed the session, cutting Tier 1 off from
+        // audio before it ever heard anything. Starting the PCM recorder
+        // first means the audio session is already stable by the time Tier
+        // 1 opens its own session on top of it, instead of an already-open
+        // Tier 1 session getting the rug pulled out from under it.
         await recorder.startRecording();
+        asrRouter.startListening();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Recording failed.");
     }
-  }, [recorder, activeMode.isActive, finishUtterance]);
+  }, [recorder, activeMode.isActive, finishUtterance, processingState]);
 
   // 10-minute no-speech safety timeout (Requirement 5) — armed the moment
   // Handsfree engages, and re-armed on every utterance ActiveModeManager
@@ -726,11 +799,18 @@ export default function HomeScreen() {
   const recordingStatusText = recorder.isRecording
     ? "Recording… tap to stop"
     : canvasState === "transcribing"
-      ? pipelineStage
-        ? PIPELINE_STAGE_LABELS[pipelineStage]
-        : processingLabel === "note"
-          ? "Transcribing your thought..."
-          : "Searching your thoughts..."
+      ? // Build 39: "tap to cancel" appended here, not baked into
+        // PIPELINE_STAGE_LABELS itself — those labels are shared with
+        // ChatSheetContent's own streaming row (which has no cancel
+        // gesture of its own), so the hint only belongs on this specific
+        // status line.
+        `${
+          pipelineStage
+            ? PIPELINE_STAGE_LABELS[pipelineStage]
+            : processingLabel === "note"
+              ? "Transcribing your thought..."
+              : "Searching your thoughts..."
+        } · tap to cancel`
       : null;
 
   // Opens a citation chip's source note from the chat view — the one
@@ -792,9 +872,15 @@ export default function HomeScreen() {
           <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
           <Text style={styles.brandTitle}>Xayra</Text>
         </View>
-        <Text style={styles.brandSubtitle}>
-          Tap to record your thoughts, later bring back your memories by tapping Xayra....
-        </Text>
+        {showGreeting ? (
+          <Animated.Text key="greeting" entering={FadeIn} exiting={FadeOut} style={styles.brandSubtitle}>
+            {greetingText}
+          </Animated.Text>
+        ) : (
+          <Animated.Text key="subtitle" entering={FadeIn} style={styles.brandSubtitle}>
+            Tap to record your thoughts, later bring back your memories by tapping Xayra....
+          </Animated.Text>
+        )}
       </View>
 
       <Animated.View style={[styles.centerArea, centerAreaAnimatedStyle]}>
@@ -811,7 +897,15 @@ export default function HomeScreen() {
           // refuses to start a competing manual recording in that state
           // (see the wake-word/Handsfree mutual-exclusion fix above); that
           // guard alone is the actual fix, and doesn't need this prop's help.
-          disabled={processingState === "processing" || recorder.isTransitioning}
+          //
+          // Build 39: no longer disabled while `processingState ===
+          // "processing"` — tapping during that window is now the "stop,
+          // don't execute this" gesture (see handleRecordPress's own
+          // cancel branch below), not a dead tap. Only genuinely mid-
+          // transition (a start/stop call already in flight) still disables
+          // it, since that's a real race, not a deliberate user action to
+          // support.
+          disabled={recorder.isTransitioning}
         />
         {recordingStatusText && <Text style={styles.statusText}>{recordingStatusText}</Text>}
         {error && <Text style={styles.errorText}>{error}</Text>}

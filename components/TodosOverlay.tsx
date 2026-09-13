@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, FlatList, StyleSheet, Text, View } from "react-native";
+import { Alert, FlatList, StyleSheet, Text, TextInput, View } from "react-native";
 import { TouchableOpacity } from "react-native-gesture-handler";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
@@ -8,7 +8,7 @@ import * as Haptics from "expo-haptics";
 import { AddTodoBottomSheet } from "./AddTodoBottomSheet";
 import { NoteDetailModal } from "./NoteDetailModal";
 import { TodoItemRow } from "./TodoItemRow";
-import { colors, spacing, typography } from "../constants/theme";
+import { colors, radius, spacing, typography } from "../constants/theme";
 import type { Recurrence } from "../db/schema";
 import { useToDos } from "../hooks/useToDos";
 import type { ToDo } from "../services/todos/todoManager";
@@ -61,6 +61,11 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
   // a brand-new one (`isAddVisible` covers that case instead).
   const [editingTodo, setEditingTodo] = useState<ToDo | null>(null);
   const [viewingNoteId, setViewingNoteId] = useState<string | null>(null);
+  // Plain client-side keyword filter — this app's to-do count is small
+  // enough (extracted from notes + manually added) that a full search
+  // index would be overkill; a simple case-insensitive substring match
+  // against each to-do's own text is what users actually asked for here.
+  const [searchQuery, setSearchQuery] = useState("");
 
   const pendingRef = useRef<{ id: string; timeoutId: ReturnType<typeof setTimeout> } | null>(null);
   const [pendingId, setPendingId] = useState<string | null>(null);
@@ -152,8 +157,17 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
 
   // Filters the pending (mid-undo-window) item out immediately — see this
   // screen's own doc comment above for why that's what makes the drop
-  // animation and the undo window independent of each other.
-  const visibleTodos = useMemo(() => todos.filter((item) => item.id !== pendingId), [todos, pendingId]);
+  // animation and the undo window independent of each other. The search
+  // filter is applied in the same pass rather than a second `.filter()`
+  // call, since both narrow the same base list down to what's shown.
+  const trimmedSearchQuery = searchQuery.trim().toLowerCase();
+  const visibleTodos = useMemo(
+    () =>
+      todos.filter(
+        (item) => item.id !== pendingId && (!trimmedSearchQuery || item.text.toLowerCase().includes(trimmedSearchQuery))
+      ),
+    [todos, pendingId, trimmedSearchQuery]
+  );
 
   const renderItem = useCallback(
     ({ item }: { item: ToDo }) => (
@@ -191,6 +205,24 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
           </TouchableOpacity>
         </View>
 
+        <View style={styles.searchBar}>
+          <Feather name="search" size={16} color={colors.textMuted} />
+          <TextInput
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            placeholder="Search"
+            placeholderTextColor={colors.textMuted}
+            style={styles.searchInput}
+            returnKeyType="search"
+            autoCorrect={false}
+          />
+          {searchQuery.length > 0 && (
+            <TouchableOpacity onPress={() => setSearchQuery("")} hitSlop={8} activeOpacity={0.6}>
+              <Feather name="x" size={16} color={colors.textMuted} />
+            </TouchableOpacity>
+          )}
+        </View>
+
         <FlatList
           data={visibleTodos}
           keyExtractor={(item) => item.id}
@@ -199,7 +231,9 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
           ItemSeparatorComponent={() => <View style={styles.itemGap} />}
           ListEmptyComponent={
             <Text style={styles.emptyText}>
-              To-dos extracted from your notes — or added directly — will show up here.
+              {trimmedSearchQuery
+                ? `No to-dos match "${searchQuery.trim()}".`
+                : "To-dos extracted from your notes — or added directly — will show up here."}
             </Text>
           }
         />
@@ -273,6 +307,26 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     ...typography.caption,
     marginTop: 2,
+  },
+  searchBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    marginHorizontal: spacing.base,
+    marginBottom: spacing.md,
+    paddingHorizontal: spacing.base,
+    height: 40,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  searchInput: {
+    flex: 1,
+    color: colors.textPrimary,
+    ...typography.body,
+    fontSize: 15,
+    padding: 0,
   },
   listContent: {
     paddingBottom: 120,

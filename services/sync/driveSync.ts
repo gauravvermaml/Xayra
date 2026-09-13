@@ -316,6 +316,32 @@ export async function getSyncStatus(): Promise<SyncStatus> {
   };
 }
 
+/**
+ * Best-effort first name for the home screen's greeting (see app/index.tsx)
+ * — reads whatever the currently signed-in Google account (from Drive
+ * backup sign-in) already reports, with zero extra sign-in flow or
+ * permission of its own. Returns null before a first sign-in, or if the
+ * account has no display name set, so the greeting can fall back to a
+ * name-less form rather than showing "undefined" or an empty string.
+ * Synchronous-feeling on purpose (no network call) — `getCurrentUser()`
+ * just reads the cached session GoogleSignin already holds.
+ */
+export function getGreetingFirstName(): string | null {
+  try {
+    ensureConfigured();
+    const currentUser = GoogleSignin.getCurrentUser();
+    const fullName = currentUser?.user.name;
+    if (!fullName) {
+      return null;
+    }
+    // First name only — "Good morning, Gaurav Singh Verma" reads like a
+    // form letter; "Good morning, Gaurav" reads like a greeting.
+    return fullName.trim().split(/\s+/)[0] || null;
+  } catch {
+    return null;
+  }
+}
+
 export async function getAutoSyncOnWifi(): Promise<boolean> {
   return (await AsyncStorage.getItem(AUTO_SYNC_WIFI_STORAGE_KEY)) === "true";
 }

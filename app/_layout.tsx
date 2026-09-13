@@ -4,6 +4,7 @@ import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 
+import { AppSplashScreen } from "../components/AppSplashScreen";
 import { OnboardingSetupScreen } from "../components/OnboardingSetupScreen";
 import { ToastHost } from "../components/Toast";
 import { initModelDownloads } from "../services/ai/modelDownloadManager";
@@ -23,6 +24,14 @@ const colors = {
 // downloading before the user's even past the splash screen, instead of
 // waiting for RootLayout's first render pass.
 initModelDownloads();
+
+/** Minimum time `AppSplashScreen` stays up, regardless of how fast
+ * `isSetupComplete()` resolves — long enough to actually read "Xayra /
+ * Your Pocket Companion", short enough not to feel like an artificial
+ * delay. A slow real check (a cold SQLite open, a locked-screen wait) is
+ * never cut short by this — it only ever extends the splash, never rushes
+ * past a check that's still genuinely in flight. */
+const SPLASH_MIN_DURATION_MS = 1100;
 
 /**
  * "One Door, Opens Once" root guard. `null` while the flag is still being
@@ -62,8 +71,22 @@ function useSetupGate(): [boolean | null, () => void] {
   return [ready, () => setReady(true)];
 }
 
+function useMinSplashElapsed(): boolean {
+  const [elapsed, setElapsed] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setElapsed(true), SPLASH_MIN_DURATION_MS);
+    return () => clearTimeout(timer);
+  }, []);
+  return elapsed;
+}
+
 export default function RootLayout() {
   const [setupComplete, markSetupGateComplete] = useSetupGate();
+  const minSplashElapsed = useMinSplashElapsed();
+  // Covers both cases with one flag: `isSetupComplete()` still resolving
+  // (setupComplete === null) AND the minimum splash duration not yet up,
+  // even if that check already came back fast — whichever takes longer.
+  const showSplash = setupComplete === null || !minSplashElapsed;
 
   return (
     // Required once anywhere above any react-native-gesture-handler consumer
@@ -71,9 +94,11 @@ export default function RootLayout() {
     // gestures on Android silently fail to register at all.
     <GestureHandlerRootView style={{ flex: 1 }}>
       <StatusBar style="light" />
-      {setupComplete === false ? (
+      {showSplash ? (
+        <AppSplashScreen />
+      ) : setupComplete === false ? (
         <OnboardingSetupScreen onComplete={markSetupGateComplete} />
-      ) : setupComplete === true ? (
+      ) : (
         <Stack
           screenOptions={{
             headerShown: false,
@@ -86,8 +111,6 @@ export default function RootLayout() {
               underneath instead of navigating away from it. */}
           <Stack.Screen name="settings" options={{ presentation: "modal" }} />
         </Stack>
-      ) : (
-        <View style={{ flex: 1, backgroundColor: colors.background }} />
       )}
       {/* Mounted once at the root so every screen's copy-to-clipboard
           feedback (see utils/clipboard.ts) renders on the same overlay,

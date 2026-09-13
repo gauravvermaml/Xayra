@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from "react";
 import * as Crypto from "expo-crypto";
 
-import { LLAMA_MODEL_MISSING_ERROR_PREFIX } from "./localLlama";
+import { LLAMA_MODEL_MISSING_ERROR_PREFIX, LlamaCancelledError } from "./localLlama";
 import { useModelDownload, type ModelDownloadStatus } from "./modelDownloadManager";
 import { generateRAGAnswer, type RagCitation } from "./rag";
 import { speakText, stopSpeech } from "../audio/tts";
@@ -136,6 +136,15 @@ export function useChatSession(): ChatSession {
         if (flushTimer) {
           clearTimeout(flushTimer);
           flushTimer = null;
+        }
+        if (err instanceof LlamaCancelledError) {
+          // Build 39: the user themselves tapped cancel mid-answer — remove
+          // both the optimistic user turn and the streaming placeholder
+          // entirely rather than showing an error bubble. They asked for
+          // this exact exchange to never have happened, not to be told it
+          // failed.
+          setMessages((prev) => prev.filter((message) => message.id !== assistantId && message.id !== userMessage.id));
+          throw err;
         }
         if (isChatModelMissingError(err)) {
           updateMessage(assistantId, {
