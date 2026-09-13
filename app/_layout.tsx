@@ -4,7 +4,6 @@ import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 
-import { AppSplashScreen } from "../components/AppSplashScreen";
 import { OnboardingSetupScreen } from "../components/OnboardingSetupScreen";
 import { ToastHost } from "../components/Toast";
 import { initModelDownloads } from "../services/ai/modelDownloadManager";
@@ -16,6 +15,14 @@ const colors = {
   // root fill has to match or a screen transition/notch area would flash
   // the old slate tone underneath it.
   background: "#000000",
+  // Matches app.json's expo-splash-screen `backgroundColor` and
+  // `assets/splash-icon.png`'s own baked-in background exactly — this is
+  // what's on screen the instant the native splash hands off, before
+  // `isSetupComplete()` resolves. Using anything else here (the app's own
+  // jet-black canvas color, say) would flash a visibly different shade the
+  // moment that check takes any real time at all, undoing the whole point
+  // of a seamless single splash.
+  splashBackground: "#0E0F12",
 };
 
 // Fired once, at module load, rather than inside a component effect — this
@@ -25,23 +32,26 @@ const colors = {
 // waiting for RootLayout's first render pass.
 initModelDownloads();
 
-/** Minimum time `AppSplashScreen` stays up, regardless of how fast
- * `isSetupComplete()` resolves — long enough to actually read "Xayra /
- * Your Pocket Companion", short enough not to feel like an artificial
- * delay. A slow real check (a cold SQLite open, a locked-screen wait) is
- * never cut short by this — it only ever extends the splash, never rushes
- * past a check that's still genuinely in flight. */
-const SPLASH_MIN_DURATION_MS = 1100;
-
 /**
  * "One Door, Opens Once" root guard. `null` while the flag is still being
- * read from SQLite (a handful of milliseconds — rendered as a bare black
- * screen, which is indistinguishable from the OS's own splash-to-first-frame
- * gap), then either `false` (render OnboardingSetupScreen, full-screen, in
- * place of the real app) or `true` (render the normal Stack) for the rest of
- * this app process's life — re-checked fresh on every cold start, but never
- * again once true, so a later launch can't accidentally re-trigger
- * onboarding for a device that's already set up.
+ * read from SQLite (a handful of milliseconds — rendered as a plain View
+ * matching the native splash's own background color, so it reads as one
+ * continuous screen rather than a visible hand-off), then either `false`
+ * (render OnboardingSetupScreen, full-screen, in place of the real app) or
+ * `true` (render the normal Stack) for the rest of this app process's
+ * life — re-checked fresh on every cold start, but never again once true,
+ * so a later launch can't accidentally re-trigger onboarding for a device
+ * that's already set up.
+ *
+ * Build 39 note: an earlier version of this screen briefly rendered a
+ * second, JS-drawn splash screen here (logo + "Xayra" + "Your Pocket
+ * Companion") to add text under the native splash's logo — confirmed
+ * on-device that this reads as two separate splash screens back to back
+ * (plus, on a development-client build specifically, a THIRD screen from
+ * the dev client's own loader in between, though that one never ships to
+ * real users). Removed in favor of baking the same text directly into
+ * `assets/splash-icon.png` itself, so the native splash is the only splash
+ * — one screen, like any other app, not a two-stage reveal.
  */
 function useSetupGate(): [boolean | null, () => void] {
   const [ready, setReady] = useState<boolean | null>(null);
@@ -71,22 +81,8 @@ function useSetupGate(): [boolean | null, () => void] {
   return [ready, () => setReady(true)];
 }
 
-function useMinSplashElapsed(): boolean {
-  const [elapsed, setElapsed] = useState(false);
-  useEffect(() => {
-    const timer = setTimeout(() => setElapsed(true), SPLASH_MIN_DURATION_MS);
-    return () => clearTimeout(timer);
-  }, []);
-  return elapsed;
-}
-
 export default function RootLayout() {
   const [setupComplete, markSetupGateComplete] = useSetupGate();
-  const minSplashElapsed = useMinSplashElapsed();
-  // Covers both cases with one flag: `isSetupComplete()` still resolving
-  // (setupComplete === null) AND the minimum splash duration not yet up,
-  // even if that check already came back fast — whichever takes longer.
-  const showSplash = setupComplete === null || !minSplashElapsed;
 
   return (
     // Required once anywhere above any react-native-gesture-handler consumer
@@ -94,11 +90,9 @@ export default function RootLayout() {
     // gestures on Android silently fail to register at all.
     <GestureHandlerRootView style={{ flex: 1 }}>
       <StatusBar style="light" />
-      {showSplash ? (
-        <AppSplashScreen />
-      ) : setupComplete === false ? (
+      {setupComplete === false ? (
         <OnboardingSetupScreen onComplete={markSetupGateComplete} />
-      ) : (
+      ) : setupComplete === true ? (
         <Stack
           screenOptions={{
             headerShown: false,
@@ -111,6 +105,8 @@ export default function RootLayout() {
               underneath instead of navigating away from it. */}
           <Stack.Screen name="settings" options={{ presentation: "modal" }} />
         </Stack>
+      ) : (
+        <View style={{ flex: 1, backgroundColor: colors.splashBackground }} />
       )}
       {/* Mounted once at the root so every screen's copy-to-clipboard
           feedback (see utils/clipboard.ts) renders on the same overlay,
