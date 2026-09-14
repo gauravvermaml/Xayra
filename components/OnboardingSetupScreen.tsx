@@ -3,9 +3,11 @@ import { Pressable, StyleSheet, Text, View } from "react-native";
 
 import { AnimatedEmoji } from "./AnimatedEmoji";
 import { colors, radius, spacing, typography } from "../constants/theme";
+import { checkMemoryBeforeOnboarding, LOW_MEMORY_WARNING_MESSAGE, watchForMemoryPressure } from "../services/ai/memoryGuard";
 import { resumeDownloads, runOnboardingThreadCalibration, useModelDownload } from "../services/ai/modelDownloadManager";
 import { markSetupComplete } from "../services/settings/appSettings";
 import { showSetupCompleteNotification } from "../services/notifications/setupCompleteNotification";
+import { readPreferences, writePreferences } from "../services/settings/preferences";
 
 /**
  * "One Door, Opens Once" onboarding — the whole point (see this feature's
@@ -56,6 +58,27 @@ const COSMETIC_STEPS: CosmeticStep[] = [
   { key: "sandbox", label: "🛡️ Locking in 100% offline privacy" },
 ];
 const COSMETIC_STEP_DURATION_MS = 1100;
+
+/**
+ * Build 40 onboarding resilience — see services/ai/memoryGuard.ts's own doc
+ * comment for the full three-layer picture (this screen owns layers 1, 2,
+ * and the visible half of layer 3; modelDownloadManager.ts's
+ * `runOnboardingThreadCalibration` owns the other half). None of this can
+ * PREVENT Android's low-memory killer from reaping this process — no app
+ * gets a vote in that — it only guarantees the user is told what's
+ * happening instead of watching a silent freeze, and is never left with
+ * zero way forward.
+ *
+ * How long setup is allowed to run (measured from `onboardingStartedAt`,
+ * persisted so it survives a process kill and relaunch — this is real
+ * elapsed wall-clock time, not "time since this particular app instance
+ * started") before the "Continue with safe settings" escape hatch appears.
+ * Generous enough that a genuinely slow download or a single retried
+ * calibration attempt never trips it; short enough that a user isn't left
+ * waiting anywhere near the "stuck for hours" a repeated-kill loop could
+ * otherwise cause.
+ */
+const ESCAPE_HATCH_TIMEOUT_MS = 3 * 60 * 1000;
 
 function formatEta(etaSeconds: number): string {
   if (etaSeconds <= 0) {
@@ -114,6 +137,63 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
   const [isReadyToStart, setIsReadyToStart] = useState(false);
   const completionStarted = useRef(false);
 
+  // Build 40 onboarding resilience — see memoryGuard.ts's own doc comment
+  // for the full three-layer picture. Purely informational; nothing here
+  // blocks or pauses the underlying setup work, which keeps running
+  // regardless — the point is the user is never left guessing why
+  // something might be slow or might need a retry.
+  const [memoryWarning, setMemoryWarning] = useState<string | null>(null);
+  const [showEscapeHatch, setShowEscapeHatch] = useState(false);
+
+  useEffect(() => {
+    let unmounted = false;
+    const stopWatching = watchForMemoryPressure(() => {
+      if (!unmounted) {
+        setMemoryWarning(LOW_MEMORY_WARNING_MESSAGE);
+      }
+    });
+
+    // Escape hatch timer: measured from the FIRST time onboarding ever
+    // started for this install, persisted so a process kill and relaunch
+    // doesn't reset the clock — this has to reflect real elapsed time
+    // across possibly several attempts, not just how long the current
+    // process instance has been alive.
+    void (async () => {
+      const prefs = await readPreferences();
+      const startedAt = prefs.onboardingStartedAt ?? Date.now();
+      if (prefs.onboardingStartedAt === null) {
+        await writePreferences({ onboardingStartedAt: startedAt });
+      }
+      const remaining = ESCAPE_HATCH_TIMEOUT_MS - (Date.now() - startedAt);
+      if (unmounted) return;
+      if (remaining <= 0) {
+        setShowEscapeHatch(true);
+        return;
+      }
+      const timer = setTimeout(() => {
+        if (!unmounted) setShowEscapeHatch(true);
+      }, remaining);
+      // Cleared implicitly on unmount via the `unmounted` flag above — a
+      // stray timer firing after unmount just no-ops instead of erroring.
+      return () => clearTimeout(timer);
+    })();
+
+    return () => {
+      unmounted = true;
+      stopWatching();
+    };
+  }, []);
+
+  const handleContinueAnyway = async () => {
+    // Skips straight to "done" with whatever thread setting is currently
+    // in effect (the safe conservative default if calibration never got a
+    // chance to run or accept anything) — the whole point of this button
+    // is getting the user into a working app now, not making them wait
+    // through the remaining cosmetic steps too.
+    await markSetupComplete();
+    onComplete();
+  };
+
   useEffect(() => {
     if (modelDownload.status !== "ready" || completionStarted.current) {
       return;
@@ -122,12 +202,23 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
 
     let cancelled = false;
     async function runCompletionSequence() {
+      // Layer 1 of the memory-pressure defense (memoryGuard.ts): a
+      // pre-flight check right before the heaviest, most failure-prone
+      // step. If the system already reports being low on memory, skip the
+      // optimistic thread trial entirely (same safe fallback used when a
+      // PREVIOUS attempt didn't survive) rather than risk being the straw
+      // that gets this process killed, and let the user know why.
+      const memoryCheck = checkMemoryBeforeOnboarding();
+      if (!memoryCheck.safe) {
+        setMemoryWarning(memoryCheck.message);
+      }
+
       // Step 0, "Tuning quick-recall for your device" — a REAL calibration
       // trial, not a fixed cosmetic pause; see this file's own doc comment
       // above for why. Internally bounded/cancellable (localLlama.ts's
       // CALIBRATION_TIMEOUT_MS), so this never blocks setup from
       // completing even on a device the optimistic attempt doesn't suit.
-      await runOnboardingThreadCalibration();
+      await runOnboardingThreadCalibration(!memoryCheck.safe);
       if (cancelled) return;
       setCosmeticStepIndex(1);
 
@@ -191,6 +282,12 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
           </View>
         )}
 
+        {memoryWarning && !isReadyToStart && (
+          <View style={styles.pausedBanner}>
+            <Text style={styles.pausedText}>{memoryWarning}</Text>
+          </View>
+        )}
+
         <View style={styles.divider} />
 
         <StepRow
@@ -222,6 +319,27 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
           >
             <Text style={styles.startButtonText}>Start Capturing Thoughts ✨</Text>
           </Pressable>
+        )}
+
+        {/* Build 40 onboarding resilience, layer 3's visible half — see
+            memoryGuard.ts's own doc comment. Only ever appears after
+            several minutes of real elapsed time (survives a process kill
+            and relaunch, see this file's own escape-hatch timer above), and
+            only while setup genuinely hasn't finished yet — never a
+            competing button alongside the normal "Start Capturing
+            Thoughts" above. */}
+        {showEscapeHatch && !isReadyToStart && (
+          <>
+            <Text style={styles.escapeHatchHint}>
+              This is taking longer than usual — you can jump in now with safe default settings, or keep waiting.
+            </Text>
+            <Pressable
+              style={({ pressed }) => [styles.escapeHatchButton, pressed && styles.startButtonPressed]}
+              onPress={() => void handleContinueAnyway()}
+            >
+              <Text style={styles.escapeHatchButtonText}>Continue with Safe Settings</Text>
+            </Pressable>
+          </>
         )}
       </View>
     </View>
@@ -343,5 +461,26 @@ const styles = StyleSheet.create({
   startButtonText: {
     ...typography.label,
     color: "#08221A",
+  },
+  escapeHatchHint: {
+    ...typography.caption,
+    color: colors.textSecondary,
+    textAlign: "center",
+    marginTop: spacing.lg,
+    marginBottom: spacing.sm,
+  },
+  escapeHatchButton: {
+    alignSelf: "stretch",
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surfaceElevated,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: "center",
+  },
+  escapeHatchButtonText: {
+    ...typography.label,
+    color: colors.textPrimary,
   },
 });

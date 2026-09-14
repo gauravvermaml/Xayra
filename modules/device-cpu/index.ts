@@ -18,9 +18,33 @@ import { requireNativeModule } from "expo-modules-core";
  * app's platform scope — see modules/app-signature/index.ts for the same
  * pattern this module follows.
  */
+/** Mirrors Android's `ComponentCallbacks2.TRIM_MEMORY_*` constants relevant
+ * to `onMemoryPressure` below — only the levels the native side actually
+ * forwards (`RUNNING_LOW` and up, plus `onLowMemory()` mapped to `COMPLETE`). */
+export const MemoryPressureLevel = {
+  RUNNING_LOW: 10,
+  RUNNING_CRITICAL: 15,
+  COMPLETE: 80,
+} as const;
+
+export type MemoryInfo = {
+  /** Free system-wide memory, in MB — NOT just this app's own usage. */
+  availMB: number;
+  totalMB: number;
+  /** Android's own "below this, I'm willing to start killing background
+   * processes for room" line — the same threshold `lowMemory` below checks
+   * `availMB` against. */
+  thresholdMB: number;
+  /** Android's own verdict, not a threshold we picked ourselves — true when
+   * `availMB` is already at/below `thresholdMB` at the moment of the call. */
+  lowMemory: boolean;
+};
+
 const DeviceCpuModule = requireNativeModule<{
   getCoreCount(): number;
   getThermalStatus(): number;
+  getMemoryInfo(): MemoryInfo;
+  addListener(eventName: "onMemoryPressure", listener: (event: { level: number }) => void): { remove: () => void };
 }>("DeviceCpu");
 
 /** The device's real CPU core count (`Runtime.getRuntime().availableProcessors()`),
@@ -62,5 +86,39 @@ export function getThermalStatus(): number | null {
     return Number.isFinite(status) && status >= 0 ? status : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Build 40: a one-shot, system-wide (not per-app) memory snapshot — see
+ * services/ai/memoryGuard.ts for the actual "is it safe to start onboarding
+ * right now" decision built on top of this. `null` on failure; callers must
+ * treat that as "unknown," never "definitely fine," same contract as
+ * `getThermalStatus` above.
+ */
+export function getMemoryInfo(): MemoryInfo | null {
+  try {
+    const info = DeviceCpuModule.getMemoryInfo();
+    return info.availMB >= 0 ? info : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Live low-memory early warning, fired while the SYSTEM overall is getting
+ * tight — the window between "still fine" and "a process is about to get
+ * killed," which a one-shot `getMemoryInfo()` call at the start of a long
+ * operation can't see coming on its own. Returns an unsubscribe function;
+ * safe to call even if the native listener registration itself fails
+ * (swallowed, matching every other function here's "never throw into the
+ * caller" contract) — in that case the returned function is a no-op.
+ */
+export function addMemoryPressureListener(onPressure: (level: number) => void): () => void {
+  try {
+    const subscription = DeviceCpuModule.addListener("onMemoryPressure", (event) => onPressure(event.level));
+    return () => subscription.remove();
+  } catch {
+    return () => {};
   }
 }

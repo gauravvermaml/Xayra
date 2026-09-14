@@ -49,6 +49,32 @@ export type Preferences = {
    * trial above — "rejected" is permanent for this install for the same
    * reason (the CPU/core layout doesn't change between launches). */
   threadEscalationStatus: "not_attempted" | "rejected" | "accepted";
+  /**
+   * Build 40 onboarding resilience: set to `true` immediately before
+   * `runOnboardingThreadCalibration()` starts its trial, cleared back to
+   * `false` the moment it finishes (success OR falling back) — see that
+   * function in modelDownloadManager.ts. Found still `true` on a fresh
+   * launch means the LAST attempt never got to clear it, which only
+   * happens if the app process died mid-trial (confirmed on-device: this
+   * app killed by Android's low-memory killer during exactly this step,
+   * on a Pixel 9 with ordinary background apps open — see
+   * services/ai/memoryGuard.ts). A device that just proved it can't afford
+   * the heavier optimistic attempt shouldn't be asked to gamble on it
+   * again immediately — the next attempt goes straight to the safe
+   * conservative default instead.
+   */
+  onboardingCalibrationAttemptInFlight: boolean;
+  /**
+   * Build 40 onboarding resilience: set once, the FIRST time onboarding's
+   * completion sequence ever starts for this install — never overwritten
+   * after that, including across a process kill and relaunch. Lets
+   * OnboardingSetupScreen measure real elapsed wall-clock time since setup
+   * genuinely began, even if the app has been killed and restarted several
+   * times in between, so a "this is taking unusually long — continue with
+   * safe settings?" escape hatch can appear based on truth rather than
+   * resetting its own clock every time the process happens to restart.
+   */
+  onboardingStartedAt: number | null;
 };
 
 const DEFAULT_PREFERENCES: Preferences = {
@@ -58,6 +84,8 @@ const DEFAULT_PREFERENCES: Preferences = {
   tier3BStatus: "not_attempted",
   llamaThreadCount: null,
   threadEscalationStatus: "not_attempted",
+  onboardingCalibrationAttemptInFlight: false,
+  onboardingStartedAt: null,
 };
 
 function preferencesPath(): string {

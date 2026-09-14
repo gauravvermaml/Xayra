@@ -819,14 +819,58 @@ async function maybeAttemptThreadEscalation(): Promise<void> {
  * later chance once it has real usage history to measure against, exactly
  * as if this optimistic attempt had never run at all.
  */
-export async function runOnboardingThreadCalibration(): Promise<void> {
+/**
+ * Build 40 resilience layer (see services/ai/memoryGuard.ts's own doc
+ * comment for the full three-layer picture): `onboardingCalibrationAttemptInFlight`
+ * is set to `true` right before the real trial starts and cleared back to
+ * `false` the moment it finishes, success or fallback — found still `true`
+ * on THIS call means last attempt's flag never got cleared, which only
+ * happens if the process was killed mid-trial. Rather than gamble on the
+ * same heavier optimistic path again immediately (risking the exact same
+ * kill a second or third time in a row), this attempt goes straight to the
+ * known-safe conservative thread count — a device that just proved it
+ * can't currently afford the aggressive attempt should get INTO the app
+ * working, not keep retrying the thing that didn't work.
+ *
+ * `skipOptimistic` is the other half of this same safety net, set by
+ * OnboardingSetupScreen.tsx's own pre-flight check (services/ai/memoryGuard.ts)
+ * — if the SYSTEM already reports being low on memory before this even
+ * starts, there's no reason to try the heavier path at all and risk being
+ * the straw that gets this process killed; go straight to conservative,
+ * same as if a previous attempt had already proven it necessary.
+ */
+export async function runOnboardingThreadCalibration(skipOptimistic = false): Promise<void> {
+  const prefs = await readPreferences();
+  if (prefs.onboardingCalibrationAttemptInFlight || skipOptimistic) {
+    const cores = getCpuCoreCount();
+    const conservativeThreads = cores ? Math.max(1, Math.floor(cores / 4)) : 2;
+    await writePreferences({
+      llamaThreadCount: conservativeThreads,
+      threadEscalationStatus: "rejected",
+      onboardingCalibrationAttemptInFlight: false,
+    });
+    console.log(
+      skipOptimistic
+        ? `[ThreadTuning] Device already reported low memory before calibration — using the safe ${conservativeThreads}-thread default directly.`
+        : "[ThreadTuning] Previous calibration attempt never completed (process likely killed mid-trial) — " +
+            `skipping straight to the safe ${conservativeThreads}-thread default this time.`
+    );
+    return;
+  }
+
+  await writePreferences({ onboardingCalibrationAttemptInFlight: true });
   const result = await attemptOptimisticThreadCalibration();
   if (result.calibrated) {
-    await writePreferences({ llamaThreadCount: result.threads, threadEscalationStatus: "accepted" });
+    await writePreferences({
+      llamaThreadCount: result.threads,
+      threadEscalationStatus: "accepted",
+      onboardingCalibrationAttemptInFlight: false,
+    });
     console.log(
       `[ThreadTuning] Onboarding calibration accepted — ${result.threads} threads, measured ${result.tokensPerSecond.toFixed(1)} tok/s.`
     );
   } else {
+    await writePreferences({ onboardingCalibrationAttemptInFlight: false });
     console.log("[ThreadTuning] Onboarding calibration declined or timed out — staying on the conservative default.");
   }
 }

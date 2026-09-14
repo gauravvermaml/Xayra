@@ -8,5 +8,5 @@
 export function getTimeBasedGreeting(firstName: string | null): string {
   const hour = new Date().getHours();
   const timeOfDay = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-  return firstName ? `${timeOfDay}, ${firstName}. Tap away!` : `${timeOfDay}. Tap away!`;
+  return firstName ? `${timeOfDay}, ${firstName}. What's on your mind…` : `${timeOfDay}. What's on your mind…`;
 }

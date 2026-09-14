@@ -27,7 +27,11 @@ function toHex(bytes: Uint8Array): string {
  * across repeated fresh-install cycles on the Redmi/Pixel 9 — reverted in
  * Build 39 at the user's explicit request now that testing is wrapping up:
  * biometric protection should behave identically in every build, dev or
- * production, going forward.
+ * production, going forward. (Build 40's live debugging session used a
+ * second, deliberately uncommitted local re-bypass here to get through
+ * adb-driven relaunches that can't complete a real fingerprint scan — that
+ * bypass has been reverted now that the session's finished; this function
+ * must never special-case `__DEV__`.)
  */
 async function isBiometricAuthAvailable(): Promise<boolean> {
   try {
