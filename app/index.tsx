@@ -676,10 +676,21 @@ export default function HomeScreen() {
 
   const activeModeStopRef = useRef(activeMode.stop);
   activeModeStopRef.current = activeMode.stop;
+  // Build 42 P3-b fix (qa/05-consolidated-triage.md P3-b): this cleanup
+  // already stopped Handsfree on blur, but never touched a plain manual
+  // recording — navigating to Archive while a Home-screen recording was
+  // still running left it capturing invisibly in the background, where
+  // Archive's own note playback could then run concurrently with it (a
+  // cross-screen instance of the same "single active audio source" gap
+  // P1-1's fixes close elsewhere). `stopRecording()` itself no-ops if
+  // nothing is recording, so this is safe to call unconditionally.
+  const recorderStopRef = useRef(recorder.stopRecording);
+  recorderStopRef.current = recorder.stopRecording;
   useFocusEffect(
     useCallback(() => {
       return () => {
         void activeModeStopRef.current();
+        void recorderStopRef.current();
       };
     }, [])
   );

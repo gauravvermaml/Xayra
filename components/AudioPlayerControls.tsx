@@ -2,7 +2,9 @@ import { useCallback, useState } from "react";
 import { Pressable, StyleProp, StyleSheet, Text, View, ViewStyle } from "react-native";
 
 import { colors } from "../constants/theme";
+import { isMicInUse } from "../services/audio/audioInputState";
 import { useAudioPlayerControls } from "../services/audio/player";
+import { showToast } from "./Toast";
 
 export type AudioPlayerControlsProps = {
   audioUri: string;
@@ -39,6 +41,23 @@ export function AudioPlayerControls({ audioUri, style, compact }: AudioPlayerCon
     [player, trackWidth]
   );
 
+  /**
+   * Build 42 P1-1c fix (qa/05-consolidated-triage.md P1-1): shared by both
+   * NoteCard and NoteDetailModal (both render this component for their play
+   * button) — neither previously checked whether a recording or Handsfree
+   * session was active before playing, so tapping play mid-Handsfree fed
+   * this note's audio straight into the still-open mic with no echo
+   * cancellation. Only guards STARTING playback — pausing an already-
+   * playing track is always safe to allow through.
+   */
+  const handleTogglePress = useCallback(() => {
+    if (!player.isPlaying && isMicInUse()) {
+      showToast("Can't play audio while recording or Handsfree is active");
+      return;
+    }
+    player.toggle();
+  }, [player]);
+
   if (!audioUri) {
     return (
       <View style={[styles.container, compact && styles.containerCompact, style]}>
@@ -60,7 +79,7 @@ export function AudioPlayerControls({ audioUri, style, compact }: AudioPlayerCon
   return (
     <View style={[styles.container, compact && styles.containerCompact, style]}>
       <Pressable
-        onPress={player.toggle}
+        onPress={handleTogglePress}
         hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         style={({ pressed }) => [
           styles.playButton,

@@ -260,6 +260,22 @@ export function useModelDownload(): ModelDownloadStatus {
   return status;
 }
 
+/**
+ * Build 42 P2-5 fix (qa/05-consolidated-triage.md P2-5, found live during
+ * Phase 1 device verification): a plain, non-hook snapshot read for callers
+ * that aren't React components — `useModelDownload()` above needs a
+ * component to attach its `useEffect` to, which `asrRouter.ts` isn't. Used
+ * to warn the user once per session that a still-in-progress download may
+ * be slowing down transcription, rather than leaving that slowdown
+ * unexplained (nothing coordinates the DownloadManager transfer's I/O with
+ * Whisper's own CPU-bound inference — confirmed on-device: a transcription
+ * measured 8.9s against this app's own ~4.3s baseline while a Llama
+ * download was still active).
+ */
+export function getCurrentModelDownloadStatus(): ModelDownloadStatus {
+  return currentStatus;
+}
+
 // ---- Telemetry (speed/ETA/MB) ---------------------------------------------
 //
 // Three phases (whisper -> embedding -> llama) are downloaded sequentially,

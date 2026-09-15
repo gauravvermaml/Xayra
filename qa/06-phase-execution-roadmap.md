@@ -107,3 +107,33 @@ All six Phase 1 items were implemented, unit-tested, then verified on a real dev
 **Also found live, not part of the original P0/P1 scope**: a genuine, reproducible sub-40ms spurious `AppState` "background→active" blip on this device (MIUI-specific or Android-version-specific), confirmed via live logging (`background` then `active` 38ms later). Harmless given how P0-4 was designed (release-then-natural-reload), but worth remembering as a real environmental quirk on this device.
 
 See `qa/05-consolidated-triage.md` for the full write-up including the newly found P2-5 (model-download-vs-transcription CPU contention, found live and explicitly deferred, not fixed).
+
+---
+
+## Status — Phase 2 EXECUTED (2026-09-15), all in-scope items shipped; verification depth varies by item
+
+All 11 items in `qa/07-phase2-execution-brief.md` (P1-1a/b/c, P1-4, P1-5, P2-1, P2-3, P2-4, P3-a, P3-b, P2-5) were implemented and shipped. Unlike Phase 1, no item was reverted — but verification depth is honestly mixed: the core audio-ownership and recording-resilience fixes got direct live device confirmation from the user; a few lower-risk items (P2-1, P2-3) shipped with unit-test coverage only, not independently repro'd live this session.
+
+**Two open questions from the brief, answered by the user before execution**: (1) P1-4 scope — don't build full background-recording resilience, just clearly tell the user if it fails; (2) P3-a — delete the dead "Reset" code (`cancelAndRestart`, `asrRouter`'s `cancelListening`/`restartListening`/`abort`) rather than rebuild the feature.
+
+**Shipped and verified live on-device:**
+- **P1-1a/b/c** (recording/Handsfree never stop competing audio; playback never checks recording/Handsfree state) — all three sub-fixes confirmed via the user's direct 4-point live check on the Chat tab's "Listen" button during active recording and Handsfree ("1. yes 2. yes 3. yes 4. no" — no errors). Testing redirected mid-session after the user correctly pointed out notes have been text-only (no playable audio) since Build 34, making Chat's Listen button the only reachable instance of this gap.
+- **P1-4** (recording backgrounding resilience) — shipped as an honest warning (product decision above), not full resilience. First live test produced a false failure ("recording wasnt on") traced to my own testing-methodology error — using the dev-client's Metro-reconnect deep link to "resume" the app, which actually destroys and recreates the whole JS instance (confirmed via `BridgelessReact`/`DevLauncher` logcat tags) rather than a real backgrounding. Corrected to a proper Activity-resume intent (`adb shell am start -n com.anonymous.silentconfidant/.MainActivity`); the re-test showed zero JS-reload log lines and the "Recording May Be Incomplete" warning firing correctly, with the note still transcribing, saving, and extracting a to-do end-to-end despite the warning.
+- **P1-5** (silent recording failure on native error) — shipped, and a genuine "Invalid event" runtime error was hit live during verification ("Tapped and it straightaway show error. see yourself"). Root-caused to a second, independent patching layer: `@fugood/react-native-audio-pcm-stream`'s native Java + `.d.ts` changes weren't enough — its separate JS runtime wrapper (`index.js`) has its own hardcoded event whitelist that rejected the new `"error"` event before it ever reached JS listeners. Fixed and re-verified without a native rebuild (pure JS change).
+- **Wake-word regression re-check**: confirmed clean from proximity, per the user ("yes, it works from proximity"). Distance testing explicitly declined by the user due to a known, pre-existing, unrelated device limitation on the Redmi (not a regression).
+
+**Shipped, unit-tested, not independently live-verified this session** (flagged honestly, not claimed as device-confirmed):
+- **P2-1** (contention-gate retry cap) — schedule constants extended from 6s to 29s total, locked in by test; not re-measured against a real 24s+ transcription live.
+- **P2-3** (Handsfree background/foreground desync) — resync listener added; no dedicated live repro of the desync scenario was run separately from the general P1-4 background/foreground testing.
+
+**Partially shipped, with a documented remaining gap:**
+- **P2-4** (audio focus / incoming calls) — `expo-audio`'s `interruptionMode: "doNotMix"` added (corrects the brief's own earlier "highest native complexity" over-estimate for the *playback*-focus half of this issue), but raw `AudioRecord` capture itself is still not focus-aware — a real incoming call mid-recording remains an untested, unaddressed platform limitation.
+
+**Shipped, structural cleanup:**
+- **P3-a** (dead "Reset" code) — deleted per the user's decision, confirmed zero call sites before removal.
+- **P3-b** (blur-cleanup gap) — `app/index.tsx`'s existing blur-effect extended to also stop a plain manual recording, not just Handsfree.
+- **P2-5** (download-vs-transcription contention, found live during Phase 1) — shipped as a one-time honest warning toast rather than a scheduling fix; the underlying resource-contention gap remains open by design (out of scope for a warning-level fix).
+
+**Testing infrastructure note**: `@testing-library/react-native` v14 (with its `test-renderer` peer) was confirmed genuinely non-functional in this exact environment (jest-expo 57 + React 19.2.3 + RN 0.86.2) — even a minimal `renderHook(() => useState(0))` returned `{ result: undefined }`. Uninstalled after a diagnostic test confirmed the incompatibility rather than continuing to chase it; Phase 2's test coverage is renderer-free plain-function Jest tests instead (`audioInputState.test.ts`, `asrRouter-download-contention.test.ts`, `contention-gate-schedules.test.ts`), with the component-level checks (P1-1a/b/c) covered by live device verification instead of RNTL.
+
+See `qa/05-consolidated-triage.md` for the full per-item write-up.

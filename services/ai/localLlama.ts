@@ -1117,8 +1117,18 @@ function buildCacheWarmupPrompt(): string {
  * for the same reason: a transcription is always something a user is
  * actively watching a "Hearing you out" stage for; this warm-up never is,
  * so it's the one that should wait, never the reverse.
+ *
+ * Build 42 P2-1 fix (qa/05-consolidated-triage.md P2-1): the original
+ * schedule totaled only 6 seconds — less than the 24.4s worst case this
+ * very doc comment already documented, meaning the gate could give up and
+ * let the warm-up proceed while the transcription it exists to protect was
+ * still running. Extended to comfortably exceed that measured worst case;
+ * still terminates rather than waiting forever for a transcription that
+ * never finishes.
  */
-const WARMUP_TRANSCRIPTION_RECHECK_DELAYS_MS = [1000, 2000, 3000];
+// Exported for the same test-only reason as transformationEngine.ts's
+// identical TRANSCRIPTION_RECHECK_DELAYS_MS.
+export const WARMUP_TRANSCRIPTION_RECHECK_DELAYS_MS = [1000, 2000, 3000, 5000, 8000, 10000];
 
 async function waitForTranscriptionIdleBeforeWarmup(): Promise<void> {
   for (const delayMs of WARMUP_TRANSCRIPTION_RECHECK_DELAYS_MS) {

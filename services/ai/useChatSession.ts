@@ -4,7 +4,9 @@ import * as Crypto from "expo-crypto";
 import { LLAMA_MODEL_MISSING_ERROR_PREFIX, LlamaCancelledError } from "./localLlama";
 import { useModelDownload, type ModelDownloadStatus } from "./modelDownloadManager";
 import { generateRAGAnswer, type RagCitation } from "./rag";
+import { isMicInUse } from "../audio/audioInputState";
 import { speakText, stopSpeech } from "../audio/tts";
+import { showToast } from "../../components/Toast";
 
 export type ChatMessage = {
   id: string;
@@ -91,9 +93,19 @@ export function useChatSession(): ChatSession {
       if (speakingMessageId === message.id) {
         void stopSpeech();
         setSpeakingMessageId(null);
-      } else {
-        playMessageSpeech(message);
+        return;
       }
+      // Build 42 P1-1c fix (qa/05-consolidated-triage.md P1-1): the third
+      // instance of the same gap AudioPlayerControls.tsx closes for note
+      // playback — tapping "Listen" mid-Handsfree fed the assistant's own
+      // voice into the still-open mic with no echo cancellation. Stopping
+      // speech (the branch above) is always safe to allow through; only
+      // STARTING new speech is guarded.
+      if (isMicInUse()) {
+        showToast("Can't play audio while recording or Handsfree is active");
+        return;
+      }
+      playMessageSpeech(message);
     },
     [speakingMessageId, playMessageSpeech]
   );

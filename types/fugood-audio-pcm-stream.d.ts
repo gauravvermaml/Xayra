@@ -25,8 +25,16 @@ declare module "@fugood/react-native-audio-pcm-stream" {
     init: (options: AudioPcmStreamOptions) => void;
     start: () => void;
     stop: () => void;
-    /** `data` fires with base64-encoded raw PCM chunks while recording. */
-    on: (event: "data", callback: (base64Chunk: string) => void) => { remove: () => void };
+    /** `data` fires with base64-encoded raw PCM chunks while recording.
+     * `error` (Build 42 P1-5 fix, see patches/@fugood+react-native-audio-pcm-stream+1.1.4.patch)
+     * fires once if the native recording thread's read loop throws — a mid-
+     * recording mic-permission revocation or other native `AudioRecord`
+     * failure — so callers can surface it instead of silently finalizing a
+     * broken/empty recording. */
+    on: {
+      (event: "data", callback: (base64Chunk: string) => void): { remove: () => void };
+      (event: "error", callback: (message: string) => void): { remove: () => void };
+    };
   }
 
   const AudioRecord: AudioPcmStream;

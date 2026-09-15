@@ -1,8 +1,10 @@
 import { ExpoSpeechRecognitionModule } from "expo-speech-recognition";
 
+import { getCurrentModelDownloadStatus } from "./modelDownloadManager";
 import { transcribeAudioLocal } from "./localWhisper";
 import { logDuration, nowMs } from "./perf";
 import type { WhisperModelId } from "./whisperModels";
+import { showToast } from "../../components/Toast";
 
 export type ASRTier = "native" | "whisper";
 
@@ -110,18 +112,6 @@ class NativeASRSession {
     this.subscriptions.forEach((sub) => sub.remove());
     return this.finalTranscript.trim();
   }
-
-  /** Discards the session immediately without waiting for a transcript —
-   * used when the recording itself is being discarded (Reset). */
-  abort(): void {
-    try {
-      ExpoSpeechRecognitionModule.abort();
-    } catch {
-      // Already stopped/errored — nothing to clean up.
-    }
-    this.finish();
-    this.subscriptions.forEach((sub) => sub.remove());
-  }
 }
 
 let activeSession: NativeASRSession | null = null;
@@ -149,24 +139,17 @@ export function startListening(): void {
   }
 }
 
-/** Discards any in-progress Tier 1 session without producing a transcript —
- * used when the recording itself is being abandoned (navigating away
- * mid-recording, unmount) rather than stopped normally. */
-export function cancelListening(): void {
-  if (activeSession) {
-    activeSession.abort();
-    activeSession = null;
-  }
-  sessionIsNative = false;
-}
-
-/** Call when the in-progress recording is discarded and restarted (Reset)
- * — aborts any partial Tier 1 transcript so it can't leak into the new
- * take, then immediately starts a fresh session. */
-export function restartListening(): void {
-  cancelListening();
-  startListening();
-}
+/**
+ * Build 42 P2-5 fix (qa/05-consolidated-triage.md P2-5): shown at most once
+ * per app session — nothing here coordinates the download's I/O with
+ * Whisper's own CPU-bound inference (a genuinely hard fix given the actual
+ * data transfer happens inside Android's own DownloadManager service,
+ * outside this app's process/CPU budget entirely), so this closes the
+ * "silent, unexplained slowness" gap the same way the honest-warning
+ * approach already does elsewhere in this app, rather than attempting a
+ * throttling mechanism this app doesn't actually have the power to enforce.
+ */
+let hasWarnedAboutDownloadContention = false;
 
 /**
  * Call when recording stops, passing the already-finalized WAV file uri
@@ -174,6 +157,11 @@ export function restartListening(): void {
  * native session produced one; otherwise runs local Whisper on the WAV file.
  */
 export async function transcribe(audioUri: string | null): Promise<ASRTranscriptionResult> {
+  if (!hasWarnedAboutDownloadContention && getCurrentModelDownloadStatus().status === "downloading") {
+    hasWarnedAboutDownloadContention = true;
+    showToast("Setup is still finishing in the background — transcription may be a bit slower than usual");
+  }
+
   if (sessionIsNative && activeSession) {
     const session = activeSession;
     activeSession = null;
@@ -198,4 +186,4 @@ export async function transcribe(audioUri: string | null): Promise<ASRTranscript
   return { transcript, tier: "whisper", whisperModelId: modelId };
 }
 
-export const asrRouter = { startListening, restartListening, cancelListening, transcribe };
+export const asrRouter = { startListening, transcribe };

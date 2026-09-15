@@ -976,8 +976,22 @@ async function waitForCoolerThermalStateIfNeeded(): Promise<void> {
  * (confirmed via a tester's on-device report: a second voice note
  * transcribed noticeably slower than the first while the first note's
  * extraction was still running). Extraction has no one waiting on it, so it
- * yields; transcription never yields to extraction in the other direction. */
-const TRANSCRIPTION_RECHECK_DELAYS_MS = [1000, 2000, 3000];
+ * yields; transcription never yields to extraction in the other direction.
+ *
+ * Build 42 P2-1 fix (qa/05-consolidated-triage.md P2-1): the original
+ * schedule totaled only 6 seconds, but this same gate's own justifying
+ * evidence (localLlama.ts's `WARMUP_TRANSCRIPTION_RECHECK_DELAYS_MS` doc
+ * comment) documents a real on-device transcription ballooning to 24.4
+ * seconds under contention — meaning the gate could give up and let
+ * extraction proceed while the very transcription it was built to protect
+ * was still running. Extended so the total wait comfortably exceeds that
+ * measured worst case, while still terminating rather than waiting forever
+ * for a transcription that (for whatever reason) never finishes. */
+// Exported (in addition to internal use) purely so the Phase 2 test suite
+// can assert the total wait comfortably exceeds the documented 24.4s
+// worst-case contention measurement, without needing to actually drive a
+// 29-second real timer in a unit test.
+export const TRANSCRIPTION_RECHECK_DELAYS_MS = [1000, 2000, 3000, 5000, 8000, 10000];
 
 async function waitForTranscriptionIdleIfNeeded(): Promise<void> {
   for (const delayMs of TRANSCRIPTION_RECHECK_DELAYS_MS) {

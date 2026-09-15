@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AppState, type AppStateStatus } from "react-native";
 import { Buffer } from "buffer";
 import { requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import AudioRecord from "@fugood/react-native-audio-pcm-stream";
 
+import { setMicInUse } from "./audioInputState";
+import { pausePlayback } from "./player";
+import { stopSpeech } from "./tts";
 import { BITS_PER_SAMPLE, CHANNELS, SAMPLE_RATE, computeRms, writePcmChunksAsWav } from "./wav";
 
 export type ActiveModeState = "idle" | "listening" | "processing" | "speaking";
@@ -266,6 +270,8 @@ export class ActiveModeManager {
     this.callbacks.onStateChange?.(next);
   }
 
+  private errorSubscription: { remove: () => void } | null = null;
+
   async start(): Promise<void> {
     if (!this.stopped) {
       return;
@@ -274,7 +280,20 @@ export class ActiveModeManager {
     if (!granted) {
       throw new Error("Microphone permission was not granted.");
     }
-    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
+
+    // Build 42 P1-1b fix (qa/05-consolidated-triage.md P1-1): engaging
+    // Handsfree had the same gap as manual recording (see recorder.ts's
+    // matching fix) — worse here, since any audio still playing gets sampled
+    // as "ambient noise" by the calibration window right below, corrupting
+    // the adaptive VAD threshold for this entire utterance cycle. Must land
+    // BEFORE `armListening()`'s calibration window starts, not just before
+    // this function returns.
+    await stopSpeech();
+    pausePlayback();
+
+    // Build 42 P2-4 (best-effort) — see recorder.ts's identical setting and
+    // doc comment for what this does and does not cover.
+    await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, interruptionMode: "doNotMix" });
     // Keeps the screen (and CPU) awake for as long as Active Mode is
     // engaged, so a hands-free/shower session isn't cut short by the
     // device auto-locking mid-listen. This only covers the foreground —
@@ -283,6 +302,7 @@ export class ActiveModeManager {
     // materially larger native undertaking not implemented here.
     await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
     this.stopped = false;
+    setMicInUse(true);
 
     // The ONE native session for this entire Handsfree engagement — see
     // `capturing`'s own doc comment for why this is deliberately not
@@ -290,6 +310,14 @@ export class ActiveModeManager {
     AudioRecord.init({ sampleRate: SAMPLE_RATE, channels: CHANNELS, bitsPerSample: BITS_PER_SAMPLE });
     this.subscription?.remove();
     this.subscription = AudioRecord.on("data", (base64Chunk: string) => this.handleAudioChunk(base64Chunk));
+    // Build 42 P1-5 fix — see recorder.ts's identical fix/doc comment.
+    // Requires the native patch adding this event; see
+    // patches/@fugood+react-native-audio-pcm-stream+1.1.4.patch.
+    this.errorSubscription?.remove();
+    this.errorSubscription = AudioRecord.on("error", (message: string) => {
+      console.error("[ActiveMode] Native recording error:", message);
+      this.callbacks.onError?.(new Error(`Native recording error: ${message}`));
+    });
     AudioRecord.start();
 
     this.armListening();
@@ -309,7 +337,10 @@ export class ActiveModeManager {
     }
     this.subscription?.remove();
     this.subscription = null;
+    this.errorSubscription?.remove();
+    this.errorSubscription = null;
     this.chunks = [];
+    setMicInUse(false);
     await deactivateKeepAwake(KEEP_AWAKE_TAG);
     this.setState("idle");
   }
@@ -471,6 +502,26 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
     return () => {
       void manager.stop();
     };
+  }, []);
+
+  /**
+   * Build 42 P2-3 fix (qa/05-consolidated-triage.md P2-3): `isActive`/`state`
+   * could desync from reality after a background/foreground cycle that
+   * doesn't kill the process — the manager's own doc comment on `start()`
+   * already says backgrounding suspends the native capture, but nothing
+   * ever told the JS-side `isActive` state that happened, so the pill could
+   * keep reading "Handsfree · listening" indefinitely with nothing actually
+   * being captured. `stop()` is idempotent (no-ops if already stopped), so
+   * this is safe to call unconditionally on every background transition
+   * rather than needing to track whether Handsfree was actually engaged.
+   */
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState: AppStateStatus) => {
+      if (nextState === "background") {
+        void managerRef.current?.stop().then(() => setIsActive(false));
+      }
+    });
+    return () => subscription.remove();
   }, []);
 
   const start = useCallback(async () => {

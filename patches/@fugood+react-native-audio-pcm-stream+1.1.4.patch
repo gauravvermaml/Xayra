@@ -1,8 +1,25 @@
 diff --git a/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java b/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java
-index 6d7d17d..9717e37 100644
+index 6d7d17d..f537044 100644
 --- a/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java
 +++ b/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java
-@@ -93,6 +93,19 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+@@ -79,6 +79,16 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+ 
+         if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
+             promise.reject("AudioRecord initialization failed");
++            // Build 42 P1-5 fix: the JS side (services/audio/recorder.ts,
++            // services/audio/activeMode.ts) calls init() without awaiting
++            // its promise, matching this module's own void-returning .d.ts —
++            // so a rejected init() promise was previously an invisible,
++            // unhandled rejection. Emitting through the same "error" event
++            // the read-loop catch block below now also uses means every
++            // native failure path in this module surfaces the same way.
++            if (eventEmitter != null) {
++                eventEmitter.emit("error", "AudioRecord initialization failed");
++            }
+             recorder = null;
+         } else {
+             promise.resolve(null);
+@@ -93,6 +103,19 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
  
          Thread recordingThread = new Thread(new Runnable() {
              public void run() {
@@ -22,7 +39,7 @@ index 6d7d17d..9717e37 100644
                  try {
                      int bytesRead;
                      int count = 0;
-@@ -100,7 +113,7 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+@@ -100,7 +123,7 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
                      byte[] buffer = new byte[bufferSize];
  
                      while (isRecording) {
@@ -31,7 +48,7 @@ index 6d7d17d..9717e37 100644
  
                          // skip first 2 buffers to eliminate "click sound"
                          if (bytesRead > 0 && ++count > 2) {
-@@ -108,12 +121,17 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+@@ -108,12 +131,31 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
                              eventEmitter.emit("data", base64Data);
                          }
                      }
@@ -39,6 +56,20 @@ index 6d7d17d..9717e37 100644
 +                    activeRecorder.stop();
                  } catch (Exception e) {
                      e.printStackTrace();
++                    // Build 42 P1-5 fix (qa/05-consolidated-triage.md P1-1
++                    // component, "no error channel at all"): this module's
++                    // entire typed event surface used to be "data" only — a
++                    // mid-recording mic-permission revocation or other
++                    // native AudioRecord failure landed here completely
++                    // silently, with isRecording staying true and no signal
++                    // ever reaching JS. The JS side (recorder.ts,
++                    // activeMode.ts) now listens for this and surfaces a
++                    // real error instead of finalizing a broken/empty
++                    // recording as if nothing happened.
++                    if (eventEmitter != null) {
++                        String message = e.getMessage();
++                        eventEmitter.emit("error", message != null ? message : "Unknown recording error");
++                    }
                  } finally {
 -                    recorder.release();
 -                    recorder = null;
@@ -52,3 +83,23 @@ index 6d7d17d..9717e37 100644
                  }
              }
          });
+diff --git a/node_modules/@fugood/react-native-audio-pcm-stream/index.js b/node_modules/@fugood/react-native-audio-pcm-stream/index.js
+index d11088e..362f73e 100644
+--- a/node_modules/@fugood/react-native-audio-pcm-stream/index.js
++++ b/node_modules/@fugood/react-native-audio-pcm-stream/index.js
+@@ -9,7 +9,14 @@ AudioRecord.start = () => RNLiveAudioStream.start();
+ AudioRecord.stop = () => RNLiveAudioStream.stop();
+ 
+ const eventsMap = {
+-  data: 'data'
++  data: 'data',
++  // Build 42 P1-5 fix: this package's own JS wrapper (this file — distinct
++  // from its bundled .d.ts, which has no effect at runtime) whitelisted
++  // only "data", so subscribing to the native "error" event this patch's
++  // Android-side change now emits threw "Invalid event" before ever
++  // reaching the native listener at all. See
++  // patches/@fugood+react-native-audio-pcm-stream+1.1.4.patch.
++  error: 'error'
+ };
+ 
+ AudioRecord.on = (event, callback) => {
