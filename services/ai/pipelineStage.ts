@@ -17,7 +17,21 @@
  * step) — a stage is set exactly when its real underlying work starts, so
  * it lingers exactly as long as that work actually takes on this device,
  * never longer and never faked.
+ *
+ * QA Phase 3, P2-2 fix: this used to be ONE shared `current` value for the
+ * whole app, so a note save (`noteManager.ts`) and a chat query (`rag.ts`)
+ * running back-to-back — e.g. asking a question while an earlier recording
+ * is still being embedded — could each overwrite the other's label, and
+ * whichever screen re-rendered next would show the WRONG flow's status.
+ * Keyed by `PipelineFlow` now so the two flows can never step on each
+ * other: `noteManager.ts` only ever writes/reads `"note"`,
+ * `rag.ts`/`ChatSheetContent.tsx` only ever write/read `"chat"`. No
+ * behavior change for the (overwhelmingly common) single-flow-at-a-time
+ * case — this only changes what happens when both are genuinely
+ * in-flight at once, which had no known live symptom before this fix.
  */
+export type PipelineFlow = "note" | "chat";
+
 export type PipelineStage =
   | "transcribing" // Whisper turning speech into text
   | "understanding" // the embedding model placing a note in semantic space
@@ -27,23 +41,30 @@ export type PipelineStage =
 
 type Listener = (stage: PipelineStage | null) => void;
 
-const listeners = new Set<Listener>();
-let current: PipelineStage | null = null;
+const listenersByFlow: Record<PipelineFlow, Set<Listener>> = {
+  note: new Set(),
+  chat: new Set(),
+};
 
-export function setPipelineStage(stage: PipelineStage | null): void {
-  current = stage;
-  listeners.forEach((listener) => listener(stage));
+const currentByFlow: Record<PipelineFlow, PipelineStage | null> = {
+  note: null,
+  chat: null,
+};
+
+export function setPipelineStage(flow: PipelineFlow, stage: PipelineStage | null): void {
+  currentByFlow[flow] = stage;
+  listenersByFlow[flow].forEach((listener) => listener(stage));
 }
 
-export function getPipelineStage(): PipelineStage | null {
-  return current;
+export function getPipelineStage(flow: PipelineFlow): PipelineStage | null {
+  return currentByFlow[flow];
 }
 
 /** Returns an unsubscribe function — call it on unmount. */
-export function subscribeToPipelineStage(listener: Listener): () => void {
-  listeners.add(listener);
+export function subscribeToPipelineStage(flow: PipelineFlow, listener: Listener): () => void {
+  listenersByFlow[flow].add(listener);
   return () => {
-    listeners.delete(listener);
+    listenersByFlow[flow].delete(listener);
   };
 }
 

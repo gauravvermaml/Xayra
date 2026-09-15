@@ -32,7 +32,10 @@ export type LocalTranscriptionResult = {
 const NON_SPEECH_MARKER_PATTERN =
   /[([]\s*(?:blank_audio|silence|music|noise|inaudible|applause|laughter)\s*[)\]]/gi;
 
-function stripNonSpeechMarkers(text: string): string {
+// Exported for testability only (QA Phase 3, Agent 4 backlog item 2) — no
+// change in behavior; this was module-private with a single internal caller
+// before.
+export function stripNonSpeechMarkers(text: string): string {
   return text.replace(NON_SPEECH_MARKER_PATTERN, " ").replace(/\s+/g, " ").trim();
 }
 

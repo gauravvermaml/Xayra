@@ -147,6 +147,15 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
 
   useEffect(() => {
     let unmounted = false;
+    // QA Phase 3, P3-1 fix: this used to be declared *inside* the async
+    // IIFE below and "cleared" by returning `() => clearTimeout(timer)`
+    // from it — but that return value is the IIFE's own resolved value,
+    // never awaited or captured anywhere, so React never called it. The
+    // timer was never actually cleared on unmount; it was harmless only
+    // because its own callback re-checks `unmounted` before doing anything.
+    // Hoisting it to this outer scope lets the real cleanup below
+    // (line ~181's `return () => { ... }`) clear it directly.
+    let escapeHatchTimer: ReturnType<typeof setTimeout> | undefined;
     const stopWatching = watchForMemoryPressure(() => {
       if (!unmounted) {
         setMemoryWarning(LOW_MEMORY_WARNING_MESSAGE);
@@ -170,17 +179,15 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
         setShowEscapeHatch(true);
         return;
       }
-      const timer = setTimeout(() => {
+      escapeHatchTimer = setTimeout(() => {
         if (!unmounted) setShowEscapeHatch(true);
       }, remaining);
-      // Cleared implicitly on unmount via the `unmounted` flag above — a
-      // stray timer firing after unmount just no-ops instead of erroring.
-      return () => clearTimeout(timer);
     })();
 
     return () => {
       unmounted = true;
       stopWatching();
+      clearTimeout(escapeHatchTimer);
     };
   }, []);
 

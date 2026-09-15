@@ -1,0 +1,52 @@
+# QA Phase 3 (qa/08-phase3-execution-brief.md, Agent 4 backlog item 10):
+# the proposed first Maestro E2E flow — tap record, speak, tap stop, confirm
+# a new note appears. Written and structured, but NOT YET GREEN on real
+# hardware — two real gaps found live on 2026-09-16 while validating Maestro
+# on this project, documented here rather than hidden:
+#
+# 1. THIS DEVICE (Redmi Note 8 Pro, MIUI) currently refuses ALL adb-injected
+#    input — both a plain `adb shell input keyevent` AND Maestro's own tap
+#    mechanism fail identically with "SecurityException: Injecting to
+#    another application requires INJECT_EVENTS permission". This is a
+#    known MIUI restriction, not a Maestro or app bug: MIUI gates synthetic
+#    input injection behind a SEPARATE developer-option toggle from plain
+#    "USB debugging" — typically Settings > Additional settings > Developer
+#    options > "USB debugging (Security settings)" (name/location varies by
+#    MIUI version; usually requires a Mi Account signed in and a network
+#    connection to verify). This is an on-device settings change only a
+#    person with the device in hand can make — confirm it's enabled before
+#    trying to run this flow again.
+# 2. Even once taps work, this flow's "speak" step needs REAL microphone
+#    audio. Maestro drives UI, not the microphone — there's no built-in way
+#    to inject a canned voice clip into a real device's mic for an
+#    unattended run. Options if this is worth solving later: a
+#    build-time-gated test hook that feeds a fixed WAV file into the
+#    recording pipeline instead of the real mic (a genuine code change,
+#    not a Maestro trick), or accepting this flow needs a human to actually
+#    speak during the run (defeats full automation).
+#
+# The button/element selectors below (waveform state, a rendered note) are
+# also unverified against the real running UI — no testID exists on
+# CentralRecorderCanvas or NoteCard yet; add one before trusting this flow's
+# selectors to resolve correctly.
+appId: com.anonymous.silentconfidant
+---
+- launchApp
+- extendedWaitUntil:
+    visible: "Xayra"
+    timeout: 20000
+# NOTE: on a device with biometrics enrolled, the app gates here behind a
+# fingerprint prompt Maestro cannot satisfy (no way to simulate a real
+# fingerprint touch) — this flow only proceeds past this point on a device
+# with no biometrics enrolled, or after a human unlocks it once manually.
+- tapOn:
+    point: "50%,50%" # placeholder for the record button — replace once a
+    # real testID exists on CentralRecorderCanvas's Pressable.
+- extendedWaitUntil:
+    visible: "Hearing you out"
+    timeout: 5000
+- tapOn:
+    point: "50%,50%"
+- extendedWaitUntil:
+    visible: "Tucked away safely"
+    timeout: 30000

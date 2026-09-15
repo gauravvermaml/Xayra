@@ -933,11 +933,28 @@ export function runQueuedLlamaCompletion(
  * rejecting directly, is what lets `processCompletionQueue()`'s own settle
  * handler turn the native cut-short into a clean `LlamaCancelledError`
  * instead of resolving with whatever partial text had streamed so far.
+ *
+ * QA Phase 3 fix, found while writing Agent 4 backlog item 7's regression
+ * test: this called `.catch()` directly on `stopCompletion()`'s return
+ * value — the exact same latent bug `enqueue()`'s preemption path had
+ * before the Build 41 P0-4 hardening fix (`safelyStopCompletion()`'s own
+ * doc comment), since confirmed live to genuinely return `undefined` at
+ * runtime rather than always a `Promise<void>`. Here the throw isn't inside
+ * a `new Promise(executor)`, so it wouldn't silently fail a task the way it
+ * did in `enqueue()` — but `cancelActiveLlamaCompletion()` is called
+ * directly from `app/index.tsx`'s cancel-tap handler with no surrounding
+ * try/catch of its own, so it would surface as an unhandled promise
+ * rejection warning off a user's ordinary cancel tap. Native-side
+ * `stopCompletion()` had already fired by that point (the cut-short
+ * itself was never actually broken), and `userCancelled` was already set
+ * above, so this was never a broken cancel feature in practice — but it's
+ * the same class of bug, worth closing the same way rather than leaving a
+ * second copy of it in the file.
  */
 export function cancelActiveLlamaCompletion(): void {
   if (runningCompletion && runningCompletion.priority === "interactive" && runningCompletion.context) {
     runningCompletion.job.userCancelled = true;
-    void runningCompletion.context.stopCompletion().catch(() => {});
+    safelyStopCompletion(runningCompletion.context);
   }
 }
 

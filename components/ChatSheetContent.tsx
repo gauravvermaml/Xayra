@@ -42,7 +42,10 @@ function StreamingStageLabel({ color }: { color: string }) {
   const opacity = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
-    return subscribeToPipelineStage((next) => {
+    // QA Phase 3, P2-2: this row only ever reflects the "chat" flow — a
+    // concurrent note save on the Home screen ("note" flow) can no longer
+    // overwrite this label. See pipelineStage.ts's own doc comment.
+    return subscribeToPipelineStage("chat", (next) => {
       if (next === "retrieving" || next === "answering") {
         setStage(PIPELINE_STAGE_LABELS[next]);
       }

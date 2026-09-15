@@ -166,7 +166,7 @@ export async function generateRAGAnswer(
   userQuery: string,
   onChunk?: (chunk: string) => void
 ): Promise<RagAnswer> {
-  setPipelineStage("retrieving");
+  setPipelineStage("chat", "retrieving");
   const notes = await hybridSearchNotes(userQuery, CONTEXT_NOTE_LIMIT);
 
   const citations: RagCitation[] = notes.map((note, i) => ({
@@ -194,7 +194,7 @@ export async function generateRAGAnswer(
     console.log("[RAG Prompt Context]", noteContext);
   }
 
-  setPipelineStage("answering");
+  setPipelineStage("chat", "answering");
   let firstTokenSeen = false;
   try {
     const rawText = await generateLocalRAGAnswer(userQuery, noteContext, (token) => {
@@ -203,7 +203,7 @@ export async function generateRAGAnswer(
         // The streaming answer itself takes over from here — see
         // ChatSheetContent.tsx's own `item.isStreaming && item.text.length
         // === 0` check, which this same first-token moment already governs.
-        setPipelineStage(null);
+        setPipelineStage("chat", null);
       }
       onChunk?.(token);
     });
@@ -211,6 +211,6 @@ export async function generateRAGAnswer(
   } finally {
     // Safety net for a zero-token answer or a thrown error, where the
     // onToken callback above never ran to clear this itself.
-    setPipelineStage(null);
+    setPipelineStage("chat", null);
   }
 }

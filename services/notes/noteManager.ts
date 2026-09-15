@@ -134,9 +134,9 @@ async function updateNoteStatus(
  */
 async function tryEmbedNote(id: string, text: string): Promise<boolean> {
   try {
-    setPipelineStage("understanding");
+    setPipelineStage("note", "understanding");
     const embedding = await generateEmbeddingLocal(text);
-    setPipelineStage("saving");
+    setPipelineStage("note", "saving");
     await insertEmbedding(id, embedding);
     await updateNoteStatus(id, "embedded");
     return true;
@@ -149,12 +149,12 @@ async function tryEmbedNote(id: string, text: string): Promise<boolean> {
     );
     return false;
   } finally {
-    // Always clear, success or failure — otherwise this global stage would
-    // keep reporting "saving"/"understanding" long after this call
-    // actually finished, misleading whatever screen reads it next (e.g. a
-    // later query briefly rendering a stale note-save label before its own
-    // "retrieving" stage overwrites it).
-    setPipelineStage(null);
+    // Always clear, success or failure — otherwise the note flow's stage
+    // would keep reporting "saving"/"understanding" long after this call
+    // actually finished, misleading the Home screen's recorder canvas the
+    // next time it re-renders. (QA Phase 3, P2-2: this can no longer leak
+    // into the chat flow's own label — see pipelineStage.ts's doc comment.)
+    setPipelineStage("note", null);
   }
 }
 
@@ -684,6 +684,18 @@ const RRF_K = 60;
 const MAX_NOTE_VECTOR_DISTANCE = 0.4;
 
 /**
+ * Exported for testability only (QA Phase 3, Agent 4 backlog item 8) — pulled
+ * out of `hybridSearchNotes`'s inline filter below so the boundary itself
+ * (and the two real calibration distances in the doc comment above, 0.501
+ * and 0.531) can be locked in with a plain unit test instead of needing a
+ * full mocked sqlite-vec query pipeline. No behavior change — same `<`
+ * comparison, same constant, same two call sites.
+ */
+export function isWithinRelevanceFloor(distance: number): boolean {
+  return distance < MAX_NOTE_VECTOR_DISTANCE;
+}
+
+/**
  * Whisper hallucinates this exact phrase (and close variants) on
  * silence/near-silence audio. A `pending`/`transcribed`-but-not-yet-`failed`
  * row with this content isn't useful grounding for anything and otherwise
@@ -806,14 +818,14 @@ export async function hybridSearchNotes(
       unfilteredVectorResult.rows.map((row) => ({
         id: row.id,
         distance: row.distance,
-        passed: (row.distance as number) < MAX_NOTE_VECTOR_DISTANCE,
+        passed: isWithinRelevanceFloor(row.distance as number),
       }))
     );
   }
 
   const vectorResult = {
     ...unfilteredVectorResult,
-    rows: unfilteredVectorResult.rows.filter((row) => (row.distance as number) < MAX_NOTE_VECTOR_DISTANCE),
+    rows: unfilteredVectorResult.rows.filter((row) => isWithinRelevanceFloor(row.distance as number)),
   };
 
   let ftsRows: typeof vectorResult.rows = [];

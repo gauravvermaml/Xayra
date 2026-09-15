@@ -137,3 +137,32 @@ All 11 items in `qa/07-phase2-execution-brief.md` (P1-1a/b/c, P1-4, P1-5, P2-1, 
 **Testing infrastructure note**: `@testing-library/react-native` v14 (with its `test-renderer` peer) was confirmed genuinely non-functional in this exact environment (jest-expo 57 + React 19.2.3 + RN 0.86.2) — even a minimal `renderHook(() => useState(0))` returned `{ result: undefined }`. Uninstalled after a diagnostic test confirmed the incompatibility rather than continuing to chase it; Phase 2's test coverage is renderer-free plain-function Jest tests instead (`audioInputState.test.ts`, `asrRouter-download-contention.test.ts`, `contention-gate-schedules.test.ts`), with the component-level checks (P1-1a/b/c) covered by live device verification instead of RNTL.
 
 See `qa/05-consolidated-triage.md` for the full per-item write-up.
+
+---
+
+## Status — Phase 3 EXECUTED (2026-09-16), structural cleanup + test backlog closed; Maestro E2E found not yet usable
+
+Both of Phase 3's open questions were answered by the user before execution: Maestro — go with the recommended one-flow validation approach; P3-2/P3-4/P3-5 — leave as documented/no-action, matching the original audit's own low-priority calls.
+
+**Shipped, unit-tested:**
+- **P2-2** (`pipelineStage.ts` cross-flow overwrite) — the pub/sub is now keyed by `PipelineFlow` ("note" | "chat") instead of one shared value; `app/index.tsx`'s Home canvas (which can itself run either flow, since a voice ASK routes through the same "chat" pipeline Chat's typed queries use) subscribes to both and displays whichever matches its own in-flight operation. Locked in by `__tests__/pipelineStage.test.ts`.
+- **Agent 4 test backlog items 1, 2, 6, 7, 8, 9** — all six closed with permanent regression tests (wake-word fuzzy match, non-speech-marker stripping, single-biometric-prompt, cancel-gesture no-trace-left, relevance-floor boundary, completion-queue ordering). A genuine second instance of the Build 41 `stopCompletion()` bug was found live while writing item 7's test — `cancelActiveLlamaCompletion()` had the identical `.catch()`-on-a-possibly-`undefined`-return misbehavior as `enqueue()`'s preemption path did before Build 41's fix. Fixed the same way (`safelyStopCompletion()`), immediately, as part of this same pass.
+
+**Shipped, code-reviewed only (no automated lock, flagged honestly):**
+- **P3-1** (onboarding escape-hatch timer cleanup) — the timer is now correctly cleared by the real effect cleanup instead of a discarded inner-IIFE return value. No test exists because the bug lives inside a component's `useEffect` closure and RNTL remains confirmed non-functional in this stack (Phase 2 finding, unchanged) — an honest gap, not a silently skipped one.
+
+**Accepted, no action (per the user's explicit sign-off):**
+- **P3-2, P3-4, P3-5** — all three were the original audit's own "dev-only" / "benign" / "theoretical, no realistic repro" calls, left as documented findings rather than fixed.
+
+**Investigated, found not yet usable — Agent 4 backlog item 10 (Maestro E2E):**
+Per the user's approved recommendation, validated Maestro with the minimum investment before committing further (the same discipline that caught RNTL's incompatibility in Phase 2) — installed the CLI, confirmed it runs on this Windows machine, and attempted the proposed `record-transcribe-save` flow against the connected Redmi Note 8 Pro. Found two independent, real blockers, neither a Maestro or app bug:
+1. This specific device currently refuses ALL ADB-injected input system-wide (`SecurityException: Injecting to another application requires INJECT_EVENTS permission`) — confirmed identically via both a raw `adb shell input keyevent` and Maestro's own tap mechanism. This is a known MIUI restriction gated behind a separate developer-option toggle from plain "USB debugging," fixable only by a person with the device in hand.
+2. Even with input working, the app's mandatory biometric gate (confirmed live: the app reliably reaches the "Unlock Xayra" fingerprint prompt on a proper cold launch) blocks any flow past launch on a device with biometrics enrolled — there is no ADB/Maestro mechanism to simulate a real fingerprint touch, by design.
+
+A third, narrower gap specific to the originally-proposed flow: Maestro drives UI, not the microphone, so the "speak" step has no built-in way to inject real audio into a device's mic for an unattended run.
+
+What DID work and is worth keeping regardless: the Maestro CLI installs and runs cleanly on Windows; `launchApp`/`takeScreenshot` work correctly; Maestro's screenshot capture proved more reliable than this device's known-flaky native `adb shell screencap`. Also reconfirmed `CLAUDE.md`'s documented "Metro gone stale" blank-screen failure mode live (and fixed it the documented way) while diagnosing what turned out to be a red herring before finding the real blockers above.
+
+`.maestro/record-transcribe-save.yaml` is committed as a structured starting point (its own header comments document all three gaps and mark its selectors as unverified), not a working test. Full write-up, including the concrete real next steps to unblock this, is in `qa/05-consolidated-triage.md`'s dedicated "New finding: Maestro E2E feasibility" section.
+
+**This closes out the originally-scoped 3-phase QA stabilization process.** Remaining open items going forward: the still-deferred P0-1 reentrant-mutex redesign, P1-6's narrower kill-timing variant, P2-4's raw-capture audio-focus gap, and the Maestro blockers above — none silently dropped, all tracked in `qa/05-consolidated-triage.md`.

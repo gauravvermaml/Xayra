@@ -226,8 +226,24 @@ export default function HomeScreen() {
   // `processingLabel`'s older generic text below whenever no specific stage
   // is set (e.g. the brief gap right after one stage clears and before the
   // next one starts).
-  const [pipelineStage, setPipelineStageState] = useState<PipelineStage | null>(null);
-  useEffect(() => subscribeToPipelineStage(setPipelineStageState), []);
+  //
+  // QA Phase 3, P2-2 fix: this canvas can be showing either a RECORD
+  // ("note" flow) or an ASK-by-voice ("chat" flow, since an ASK-intent
+  // utterance is routed through the same `chatSession.ask()`/`rag.ts` path
+  // Chat's own typed queries use) operation, decided by `inputMode` before
+  // `finishUtterance` even starts — so both flows are subscribed to
+  // unconditionally, and `processingLabel` (already captured at the same
+  // moment as `inputMode`, see `finishUtterance` below) picks which one is
+  // actually THIS screen's own in-flight operation. Without this split, a
+  // typed query submitted from Chat while this screen has its own voice
+  // note mid-save would have overwritten this canvas's "note" stage with
+  // Chat's unrelated "chat" stage the instant `rag.ts` set it — exactly the
+  // cross-flow overwrite `qa/05-consolidated-triage.md`'s P2-2 describes.
+  const [noteStage, setNoteStage] = useState<PipelineStage | null>(null);
+  const [chatStage, setChatStage] = useState<PipelineStage | null>(null);
+  useEffect(() => subscribeToPipelineStage("note", setNoteStage), []);
+  useEffect(() => subscribeToPipelineStage("chat", setChatStage), []);
+  const pipelineStage = processingLabel === "query" ? chatStage : noteStage;
   const [error, setError] = useState<string | null>(null);
 
   const sheetRef = useRef<BottomSheet>(null);
@@ -498,7 +514,13 @@ export default function HomeScreen() {
         // it's safe to set the label this early.
         setProcessingState("processing");
         setProcessingLabel(inputMode === "record" ? "note" : "query");
-        setPipelineStage("transcribing");
+        // QA Phase 3, P2-2: tag this write with the flow THIS utterance
+        // actually belongs to (known upfront from `inputMode`, per the
+        // comment above), not a shared untagged value — see the
+        // `noteStage`/`chatStage` split above for the read side of this
+        // fix. Re-derived (not hoisted into a shared variable) so it stays
+        // correct even across the `try`/`finally` block boundary below.
+        setPipelineStage(inputMode === "record" ? "note" : "chat", "transcribing");
         cancelRequestedRef.current = false;
         const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
         if (cancelRequestedRef.current) {
@@ -597,7 +619,11 @@ export default function HomeScreen() {
         // `finally` has already reset all three.
         setProcessingState("idle");
         setProcessingLabel(null);
-        setPipelineStage(null);
+        // Matches the flow this same utterance's "transcribing" write above
+        // used — see that comment for why this is re-derived from
+        // `inputMode` rather than shared via a variable across the
+        // try/finally boundary.
+        setPipelineStage(inputMode === "record" ? "note" : "chat", null);
       }
     },
     [routeFreeformInput, chatSession, inputMode]
