@@ -15,6 +15,20 @@ export const notes = sqliteTable("notes", {
    * transcript — null for text notes or notes transcribed by the native
    * (Tier 1) speech recognizer instead of local Whisper. */
   transcriptionModel: text("transcription_model"),
+  /** Build 41 P0 fix: unix-seconds timestamp set the moment to-do extraction
+   * starts for this note, cleared back to null the moment it finishes
+   * (success or a swallowed internal failure) — see
+   * services/notes/noteManager.ts's `scheduleToDoExtraction()`/
+   * `retryPendingExtractions()`. Extraction itself never throws past
+   * `scheduleToDoExtraction`'s own boundary, so found still non-null well
+   * past `EXTRACTION_STUCK_GRACE_SECONDS` means the process was killed
+   * mid-extraction — a dead-man's-switch mirroring
+   * services/settings/preferences.ts's `onboardingCalibrationAttemptInFlight`
+   * pattern, at the row level instead of the whole-app level. Before this,
+   * a kill during extraction (historically measured at 140+ seconds) lost
+   * every not-yet-written to-do silently and permanently, with no trace
+   * extraction was ever attempted. */
+  extractionPendingSince: integer("extraction_pending_since"),
   createdAt: integer("created_at", { mode: "timestamp" })
     .notNull()
     .default(sql`(unixepoch())`),

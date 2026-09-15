@@ -6,24 +6,27 @@ Synthesizes `qa/01-lifecycle-state-report.md`, `qa/02-audio-engine-report.md`, `
 
 ## P0 — data loss, silent corruption, or hang risk
 
-### P0-1. SQLite transaction isolation gap (the most structurally significant finding)
+### P0-1. SQLite transaction isolation gap (the most structurally significant finding) — STILL OPEN, a fix attempt was reverted live on-device 2026-09-15
 **Owner findings**: Agent 3 (mechanism), Agent 1 (which write paths are exposed).
 **What**: `op-sqlite`'s `db.transaction()` issues `BEGIN`/`COMMIT`/`ROLLBACK` via a synchronous call that bypasses the single native worker thread every other `db.execute()` call queues onto. An unrelated statement from a completely different feature (e.g. `retryPendingEmbeddings()` running on screen focus) can get invisibly swept into another feature's open transaction (e.g. `completeToDo()`'s transaction) and share its commit/rollback fate — a write that appears to succeed to its own caller can be silently rolled back by someone else's unrelated failure.
 **Why it's #1**: every other transactional write in the app (`deleteNote`, `completeToDo`, `purgeAllNotes`, `mergeMissingNotes`, `mergeMissingToDos`) inherits this exposure. It's invisible today — nothing has surfaced it as a symptom yet — which is exactly the kind of bug that produces "random," device-specific data anomalies with no clear repro, the whack-a-mole pattern this whole exercise exists to stop.
-**Fix shape (per Agent 3)**: a JS-level mutex/queue serializing every `db.transaction()` call against every `db.execute()` call on the shared connection — an in-process concurrency primitive, not a durable/resumable design.
-**Testable**: yes, against a purpose-built fake `op-sqlite` double once the fix exists (Agent 4 backlog item 2, effort L).
+**Attempted fix, reverted**: a JS-level mutex wrapping `db.execute`/`db.transaction` on the shared connection object (per Agent 3's original recommendation). Passed all unit tests against a hand-built fake database, but **deadlocked every single `createVoiceNote()` call on real hardware** (Redmi Note 8 Pro) — confirmed live, then root-caused by reading op-sqlite's own source (`lib/module/functions.js`): its `transaction()` implementation routes `tx.execute()` calls internally through the same object the wrapper also gated, so the outer `transaction()` call held the mutex while its own first `tx.execute()` call tried to re-acquire it before the outer call could ever finish — a classic self-deadlock. The unit test's fake modeled `tx.execute` as independent from `db.execute`, which is why it couldn't catch this; that's a real gap in test fidelity to worry about next time, not just bad luck.
+**Correct fix shape, not yet attempted**: needs a mutex that's reentrant for calls originating from within the SAME transaction's own callback (so `tx.execute()` calls pass through freely once their own transaction already holds the lock) while still excluding unrelated EXTERNAL `execute()`/`transaction()` calls from a different call site. A plain shared promise-chain mutex, as tried here, cannot distinguish those two cases.
+**Testable**: yes, but any future fix's test MUST use a fake database that accurately models `tx.execute()` delegating through the same underlying object `db.execute()` uses — the exact fidelity gap that let the reverted attempt pass its own tests while deadlocking in production.
 
 ### P0-2. Fire-and-forget to-do extraction — silent, permanent, untraceable loss
 **Owner finding**: Agent 1.
 **What**: `scheduleToDoExtraction()` (`services/notes/noteManager.ts:172-208`) has zero persisted "extraction pending" state anywhere in the schema and no retry pass. A kill during the (historically 140+ second) extraction step permanently loses every not-yet-written to-do, with no trace it was ever attempted and no self-heal.
 **Fix shape**: an extraction-status column on `notes` (mirroring the existing `status`/`retryPendingEmbeddings()` pattern already used for embeddings) plus a retry pass on next launch/focus.
 **Testable**: yes — a characterization test today, a positive test once fixed (Agent 4 backlog item 3, effort M/M).
+**STATUS: SHIPPED AND VERIFIED live on-device 2026-09-15** — `extraction_pending_since` column added; `scheduleToDoExtraction()`/new `retryPendingExtractions()` implemented, wired into `app/index.tsx`'s existing focus effect alongside `retryPendingEmbeddings()`. Confirmed via live logs on a real recorded note: `[ThermalGate] status=0 — proceeding with extraction` followed by clean completion, no hang.
 
 ### P0-3. `createVoiceNote` stuck-pending blank note, no self-heal
 **Owner finding**: Agent 1.
 **What**: a kill between the initial `INSERT` (`status='pending'`) and the follow-up status update leaves a permanently stuck, blank note. `retryPendingEmbeddings()` only ever queries `status='transcribed'`, never `'pending'` — no recovery path exists; the row is only removable via the destructive "Delete All Notes" action.
 **Fix shape**: either wrap the two statements in `db.transaction()` (simplest — makes the row never exist in the first place if interrupted) or extend the retry pass to also catch `'pending'` rows.
 **Testable**: yes, cleanly (Agent 4 backlog item 4, effort S).
+**STATUS: SHIPPED AND VERIFIED live on-device 2026-09-15** — wrapped in `db.transaction()` (the simpler of the two proposed shapes), using the plain, un-wrapped `db.transaction()` API directly (no relation to P0-1's reverted mutex). Confirmed via live logs on a real recorded note: `[Note] voice note saved, <id>, status=embedded`.
 
 ### P0-4. No native-heap release on backgrounding (llama.rn / whisper.rn)
 **Owner findings**: Agent 1 (gap mapping), Agent 3 (fix constraint).
@@ -32,6 +35,12 @@ Synthesizes `qa/01-lifecycle-state-report.md`, `qa/02-audio-engine-report.md`, `
 **Fix constraint (critical, from Agent 3)**: any future release-on-background fix MUST be submitted through `runExclusiveLlamaTask()`, exactly like the three existing calibration-trial callers — calling `releaseLocalLlama()` directly already caused a hang once (a warm-up completion in flight on the context being torn down) and would reproduce the same hang if triggered by backgrounding instead. Whisper has no equivalent exclusive-task queue at all; a Whisper release path needs one built, guarded by the existing `activeTranscriptionCount` signal.
 **Named recommendation**: an `AppState` listener in `app/_layout.tsx` (the one file mounted for the app process's entire lifetime), NOT scattered per-screen.
 **Testable**: only after it exists (Agent 4 backlog item 1, effort M) — the RSS-drop half stays a manual device check permanently.
+
+**STATUS: SHIPPED AND VERIFIED live on-device 2026-09-15** — `app/_layout.tsx`'s `AppState` listener + `releaseLocalLlamaOnBackground()`/`releaseWhisperContext()`, exactly as recommended above (routed through `runExclusiveLlamaTask()`, never calling `releaseLocalLlama()` directly). Confirmed with hard measured numbers on a Redmi Note 8 Pro: backgrounding the app dropped Native Heap from 1.75 GB to 0.51 GB and Total PSS from 2.84 GB to 0.78 GB (`adb shell dumpsys meminfo`, before/after).
+
+**A real, pre-existing latent bug this fix uncovered and hardened, found live**: `enqueue()`'s Build 36 preemption logic (`services/ai/localLlama.ts`) called `.catch()` directly on `context.stopCompletion()`'s return value — llama.rn's own `.d.ts` claims this always returns `Promise<void>`, but confirmed on-device it can genuinely return `undefined` at runtime (a native JSI-bridge edge case). That threw synchronously inside `enqueue()`, which — since a synchronous throw inside a `new Promise(executor)` becomes that promise's rejection — silently failed the entire `runExclusiveLlamaTask()` call. This bug existed since Build 36 but was never reachable in practice until this fix's `releaseLocalLlamaOnBackground()` — the first "interactive"-priority job that can genuinely arrive at any moment, including while a background extraction is running, which is exactly the condition that triggers this preemption path. Hardened with a `safelyStopCompletion()` helper (`Promise.resolve(...)` + try/catch); confirmed via a regression test that fails against the pre-fix code with the exact same error observed live, and passes against the fix.
+
+**Also found live, incidental to this fix's testing, not a bug**: a genuine, reproducible sub-40ms spurious `AppState` "background→active" blip on this specific device (confirmed via live logging: `background` then `active` 38ms later, with no corresponding real user action). Harmless given this fix's design (release-then-natural-reload on next use), but worth remembering as a real environmental quirk when debugging future timing-sensitive issues on this device.
 
 ---
 
@@ -48,11 +57,13 @@ Synthesizes `qa/01-lifecycle-state-report.md`, `qa/02-audio-engine-report.md`, `
 **What**: `writePreferences()` does an unguarded read-modify-write on a shared module-level cache with no mutex. Concretely demonstrated: the tier-upgrade/thread-escalation chain and the onboarding calibration call both fire off the same "ready" transition with nothing sequencing them; `recordCompletionSpeed()` (fires after every completion) can race any other writer during ordinary use.
 **Fix shape**: a mutex/queue around `writePreferences`, or a compare-and-swap against the cache.
 **Testable**: yes, deterministically, no native dependency (Agent 4 backlog item 6, effort S — the cheapest test in the whole backlog).
+**STATUS: SHIPPED, unit-tested** — a promise-chain mutex (same pattern originally tried, and safe here, for P0-1 — no reentrancy hazard exists for `preferences.ts`, unlike op-sqlite's `tx.execute` delegation). 3 passing tests including a many-concurrent-writers case and a partial-failure case.
 
 ### P1-3. `beginDownloads()` re-entrancy → duplicate downloads
 **Owner finding**: Agent 3.
 **What**: no guard prevents the Wi-Fi-resume listener and the "download over cellular" action from both invoking `beginDownloads()` concurrently, producing two Android DownloadManager transfers for the same file — one orphaned permanently.
 **Fix shape**: an `isDownloading` guard or status check at the top of `beginDownloads()`.
+**STATUS: SHIPPED, unit-tested** — a `downloadInProgress` boolean guard wrapping the real download pipeline (renamed to `beginDownloadsInner`). 2 passing tests confirming concurrent calls are deduplicated while genuinely sequential calls both still run.
 **Testable**: yes, with a mocked `download-bridge` native module (Agent 4 backlog item 7, effort M).
 
 ### P1-4. Recording has no backgrounding resilience at all
@@ -77,6 +88,7 @@ Synthesizes `qa/01-lifecycle-state-report.md`, `qa/02-audio-engine-report.md`, `
 - **P2-1.** Whisper/Llama CPU-contention gate is bounded to a fixed 6s retry, but a real transcription has measured 24.4s under contention (the gate's own justifying evidence exceeds its own cap) — Agent 2.
 - **P2-2.** `pipelineStage.ts`'s single global "what's happening" label has no owner/session identity — concurrent note-save + chat-query can show the wrong status — Agent 3.
 - **P2-3.** Handsfree `isActive`/`state` can desync after a background/foreground cycle that doesn't kill the process — reads "listening" with nothing having been captured, no resync logic — Agent 1.
+- **P2-5 (found live, 2026-09-15, during Phase 1 on-device verification on the Redmi Note 8 Pro).** Nothing coordinates a background model download (Android DownloadManager I/O) with an active Whisper transcription (native CPU inference) — two independent resource consumers with zero awareness of each other. Confirmed via real on-device logs: a transcription measured **8.9s while the Llama chat-model download was still active**, against this app's own documented ~4.3s baseline — roughly 2x degradation, not a hang/crash. This gap is *reachable* specifically because of Build 40's escape hatch ("Continue with Safe Settings") — it deliberately lets a user into the app before downloads finish, a state that essentially didn't exist as a first-facing scenario under the old "One Door, Opens Once" design. The existing Whisper/Llama CPU-contention gate (P2-1) only coordinates the two *inference* engines against each other; it has no awareness of an in-flight *download*. Explicitly not fixed as part of Phase 1 (out of scope, no code touched) — natural fit for Phase 2 given its audio/transcription-CPU adjacency, or a dedicated follow-up.
 - **P2-4.** No audio-focus/incoming-call handling for recording or Handsfree — a real call arriving mid-session is untested by the closed 5-bug wake-word chain and unhandled today — Agent 2.
 
 ## P3 — structural risk, no current symptom, or cosmetic
@@ -95,13 +107,13 @@ Pulled forward because it matters as much as the bugs: `db.transaction()` itself
 
 ---
 
-## Recommended fix sequencing (for discussion, not yet approved)
+## Recommended fix sequencing — Phase 1 executed 2026-09-15, outcome noted inline
 
-1. **P0-1 (SQLite transaction isolation) first**, despite not being the easiest — it's foundational (every transactional write depends on it) and currently invisible, meaning more code is being built on top of an unsafe primitive the longer it waits.
-2. **P0-3 and P1-2 together** (quick, independent, high-confidence fixes — a transaction wrap and a preferences mutex).
-3. **P0-2** (to-do extraction durability) — same shape as the existing embedding-retry pattern, moderate effort.
-4. **P0-4** (native-heap release), respecting Agent 3's `runExclusiveLlamaTask()` constraint — do this after P0-1 lands, since both touch how "exclusive" native/DB operations are coordinated and the two fixes should share a consistent pattern rather than be designed independently.
-5. **P1-1** (audio ownership) — high tester-visible value, independent of the above, can run in parallel.
-6. **P1-3/P1-6** (download re-entrancy) — independent, can run in parallel.
-7. **P1-4/P1-5** (recording resilience/error surfacing) — likely needs a scoping conversation first (P1-4 especially, per its own "materially larger undertaking" flag).
-8. P2/P3 items and the Agent 4 test backlog interleaved opportunistically — several P2/P3s are one-line fixes; the highest-value early tests (per Agent 4: the `preferences.ts` race test, the wake-word regression locks, the two P0 characterization tests) can be written alongside whichever fix they correspond to rather than as a separate pass.
+1. ~~**P0-1 (SQLite transaction isolation) first**~~ — **ATTEMPTED, REVERTED.** Deadlocked every `createVoiceNote()` call on real hardware; root-caused to op-sqlite's own `tx.execute()` delegating through the same object the fix's mutex also gated. Still open, needs a reentrant-mutex redesign — see P0-1's own entry above for the full writeup. This is exactly why sequencing said "first" — finding this out early, before more code built on top of it, is the point of this discipline working as intended, even when the fix itself doesn't survive contact with real hardware.
+2. **P0-3 and P1-2 together** — **SHIPPED, VERIFIED.**
+3. **P0-2** — **SHIPPED, VERIFIED.**
+4. **P0-4** — **SHIPPED, VERIFIED with hard measured numbers** (1.75GB→0.51GB native heap on backgrounding); also uncovered and fixed a real pre-existing latent bug in Build 36's preemption logic along the way (see P0-4's own entry above).
+5. **P1-1** (audio ownership) — not yet started; Phase 2 scope.
+6. **P1-3/P1-6** (download re-entrancy) — **SHIPPED** (P1-3's concurrent-caller race closed; P1-6's narrower kill-timing variant remains open, as originally scoped).
+7. **P1-4/P1-5** (recording resilience/error surfacing) — not yet started; Phase 2 scope.
+8. P2/P3 items and the remaining Agent 4 test backlog — not yet started; Phase 3 scope. Note one new P2 (P2-5, model-download-vs-transcription CPU contention) was found live during Phase 1 device testing and added to this backlog, not fixed.

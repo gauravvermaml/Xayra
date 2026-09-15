@@ -92,6 +92,18 @@ A detailed Phase 3 execution brief will be presented for review once Phase 2 is 
 
 ---
 
-## Status
+## Status — Phase 1 EXECUTED (2026-09-15), 5 of 6 items shipped and verified live; 1 reverted
 
-Phase 1 above is ready for your review. No code has been changed. Awaiting explicit go-ahead before implementing any of the six Phase 1 fixes or writing the Jest test infrastructure.
+All six Phase 1 items were implemented, unit-tested, then verified on a real device (Redmi Note 8 Pro, fresh dev-client build). **P0-1 was found to deadlock on real hardware and was reverted** — everything else is shipped, working, and confirmed with live evidence, not just passing unit tests.
+
+**Shipped and verified on-device:**
+- **P0-2** (extraction durability) — confirmed via live logs: `[ThermalGate] status=0 — proceeding with extraction` followed by a clean completion, no hang, on a real recorded note.
+- **P0-3** (`createVoiceNote` atomicity) — confirmed via live logs: `[Note] voice note saved, <id>, status=embedded` on a real recording, end to end.
+- **P0-4** (native-heap release on backgrounding) — confirmed with hard, measured numbers: backgrounding the app dropped Native Heap from **1.75 GB to 0.51 GB** and Total PSS from **2.84 GB to 0.78 GB** (`adb shell dumpsys meminfo`, before/after a real background transition). Also uncovered and fixed a genuine, pre-existing latent bug this surfaced: `enqueue()`'s Build 36 preemption logic called `.catch()` directly on `stopCompletion()`'s return value, which can be `undefined` at runtime despite its `.d.ts` claiming `Promise<void>` — confirmed live, fixed with `safelyStopCompletion()`, locked in with a regression test that fails against the old code and passes against the new.
+- **P1-2** (`preferences.ts` race) and **P1-3/P1-6** (`beginDownloads` re-entrancy) — unit-tested, included in the same verified build, no live regression observed.
+
+**Reverted: P0-1 (SQLite transaction isolation).** The original fix wrapped `db.execute`/`db.transaction` in one shared JS mutex. Confirmed via live device testing (every `createVoiceNote()` call hung indefinitely) and then root-caused by reading op-sqlite's own source: its `transaction()` implementation routes `tx.execute()` calls internally through the same object the wrapper also gated, so the outer `transaction()` call held the mutex while its own first `tx.execute()` call tried to re-acquire it — a self-deadlock. The hand-built fake database in the (now-deleted) unit test modeled `tx.execute` as independent from `db.execute`, which is why the test suite passed while the real device hung — a real gap in the test's fidelity to the actual library, not just bad luck. Reverted cleanly in `db/client.ts`; the underlying transaction-isolation gap Agent 3 originally found is real and still open, deferred for a redesign that's reentrant for calls originating from within the same transaction's own callback.
+
+**Also found live, not part of the original P0/P1 scope**: a genuine, reproducible sub-40ms spurious `AppState` "background→active" blip on this device (MIUI-specific or Android-version-specific), confirmed via live logging (`background` then `active` 38ms later). Harmless given how P0-4 was designed (release-then-natural-reload), but worth remembering as a real environmental quirk on this device.
+
+See `qa/05-consolidated-triage.md` for the full write-up including the newly found P2-5 (model-download-vs-transcription CPU contention, found live and explicitly deferred, not fixed).

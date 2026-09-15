@@ -119,10 +119,44 @@ export async function readPreferences(): Promise<Preferences> {
   return loaded;
 }
 
-export async function writePreferences(patch: Partial<Preferences>): Promise<Preferences> {
-  const current = await readPreferences();
-  const next = { ...current, ...patch };
-  cache = next;
-  await FileSystem.writeAsStringAsync(preferencesPath(), JSON.stringify(next));
-  return next;
+/**
+ * Build 41 P1 fix (qa/05-consolidated-triage.md P1-2): this used to be a
+ * bare, unguarded read-modify-write against the shared `cache` — two
+ * overlapping calls could both read the same pre-write snapshot before
+ * either committed, silently discarding whichever patch landed first (a
+ * classic lost-update race). Confirmed concretely: `modelDownloadManager.ts`'s
+ * tier-upgrade/thread-escalation chain and `OnboardingSetupScreen.tsx`'s own
+ * calibration call are both triggered off the exact same `"ready"`
+ * transition with nothing sequencing them, and `recordCompletionSpeed()`
+ * (fires after every completed RAG answer or extraction) can land at the
+ * same moment as any other writer during ordinary use.
+ *
+ * Serialized via a simple promise-chain mutex — every call now waits for
+ * every earlier call to fully SETTLE (success or failure) before its own
+ * read-modify-write begins, closing the race entirely. This is a plain
+ * JS-catchable-in-principle race (the process never stops running while it
+ * happens), not a durable/resumable design problem — a mutex is the whole
+ * fix, unlike `onboardingCalibrationAttemptInFlight`'s own dead-man's-switch
+ * design, which exists for the genuinely different problem of surviving a
+ * whole-process kill.
+ */
+let writeQueue: Promise<unknown> = Promise.resolve();
+
+export function writePreferences(patch: Partial<Preferences>): Promise<Preferences> {
+  const run = async (): Promise<Preferences> => {
+    const current = await readPreferences();
+    const next = { ...current, ...patch };
+    cache = next;
+    await FileSystem.writeAsStringAsync(preferencesPath(), JSON.stringify(next));
+    return next;
+  };
+  const result = writeQueue.then(run, run);
+  // Keep the queue alive regardless of THIS write's own outcome, so the next
+  // caller waits for this one to SETTLE (not just to succeed) before its own
+  // turn starts.
+  writeQueue = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
 }

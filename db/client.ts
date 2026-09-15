@@ -35,6 +35,28 @@ type GlobalWithDb = typeof globalThis & {
 
 const globalWithDb = globalThis as GlobalWithDb;
 
+/**
+ * Build 41 P0-1 fix — REVERTED live on-device (2026-09-15), see
+ * qa/05-consolidated-triage.md and PROJECT_STATE_HANDOFF.md for the full
+ * writeup. The original attempt wrapped `db.execute`/`db.transaction` in a
+ * single shared JS mutex to close a real transaction-isolation gap found by
+ * Agent 3 (qa/03-concurrency-report.md). Confirmed via op-sqlite's own
+ * source (`lib/module/functions.js`'s `transaction()`) that this
+ * self-deadlocks: `tx.execute()` calls INSIDE a transaction's own callback
+ * route through `enhancedDb.execute` — the SAME object this wrapper also
+ * gated — so the outer `db.transaction()` call holds the mutex while its own
+ * first `tx.execute()` call tries to re-acquire that same mutex before the
+ * outer call can ever finish. Reproduced live: every `createVoiceNote()`
+ * call hung indefinitely inside its own transaction. The hand-built fake DB
+ * used in `__tests__/db-client-serialization.test.ts` modeled `tx.execute`
+ * as an independent function, not realizing this real reentrancy — which is
+ * why the unit tests passed while the real device hung. The underlying
+ * transaction-isolation gap Agent 3 found is real and still open; a correct
+ * fix needs a mutex that's reentrant for calls originating from within the
+ * SAME transaction's own callback while still excluding unrelated external
+ * `execute()`/`transaction()` calls — deferred pending a more careful
+ * design, not attempted again in this session.
+ */
 async function openDatabase(): Promise<DatabaseHandle> {
   const encryptionKey = await getOrCreateDatabaseKey();
 
@@ -128,6 +150,19 @@ async function createCoreTables(db: DB): Promise<void> {
 
   try {
     await db.execute("ALTER TABLE notes ADD COLUMN transcription_model TEXT;");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/duplicate column/i.test(message)) {
+      throw err;
+    }
+  }
+
+  // Build 41 P0 fix: dead-man's-switch for to-do extraction — see
+  // db/schema.ts's `extractionPendingSince` doc comment and
+  // services/notes/noteManager.ts's `scheduleToDoExtraction`/
+  // `retryPendingExtractions`.
+  try {
+    await db.execute("ALTER TABLE notes ADD COLUMN extraction_pending_since INTEGER;");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (!/duplicate column/i.test(message)) {

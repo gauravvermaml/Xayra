@@ -40,6 +40,7 @@ import {
   EmptyRecordingError,
   isSilentTranscript,
   retryPendingEmbeddings,
+  retryPendingExtractions,
   SilentRecordingError,
 } from "../services/notes/noteManager";
 import { getGreetingFirstName } from "../services/sync/driveSync";
@@ -312,9 +313,16 @@ export default function HomeScreen() {
   // every note eventually being embedded regardless of whether its list is
   // ever browsed. Archive's own focus effect runs this again too (cheap,
   // harmless) so newly-restored/embedded notes show up promptly there.
+  //
+  // Build 41 P0 fix: retryPendingExtractions() is the sibling recovery pass
+  // for to-do extraction (qa/05-consolidated-triage.md P0-2) — same trigger
+  // point as the embedding catch-up above, so a note whose extraction died
+  // mid-flight (process killed) gets picked back up the next time this
+  // screen gains focus, same as an un-embedded note already does.
   useFocusEffect(
     useCallback(() => {
       void retryPendingEmbeddings();
+      void retryPendingExtractions();
     }, [])
   );
 

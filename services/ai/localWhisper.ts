@@ -181,6 +181,35 @@ export async function prewarmLocalWhisper(): Promise<void> {
   }
 }
 
+/**
+ * Build 41 P0 fix (qa/05-consolidated-triage.md P0-4): whisper.rn's own
+ * `WhisperContext` exposes a native `.release()`, but nothing in this
+ * codebase ever called it — the GGML model's native memory stayed fully
+ * resident for the app's entire backgrounded lifetime, worse than the
+ * equivalent llama.rn gap since there wasn't even an unwired function to
+ * point a fix at. No exclusive-task queue exists here the way
+ * `runExclusiveLlamaTask()` does for Llama (there's only ever been one
+ * caller needing exclusive access before now — `resetWhisperContext()`,
+ * already safe because it only ever runs right after a fresh model download
+ * completes, when no transcription can possibly be in flight) — this
+ * instead guards directly against the one real hazard, an active
+ * transcription, via the existing `activeTranscriptionCount` signal. A
+ * background-triggered release must never fire out from under a
+ * transcription actually in progress; if one is, this is a no-op and the
+ * NEXT backgrounding event (or the transcription's own natural end,
+ * followed by another background check) will catch it.
+ */
+export async function releaseWhisperContext(): Promise<void> {
+  if (isTranscriptionInProgress() || !whisperContextPromise) {
+    return;
+  }
+  const pending = whisperContextPromise;
+  whisperContextPromise = null;
+  loadedModelId = null;
+  const loaded = await pending.catch(() => null);
+  await loaded?.context.release();
+}
+
 export async function transcribeAudioLocal(fileUri: string): Promise<LocalTranscriptionResult> {
   const start = nowMs();
   activeTranscriptionCount += 1;

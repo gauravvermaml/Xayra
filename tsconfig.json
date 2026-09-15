@@ -2,6 +2,17 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true,
+    // Phase 1 QA test infrastructure (qa/06-phase-execution-roadmap.md):
+    // explicit "types" needed because bare `tsc --noEmit` under this
+    // project's moduleResolution/moduleDetection settings otherwise merges
+    // an incomplete ambient `jest` namespace (missing the `Jest` interface
+    // and the `jest` value itself) ahead of @types/jest's full one,
+    // producing "Cannot use namespace 'jest' as a value" everywhere a test
+    // file calls `jest.fn()`. "react" is included explicitly too since
+    // setting "types" at all replaces TypeScript's automatic @types/*
+    // discovery — omitting it would silently drop JSX's global augmentation
+    // for the app's own source.
+    "types": ["react", "jest"],
     // whisper.rn's "exports" map orders the "react-native" condition before
     // "types", so bundler-mode resolution (with customConditions including
     // "react-native") type-checks its raw, untranspiled src/index.ts instead

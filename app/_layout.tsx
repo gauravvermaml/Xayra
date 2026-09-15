@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { AppState, type AppStateStatus } from "react-native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
@@ -6,6 +7,8 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { AppSplashScreen } from "../components/AppSplashScreen";
 import { OnboardingSetupScreen } from "../components/OnboardingSetupScreen";
 import { ToastHost } from "../components/Toast";
+import { releaseLocalLlamaOnBackground } from "../services/ai/localLlama";
+import { releaseWhisperContext } from "../services/ai/localWhisper";
 import { initModelDownloads } from "../services/ai/modelDownloadManager";
 import { isSetupComplete } from "../services/settings/appSettings";
 
@@ -75,8 +78,42 @@ function useSetupGate(): [boolean | null, () => void] {
   return [ready, () => setReady(true)];
 }
 
+/**
+ * Build 41 P0 fix (qa/05-consolidated-triage.md P0-4): neither llama.rn's
+ * nor whisper.rn's native context was ever released when the app
+ * backgrounds — confirmed nothing anywhere called `releaseLocalLlama()`/an
+ * equivalent Whisper release in response to app lifecycle at all (a
+ * repo-wide `AppState` grep before this fix returned nothing real). A
+ * loaded model's native C++-heap footprint (up to ~3.6GB RSS for a 3B Llama
+ * context, per localLlama.ts's own doc comment) stayed fully resident for
+ * the app's entire backgrounded lifetime — a plausible contributing factor
+ * to the LMKD kill this app has already been hit by once (see
+ * services/ai/memoryGuard.ts's Build 40 doc comment). This is the one file
+ * mounted for the app process's entire lifetime regardless of which screen
+ * is showing (onboarding or the real Stack render underneath this same root
+ * component), so this is the single right place for this listener rather
+ * than duplicating it per-screen.
+ */
+function useReleaseNativeContextsOnBackground(): void {
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState: AppStateStatus) => {
+      if (nextState !== "background") {
+        return;
+      }
+      void releaseLocalLlamaOnBackground().catch((err) => {
+        console.warn("[RootLayout] Failed to release Llama context on background:", err);
+      });
+      void releaseWhisperContext().catch((err) => {
+        console.warn("[RootLayout] Failed to release Whisper context on background:", err);
+      });
+    });
+    return () => subscription.remove();
+  }, []);
+}
+
 export default function RootLayout() {
   const [setupComplete, markSetupGateComplete] = useSetupGate();
+  useReleaseNativeContextsOnBackground();
 
   return (
     // Required once anywhere above any react-native-gesture-handler consumer

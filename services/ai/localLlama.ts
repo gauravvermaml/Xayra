@@ -777,6 +777,36 @@ let runningCompletion: { job: QueuedCompletion; priority: CompletionPriority; co
  * only ones still waiting (see this whole block's own doc comment). */
 const waitingCompletions: { priority: CompletionPriority; job: QueuedJob }[] = [];
 
+/**
+ * Build 41 hardening fix, found live during Phase 1 on-device verification
+ * (qa/06-phase-execution-roadmap.md): llama.rn's own `.d.ts` types
+ * `stopCompletion()` as always returning `Promise<void>`, but confirmed
+ * on-device that it can genuinely return `undefined` at runtime instead
+ * (a native JSI-bridge edge case, not something this app's TS types can see
+ * coming) — calling `.catch()` directly on that throws synchronously
+ * ("Cannot read property 'catch' of undefined"), and since this call sits
+ * inside `enqueue()`'s own synchronous body, that throw propagated all the
+ * way out through `runExclusiveLlamaTask()`'s `new Promise(executor)` and
+ * silently failed the whole task (a synchronous throw inside a Promise
+ * executor becomes that promise's rejection). This existed since Build 36's
+ * original preemption fix but was never reachable in practice until Build
+ * 41's `releaseLocalLlamaOnBackground()` — the first "interactive"-priority
+ * job that can genuinely arrive at ANY moment, including while a background
+ * extraction is actively running, which is exactly the condition that
+ * triggers this preemption path. `Promise.resolve(...)` guarantees a real
+ * thenable regardless of what the underlying call returns; the outer
+ * try/catch additionally guards against `stopCompletion()` itself throwing
+ * synchronously rather than returning a rejected promise — either way, this
+ * call is already best-effort/fire-and-forget by design.
+ */
+function safelyStopCompletion(context: LlamaContext): void {
+  try {
+    void Promise.resolve(context.stopCompletion()).catch(() => {});
+  } catch {
+    // Swallowed — see this function's own doc comment.
+  }
+}
+
 function enqueue(priority: CompletionPriority, job: QueuedJob): void {
   if (priority === "interactive") {
     const firstBackgroundIndex = waitingCompletions.findIndex((w) => w.priority === "background");
@@ -789,7 +819,7 @@ function enqueue(priority: CompletionPriority, job: QueuedJob): void {
       // (see processCompletionQueue's "completion" branch), which is what
       // actually frees the queue for this interactive job — nothing here
       // needs to await it.
-      void runningCompletion.context.stopCompletion().catch(() => {});
+      safelyStopCompletion(runningCompletion.context);
     }
   } else {
     waitingCompletions.push({ priority, job });
@@ -1139,4 +1169,29 @@ export async function releaseLocalLlama(): Promise<void> {
   contextPromise = null;
   const context = await pending.catch(() => null);
   await context?.release();
+}
+
+/**
+ * Build 41 P0 fix (qa/05-consolidated-triage.md P0-4): the only safe way to
+ * release the shared context in response to the app backgrounding — see
+ * `runExclusiveLlamaTask()`'s own doc comment above for why calling
+ * `releaseLocalLlama()` directly already hung the app once (a warm-up
+ * completion in flight on the very context being torn down). Routes the
+ * release through the same exclusive-task queue every other release/reload
+ * sequence already uses, so by the time this runs, nothing else can possibly
+ * be mid-completion on the context.
+ *
+ * Priority is deliberately `"interactive"`, not `"background"`: if a
+ * background job (e.g. to-do extraction) is currently running, this is
+ * allowed to preempt it — the extraction is idempotent and cheap to retry
+ * later, and getting memory back promptly on backgrounding matters more
+ * than letting an unattended background job finish on schedule. If an
+ * INTERACTIVE completion (a live RAG answer someone is actually watching)
+ * is running, `enqueue()`'s own preemption logic never touches it — this
+ * task simply waits in queue for that answer to finish naturally before
+ * releasing, exactly as it should: backgrounding the app must never cut off
+ * an answer already being generated for the user.
+ */
+export function releaseLocalLlamaOnBackground(): Promise<void> {
+  return runExclusiveLlamaTask(() => releaseLocalLlama(), "interactive");
 }

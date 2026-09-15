@@ -528,7 +528,41 @@ function watchForWifiThenResume(tier: LlamaTier): void {
   });
 }
 
+/**
+ * Build 41 P1 fix (qa/05-consolidated-triage.md P1-3/P1-6): `beginDownloads()`
+ * had no re-entrancy guard at all — `watchForWifiThenResume()`'s listener
+ * and `allowCellularDownloadAndResume()` could both invoke it concurrently
+ * (e.g. a user taps "Download over Mobile Data" at the exact moment Wi-Fi
+ * also becomes available on its own), each independently calling
+ * `enqueueDownload()` for the same phase before either had seen the other's
+ * `nativeDownloadIds` write — producing two separate Android DownloadManager
+ * transfers for the same file, with the one whose id lost the
+ * `writePreferences()` race (see preferences.ts's own P1-2 fix) permanently
+ * orphaned. This guard closes the concurrent-caller race directly. It does
+ * NOT close the narrower kill-timing variant (a process kill in the gap
+ * between `enqueueDownload()` returning an id and that id actually being
+ * persisted) — that would need either a synchronous, atomic pairing of
+ * "start the native transfer" with "record that we did," or a way to query
+ * DownloadManager for an existing transfer by destination filename with no
+ * persisted id at all, neither of which this fix attempts; noted here so
+ * that gap isn't mistaken for closed.
+ */
+let downloadInProgress = false;
+
 async function beginDownloads(tier: LlamaTier): Promise<void> {
+  if (downloadInProgress) {
+    console.log("[ModelDownload] beginDownloads() called while one is already in progress — ignoring the duplicate trigger.");
+    return;
+  }
+  downloadInProgress = true;
+  try {
+    await beginDownloadsInner(tier);
+  } finally {
+    downloadInProgress = false;
+  }
+}
+
+async function beginDownloadsInner(tier: LlamaTier): Promise<void> {
   const [whisperDone, embeddingDone, llamaDone] = await Promise.all([
     isWhisperModelDownloaded(),
     isEmbeddingModelDownloaded(),

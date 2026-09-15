@@ -159,6 +159,27 @@ async function tryEmbedNote(id: string, text: string): Promise<boolean> {
 }
 
 /**
+ * Build 41 P0 fix (qa/05-consolidated-triage.md P0-2): how long
+ * `extraction_pending_since` (db/schema.ts) can sit non-null before it's
+ * treated as "the process died mid-extraction" rather than "still genuinely
+ * running" — comfortably longer than the documented worst-case extraction
+ * (140+ seconds, see localLlama.ts's own doc comments), so a normal
+ * still-in-progress extraction is never mistaken for a stuck one and
+ * double-run by `retryPendingExtractions()` below.
+ */
+const EXTRACTION_STUCK_GRACE_SECONDS = 5 * 60;
+
+async function markExtractionPending(noteId: string): Promise<void> {
+  const db = await getRawDatabase();
+  await db.execute("UPDATE notes SET extraction_pending_since = ? WHERE id = ?", [nowUnix(), noteId]);
+}
+
+async function clearExtractionPending(noteId: string): Promise<void> {
+  const db = await getRawDatabase();
+  await db.execute("UPDATE notes SET extraction_pending_since = NULL WHERE id = ?", [noteId]);
+}
+
+/**
  * Phase 2 "Your To-Dos" module: fires the local Llama extraction pass on a
  * just-saved note's text and persists whatever it finds. Deliberately never
  * awaited by its callers (createVoiceNote/createTextNote below) — extraction
@@ -166,45 +187,97 @@ async function tryEmbedNote(id: string, text: string): Promise<boolean> {
  * must finish saving and return to the UI immediately regardless of whether
  * anything actionable was found in it. Every failure (model not downloaded,
  * malformed output) is already swallowed inside extractToDosFromText itself,
- * so this only needs to guard against a single already-extracted item's own
- * DB write failing and taking the rest of the batch down with it.
+ * so the per-item try/catch below only needs to guard against a single
+ * already-extracted item's own DB write failing and taking the rest of the
+ * batch down with it.
+ *
+ * Build 41 P0 fix: marks `extraction_pending_since` before starting and
+ * clears it in a `finally` once this whole pass is done (success or a
+ * swallowed internal failure) — see `EXTRACTION_STUCK_GRACE_SECONDS`'s own
+ * doc comment above and `retryPendingExtractions()` below for what reads
+ * this marker. Before this, a process kill anywhere in this function's body
+ * (most realistically during the historically 140+ second
+ * `extractToDosFromText` call itself, or mid-batch in the per-item loop)
+ * permanently and silently lost every to-do not yet written, with no trace
+ * extraction was ever attempted on this note.
  */
 function scheduleToDoExtraction(noteId: string, text: string): void {
   void (async () => {
-    const extracted = await extractToDosFromText(text);
-    if (extracted.length === 0) {
-      return;
-    }
-
-    let added = 0;
-    for (const item of extracted) {
-      try {
-        await addToDo({
-          text: item.task,
-          actionDate: item.actionDate,
-          toDate: item.toDate,
-          notificationTime: item.notificationTime,
-          recurrence: item.recurrence,
-          recurrenceInterval: item.recurrenceInterval,
-          noteId,
-        });
-        added += 1;
-        // Logs each extracted item's actual fields, not just a count — a
-        // misclassification (most commonly a one-off task incorrectly
-        // tagged recurring) is otherwise undiagnosable after the fact, since
-        // the model's raw completion text isn't persisted anywhere and the
-        // encrypted DB can't be inspected directly outside the app.
-        console.log(
-          `[Note] Extracted to-do for note ${noteId}: "${item.task}" on ${item.actionDate}` +
-            `${item.toDate ? ` to ${item.toDate}` : ""} at ${item.notificationTime} ` +
-            `(recurrence: ${item.recurrence}, interval: ${item.recurrenceInterval})`
-        );
-      } catch (err) {
-        console.error("[Note] Failed to save an extracted to-do", noteId, item, err);
+    await markExtractionPending(noteId).catch((err) => {
+      console.error("[Note] Failed to mark extraction pending", noteId, err);
+    });
+    try {
+      const extracted = await extractToDosFromText(text);
+      if (extracted.length === 0) {
+        return;
       }
+
+      let added = 0;
+      for (const item of extracted) {
+        try {
+          await addToDo({
+            text: item.task,
+            actionDate: item.actionDate,
+            toDate: item.toDate,
+            notificationTime: item.notificationTime,
+            recurrence: item.recurrence,
+            recurrenceInterval: item.recurrenceInterval,
+            noteId,
+          });
+          added += 1;
+          // Logs each extracted item's actual fields, not just a count — a
+          // misclassification (most commonly a one-off task incorrectly
+          // tagged recurring) is otherwise undiagnosable after the fact, since
+          // the model's raw completion text isn't persisted anywhere and the
+          // encrypted DB can't be inspected directly outside the app.
+          console.log(
+            `[Note] Extracted to-do for note ${noteId}: "${item.task}" on ${item.actionDate}` +
+              `${item.toDate ? ` to ${item.toDate}` : ""} at ${item.notificationTime} ` +
+              `(recurrence: ${item.recurrence}, interval: ${item.recurrenceInterval})`
+          );
+        } catch (err) {
+          console.error("[Note] Failed to save an extracted to-do", noteId, item, err);
+        }
+      }
+      console.log(`[Note] To-do extraction complete for note ${noteId}: ${added}/${extracted.length} saved.`);
+    } finally {
+      await clearExtractionPending(noteId).catch((err) => {
+        console.error("[Note] Failed to clear extraction-pending marker", noteId, err);
+      });
     }
-    console.log(`[Note] To-do extraction complete for note ${noteId}: ${added}/${extracted.length} saved.`);
   })();
+}
+
+/**
+ * Build 41 P0 fix (qa/05-consolidated-triage.md P0-2): recovery pass for
+ * notes whose extraction died mid-flight — see `EXTRACTION_STUCK_GRACE_SECONDS`
+ * and `scheduleToDoExtraction`'s own doc comments above. Mirrors
+ * `retryPendingEmbeddings()`'s exact shape and trigger points (app focus /
+ * cold start) for the sibling gap on the extraction side. Returns how many
+ * notes were re-scheduled for extraction.
+ */
+export async function retryPendingExtractions(): Promise<number> {
+  const db = await getRawDatabase();
+  const cutoff = nowUnix() - EXTRACTION_STUCK_GRACE_SECONDS;
+  const result = await db.execute(
+    "SELECT id, content, transcript FROM notes WHERE extraction_pending_since IS NOT NULL AND extraction_pending_since < ?",
+    [cutoff]
+  );
+
+  let rescheduled = 0;
+  for (const row of result.rows) {
+    const text = ((row.content as string) || (row.transcript as string) || "").trim();
+    if (!text) {
+      // Nothing to extract from — clear the stuck marker so this row stops
+      // being picked up by every future pass.
+      await clearExtractionPending(row.id as string).catch(() => {});
+      continue;
+    }
+    console.log(`[Note] Recovering a stuck extraction for note ${row.id} (process was likely killed mid-extraction).`);
+    scheduleToDoExtraction(row.id as string, text);
+    rescheduled += 1;
+  }
+  return rescheduled;
 }
 
 async function insertEmbedding(noteId: string, embedding: number[]): Promise<void> {
@@ -252,46 +325,63 @@ export async function createVoiceNote(
     throw new EmptyRecordingError();
   }
 
+  // Build 41 P0 fix (qa/05-consolidated-triage.md P0-3): checked BEFORE any
+  // row is ever created, not after — there is no reason to persist so much
+  // as a placeholder for a note already known to be silent. Also means the
+  // `'failed'`-marking dance the old catch block did for this exact case is
+  // no longer needed (a `'failed'` row was never shown to the user anyway —
+  // `listNotes()` filters it out — so this is a simplification, not a loss).
+  if (isSilentTranscript(transcript)) {
+    throw new SilentRecordingError();
+  }
+
   const id = Crypto.randomUUID();
   const createdAt = nowUnix();
-  const db = await getRawDatabase();
-
-  // `audio_uri` is NULL from the very first (`pending`) row onward — see
-  // this function's own doc comment above. The file itself is still on disk
-  // at this exact moment (the caller deletes it only after this function
-  // returns), but nothing in this row ever points at it.
-  await db.execute(
-    "INSERT INTO notes (id, content, audio_uri, transcript, status, created_at) VALUES (?, ?, NULL, ?, ?, ?)",
-    [id, "", null, "pending", createdAt]
-  );
 
   try {
-    if (isSilentTranscript(transcript)) {
-      throw new SilentRecordingError();
-    }
-    await updateNoteStatus(id, "transcribed", { content: transcript, transcript, transcriptionModel });
-    scheduleToDoExtraction(id, transcript);
-
-    const embedded = await tryEmbedNote(id, transcript);
-
-    console.log("[Note] voice note saved", id, embedded ? "status=embedded" : "status=transcribed (offline)");
-    return {
-      id,
-      content: transcript,
-      audioUri: null,
-      transcript,
-      status: embedded ? "embedded" : "transcribed",
-      transcriptionModel,
-      createdAt,
-    };
+    // Build 41 P0 fix: the initial `pending` insert and the follow-up
+    // `transcribed` update used to be two separate, un-transacted
+    // statements — a kill between them left a permanently stuck, blank
+    // `pending` row with no retry path at all (`retryPendingEmbeddings()`
+    // only ever looks at `transcribed` rows, and there was nothing else to
+    // recover from — the actual transcript text lived only in this
+    // function's local variable, never persisted, so a "pending" row
+    // couldn't be finished by any later pass regardless). Wrapped in one
+    // transaction: if interrupted anywhere in this window, the row simply
+    // never exists at all, rather than existing half-written and
+    // unrecoverable. `audio_uri` is NULL from the very first row onward —
+    // see this function's own doc comment above; the file itself is still
+    // on disk at this exact moment (the caller deletes it only after this
+    // function returns), but nothing in this row ever points at it.
+    const db = await getRawDatabase();
+    await db.transaction(async (tx) => {
+      await tx.execute(
+        "INSERT INTO notes (id, content, audio_uri, transcript, status, created_at) VALUES (?, ?, NULL, ?, ?, ?)",
+        [id, "", null, "pending", createdAt]
+      );
+      await tx.execute(
+        "UPDATE notes SET status = ?, updated_at = ?, content = ?, transcript = ?, transcription_model = ? WHERE id = ?",
+        ["transcribed", nowUnix(), transcript, transcript, transcriptionModel, id]
+      );
+    });
   } catch (err) {
-    // Only reaches here for genuine failures (silent recording, DB errors) —
-    // embedding failures are handled inside tryEmbedNote and never surface
-    // as a failed note.
-    console.error("[Note] voice note failed", id, err);
-    await updateNoteStatus(id, "failed").catch(() => {});
+    console.error("[Note] voice note failed to save", id, err);
     throw err;
   }
+
+  scheduleToDoExtraction(id, transcript);
+  const embedded = await tryEmbedNote(id, transcript);
+
+  console.log("[Note] voice note saved", id, embedded ? "status=embedded" : "status=transcribed (offline)");
+  return {
+    id,
+    content: transcript,
+    audioUri: null,
+    transcript,
+    status: embedded ? "embedded" : "transcribed",
+    transcriptionModel,
+    createdAt,
+  };
 }
 
 /** Embeds a plain-text note and persists it. */
