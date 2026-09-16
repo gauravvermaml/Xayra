@@ -26,7 +26,11 @@ Added:
 
 **Important gap, not yet resolved**: `modelDownloadManager.ts`'s automatic onboarding download still only ever fetches Llama 1B/3B — a **fresh Play Store install on the Pixel 9 will not get Qwen automatically**. Testing Qwen there needs either (a) the same manual `adb push` + `run-as cp` workflow used on the Redmi (needs the Pixel 9 connected to this machine), or (b) a deliberate decision to wire Qwen into the auto-download tier logic, replacing or joining Llama as a real default — not done, since that's a bigger product decision than "let me try it," not made unilaterally here.
 
-**Not yet done**: quality/nuance comparison against Llama 3.2 3B on real notes (the whole point of the trial) — needs actual usage on-device to judge, not something verifiable from here; a decision on whether to keep Qwen, revert to Llama, or wire it into the real download pipeline; the Redmi retrieval-speed question above, if the user wants it investigated.
+**Old Llama 1B deleted from the Redmi** per the user's explicit request, confirmed via a fresh `ls` that only `Qwen2.5-3B-Instruct-Q4_K_M.gguf` remains as the local Llama-family model on that device now.
+
+**Production build cut 2026-09-16**: `eas build --platform android --profile production` — version `1.0.35`, versionCode `42` (EAS's `autoIncrement` bumped it from 41→42 during the build; synced back into `app.json`). Bundled together with Build 45's fixes into one release. Build log: `https://expo.dev/accounts/gauravsinghverma/projects/silent-confidant/builds/a701b5e6-e038-4c04-b782-767a12ff50af`. Artifact (`.aab`): `https://expo.dev/artifacts/eas/i2C2fSGYNGC0sfODVpOZj2-m42hVY_bsEHud08-ohw4.aab`. **Not yet submitted to Play Console** — manual upload needed, same as every prior release. The user intends to test this on the Pixel 9 via the Play Store tester link (uninstall the old version, install this one) — **important caveat for that test**: `modelDownloadManager.ts`'s automatic onboarding download still only ever fetches Llama 1B/3B, so a fresh install on the Pixel 9 will get Llama, not Qwen, unless Qwen is also manually pushed there (same `adb push`/`run-as cp` workflow used on the Redmi, needing that device connected to a machine) — Build 46's fixes/doctor cleanup will all be present regardless, but the Qwen comparison specifically needs that extra manual step.
+
+**Not yet done**: quality/nuance comparison against Llama 3.2 3B on real notes (the whole point of the trial) — needs actual usage on-device to judge, not something verifiable from here; a decision on whether to keep Qwen, revert to Llama, or wire it into the real download pipeline; the Redmi retrieval-speed question above, if the user wants it investigated; manually pushing Qwen to the Pixel 9 if the user wants to compare it there too.
 
 ## Build 45 — Expo Doctor Fixes & a Third `stopCompletion()` Bug
 
@@ -44,7 +48,7 @@ Verified: `npx tsc --noEmit` clean, `npx jest` (46 tests) all passing, `npx expo
 
 **A third instance of the Build 41/43 `stopCompletion()` bug, found live.** Investigating the Pixel 9 screenshot, grepped every remaining `stopCompletion().catch(` call site in `localLlama.ts` and found a third one nobody had caught: `attemptOptimisticThreadCalibration()`'s timeout-cutoff path (the onboarding thread-calibration trial) — same misbehavior (llama.rn's `stopCompletion()` can genuinely return `undefined` at runtime despite its `.d.ts` claiming `Promise<void>`), same fix (`safelyStopCompletion()`). This one runs only during onboarding, not the general chat path, so it's very unlikely to be the actual cause of the Pixel 9 screenshot (most likely the already-fixed Build 41 `enqueue()` instance) — fixed anyway, since it's real and reachable regardless. Worth re-checking for a fourth instance if this pattern is ever touched again; it has now recurred three times independently.
 
-**Not yet done**: a new production EAS build carrying Build 45's fixes (bundled with Build 46's Qwen work into the same next build).
+**Production build cut 2026-09-16**: version 1.0.35, versionCode 42, bundled together with Build 46's Qwen work — see Build 46's own entry above for the build log/artifact links and Play Console status.
 
 ## Build 44 — Live Bug Fixes: Drive Backup Data-Loss Guard, Handsfree Persisting Across Navigation
 
