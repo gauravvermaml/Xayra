@@ -170,6 +170,24 @@ export async function getPendingToDos(): Promise<ToDo[]> {
   return result.rows.map(rowToToDo);
 }
 
+/** Every to-do regardless of completion status — unlike `getPendingToDos()`,
+ * which is scoped to what "Your To-Dos" shows. Added for `driveSync.ts`'s
+ * delta backup (2026-09-16): a completed to-do is still real data a backup
+ * must not silently drop. */
+export async function listAllToDos(): Promise<ToDo[]> {
+  const db = await getRawDatabase();
+
+  const result = await db.execute(
+    `
+      SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id
+      FROM todos
+      ORDER BY created_at ASC
+    `
+  );
+
+  return result.rows.map(rowToToDo);
+}
+
 /** Cheap count-only query for a badge/pill UI that just needs "how many" —
  * avoids pulling every pending row's full text over the bridge just to
  * measure `.length`. */

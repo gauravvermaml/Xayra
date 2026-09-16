@@ -17,7 +17,6 @@ import { colors, radius, spacing, typography } from "../constants/theme";
 import { listNotes, purgeAllNotes } from "../services/notes/noteManager";
 import {
   backupToDrive,
-  BackupWouldReplaceExistingBackupError,
   getAutoSyncOnWifi,
   getSyncStatus,
   restoreFromDrive,
@@ -104,63 +103,28 @@ export default function SettingsScreen() {
     }
   }, [refreshStatus]);
 
-  // Live data-loss report, fixed 2026-09-16 (see
-  // BackupWouldReplaceExistingBackupError's own doc comment in
-  // driveSync.ts): a fresh/reinstalled app has 0 local notes by
-  // definition, and backupToDrive() used to overwrite a real remote backup
-  // with that emptiness completely silently. It now throws this specific
-  // error instead of uploading — surfaced here as an explicit, scary,
-  // named confirmation rather than folded into the generic failure alert
-  // below, since "proceed anyway" is a real, permanent-data-loss choice
-  // that deserves its own dialog, not a checkbox buried in an error toast.
-  const confirmReplaceExistingBackup = useCallback(
-    (err: BackupWouldReplaceExistingBackupError) => {
-      Alert.alert(
-        "This Device Has No Notes",
-        `A backup from ${formatTimestamp(err.remoteBackup.modifiedTime)} already exists in this account's Google Drive. Backing up now would permanently erase it and replace it with nothing — this cannot be undone.\n\nIf you're trying to bring your existing notes onto this device, tap "Restore / Sync Notes" instead.`,
-        [
-          { text: "Cancel", style: "cancel" },
-          {
-            text: "Replace Backup Anyway",
-            style: "destructive",
-            onPress: () => {
-              setBusyAction("backup");
-              void backupToDrive({ force: true })
-                .then(async () => {
-                  await refreshStatus();
-                  Alert.alert("Backup Complete", "Your notes vault has been backed up to Google Drive.");
-                })
-                .catch((forceErr) => {
-                  Alert.alert(
-                    "Backup Failed",
-                    forceErr instanceof Error ? forceErr.message : "Failed to back up to Google Drive."
-                  );
-                })
-                .finally(() => setBusyAction(null));
-            },
-          },
-        ]
-      );
-    },
-    [refreshStatus]
-  );
-
+  // Live data-loss report, fixed 2026-09-16 (see backupToDrive()'s own doc
+  // comment in driveSync.ts): this used to VACUUM INTO the local database
+  // and overwrite Drive with it wholesale, so a freshly-reinstalled app
+  // with 0 local notes silently replaced a real backup with nothing.
+  // backupToDrive() is now a true delta backup — it merges local notes/
+  // to-dos INTO whatever's already in Drive rather than replacing it, so
+  // there's no longer a destructive case here to warn about at all: 0
+  // local notes now structurally can't remove anything already backed up,
+  // it just adds nothing. `message` reports exactly what got added (or
+  // that nothing needed to).
   const handleBackupNow = useCallback(async () => {
     setBusyAction("backup");
     try {
-      await backupToDrive();
+      const { message } = await backupToDrive();
       await refreshStatus();
-      Alert.alert("Backup Complete", "Your notes vault has been backed up to Google Drive.");
+      Alert.alert("Backup Complete", message);
     } catch (err) {
-      if (err instanceof BackupWouldReplaceExistingBackupError) {
-        confirmReplaceExistingBackup(err);
-        return;
-      }
       Alert.alert("Backup Failed", err instanceof Error ? err.message : "Failed to back up to Google Drive.");
     } finally {
       setBusyAction(null);
     }
-  }, [refreshStatus, confirmReplaceExistingBackup]);
+  }, [refreshStatus]);
 
   // Delta/merge restore (see driveSync.ts's restoreFromDrive): safe to tap
   // repeatedly and safe even with local notes already on the device — it

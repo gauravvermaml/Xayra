@@ -13,7 +13,7 @@ import { Platform } from "react-native";
 import { getRawDatabase } from "../../db/client";
 import { getOrCreateDatabaseKey } from "../crypto/keyManager";
 import { listNotes, mergeMissingNotes, type CloudNoteRecord } from "../notes/noteManager";
-import { mergeMissingToDos, type CloudToDoRecord } from "../todos/todoManager";
+import { listAllToDos, mergeMissingToDos, type CloudToDoRecord } from "../todos/todoManager";
 import type { Recurrence } from "../../db/schema";
 
 /**
@@ -70,35 +70,23 @@ export class NoBackupFoundError extends DriveSyncError {
 }
 
 /**
- * Found from a live user report (2026-09-16): a user uninstalled the dev
- * build on their Pixel 9, installed the Play Store tester build (a fresh
- * app identity — its local encrypted database starts genuinely empty,
- * unrelated to anything the dev build had), then reached for the wrong one
- * of the two Cloud Backup buttons. `backupToDrive()` had ZERO awareness of
- * what was already in Drive — it unconditionally `VACUUM INTO`s whatever is
- * in the LOCAL database right now and overwrites the remote file with it,
- * no matter how empty that local database is or how much real data the
- * remote backup already held. Tapping "Back Up Now" with 0 local notes
- * permanently replaced a real, populated backup with an empty one — by the
- * time "Restore / Sync Notes" was tapped afterward, there was nothing left
- * in Drive to restore. `getSyncStatus()`'s own "last backup" reading comes
- * from LOCAL `AsyncStorage` (also wiped by the uninstall), so the UI had no
- * way to warn "a backup already exists" from local state alone — only a
- * live Drive read (`getBackupMetadata()`) can see it, which nothing
- * previously checked before an upload. Thrown by `backupToDrive()` before
- * ever touching Drive; see `settings.tsx`'s `handleBackupNow` for how this
- * is surfaced with an explicit confirm-to-override choice.
+ * Live data-loss incident, fixed 2026-09-16, superseded by a proper delta
+ * backup design (see `backupToDrive()`'s own doc comment) rather than left
+ * as a warn-before-overwrite guard: a user uninstalled the dev build on
+ * their Pixel 9, installed the Play Store tester build (a fresh app
+ * identity — its local encrypted database starts genuinely empty), then
+ * backed up. `backupToDrive()` used to unconditionally `VACUUM INTO`
+ * whatever was in the LOCAL database and overwrite the remote file with it
+ * wholesale, no matter how empty the local database was or how much real
+ * data the remote backup already held — so backing up with 0 local notes
+ * permanently replaced a real, populated backup with an empty one. An
+ * earlier version of this fix added a confirm-before-overwrite dialog; per
+ * explicit user direction, that was replaced with the fix below instead,
+ * which makes the destructive case structurally impossible rather than
+ * just confirmed: backup is now additive-only, so 0 local notes can never
+ * remove anything already in Drive, regardless of whether anyone confirms
+ * it or not.
  */
-export class BackupWouldReplaceExistingBackupError extends DriveSyncError {
-  constructor(public readonly remoteBackup: BackupMetadata) {
-    super(
-      "This device currently has no notes, but a backup already exists in this account's Google " +
-        "Drive. Backing up now would permanently replace it with nothing — this cannot be undone. " +
-        'If you meant to bring your existing notes onto this device, use "Restore / Sync Notes" instead.'
-    );
-    this.name = "BackupWouldReplaceExistingBackupError";
-  }
-}
 
 let configured = false;
 
@@ -474,14 +462,157 @@ async function deleteIfExists(uri: string): Promise<void> {
   await FileSystem.deleteAsync(uri, { idempotent: true });
 }
 
+function toCloudNoteRecord(note: { id: string; content: string; transcript: string | null; transcriptionModel: string | null; createdAt: number }): CloudNoteRecord {
+  return {
+    id: note.id,
+    content: note.content,
+    transcript: note.transcript,
+    transcriptionModel: note.transcriptionModel,
+    createdAt: note.createdAt,
+  };
+}
+
+function toCloudToDoRecord(todo: {
+  id: string;
+  text: string;
+  actionDate: string;
+  toDate: string | null;
+  notificationTime: string;
+  isCompleted: boolean;
+  recurrence: Recurrence;
+  recurrenceInterval: number;
+  createdAt: string;
+  noteId: string | null;
+}): CloudToDoRecord {
+  return {
+    id: todo.id,
+    text: todo.text,
+    actionDate: todo.actionDate,
+    toDate: todo.toDate,
+    notificationTime: todo.notificationTime,
+    isCompleted: todo.isCompleted,
+    recurrence: todo.recurrence,
+    recurrenceInterval: todo.recurrenceInterval,
+    createdAt: todo.createdAt,
+    noteId: todo.noteId,
+  };
+}
+
+/**
+ * Inserts whichever of `notes` aren't already present (by id) into
+ * `targetDb`'s own `notes` table — the exact mirror-image of
+ * `noteManager.ts`'s `mergeMissingNotes` (cloud → local), used here for the
+ * local → cloud direction instead. Deliberately NOT reusing
+ * `mergeMissingNotes` itself: that function is tied to the app's own LIVE
+ * local database (`getRawDatabase()`) and has a real side effect (kicking
+ * off embedding generation) that must never run against a downloaded,
+ * about-to-be-re-uploaded backup copy — this only ever INSERTs rows, never
+ * anything else, so the merged file can only ever be a superset of what
+ * `targetDb` already had.
+ */
+async function insertMissingNoteRows(targetDb: DB, notes: CloudNoteRecord[]): Promise<number> {
+  const existingIdsResult = await targetDb.execute("SELECT id FROM notes");
+  const existingIds = new Set(existingIdsResult.rows.map((row) => row.id as string));
+  const missing = notes.filter((note) => !existingIds.has(note.id));
+  if (missing.length === 0) {
+    return 0;
+  }
+  const insertedAt = Math.floor(Date.now() / 1000);
+  await targetDb.transaction(async (tx) => {
+    for (const note of missing) {
+      await tx.execute(
+        `INSERT OR IGNORE INTO notes (id, content, audio_uri, transcript, status, transcription_model, created_at, updated_at)
+         VALUES (?, ?, NULL, ?, 'transcribed', ?, ?, ?)`,
+        [note.id, note.content, note.transcript, note.transcriptionModel, note.createdAt, insertedAt]
+      );
+    }
+  });
+  return missing.length;
+}
+
+/** Mirror-image of `insertMissingNoteRows`, for the `todos` table — same
+ * INSERT shape `todoManager.ts`'s `mergeMissingToDos` uses, deliberately not
+ * reused for the same reason (that function's local-notification
+ * side effect must never fire against a backup copy). */
+async function insertMissingToDoRows(targetDb: DB, todos: CloudToDoRecord[]): Promise<number> {
+  const existingIdsResult = await targetDb.execute("SELECT id FROM todos");
+  const existingIds = new Set(existingIdsResult.rows.map((row) => row.id as string));
+  const missing = todos.filter((todo) => !existingIds.has(todo.id));
+  if (missing.length === 0) {
+    return 0;
+  }
+  await targetDb.transaction(async (tx) => {
+    for (const todo of missing) {
+      await tx.execute(
+        `INSERT OR IGNORE INTO todos
+           (id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          todo.id,
+          todo.text,
+          todo.actionDate,
+          todo.toDate,
+          todo.notificationTime,
+          todo.isCompleted ? 1 : 0,
+          todo.recurrence,
+          todo.recurrenceInterval,
+          todo.createdAt,
+          todo.noteId,
+        ]
+      );
+    }
+  });
+  return missing.length;
+}
+
+function formatBackupMessage(addedNoteCount: number, addedToDoCount: number): string {
+  const parts: string[] = [];
+  if (addedNoteCount > 0) {
+    parts.push(`${addedNoteCount} note${addedNoteCount === 1 ? "" : "s"}`);
+  }
+  if (addedToDoCount > 0) {
+    parts.push(`${addedToDoCount} to-do${addedToDoCount === 1 ? "" : "s"}`);
+  }
+  return parts.length === 0 ? "Everything is already backed up!" : `Added ${parts.join(" and ")} to your Drive backup.`;
+}
+
+export type BackupResult = {
+  sizeBytes: number;
+  addedNoteCount: number;
+  addedToDoCount: number;
+  /** Ready-to-display summary, e.g. for an Alert — see app/settings.tsx. */
+  message: string;
+};
+
 /**
  * Backs up the notes database to the signed-in Google account's private
- * appData folder. Two files are written: `remi_backup.db` (a consistent
- * SQLCipher-encrypted snapshot, taken via `VACUUM INTO` rather than copying
- * the live file — the live file can be mid-write, `VACUUM INTO` guarantees a
- * clean point-in-time copy) and `remi_backup.key` (the raw database
- * encryption key, needed on restore since SQLCipher can't be opened without
- * the exact key it was written with).
+ * appData folder — a true DELTA backup, not a wholesale overwrite.
+ *
+ * Live data-loss incident, fixed 2026-09-16 (superseding an earlier
+ * warn-before-overwrite version of this fix, per explicit user direction):
+ * this used to `VACUUM INTO` the LOCAL database and upload it directly,
+ * overwriting whatever was already in Drive — so a freshly-reinstalled
+ * app with 0 local notes silently replaced a real, populated backup with
+ * an empty one. Now: if a remote backup already exists, this downloads it,
+ * inserts whichever local notes/to-dos aren't already in it (by id — the
+ * same merge logic `restoreFromDrive()` already uses in the opposite
+ * direction), and re-uploads that merged result. The merge step is
+ * INSERT-only — it can only ever add rows to the downloaded copy, never
+ * remove or overwrite any — so 0 local notes now structurally CANNOT lose
+ * anything already in Drive; it just adds nothing. Two local notes against
+ * 15 already in Drive correctly becomes 17, not 2. Only when NO remote
+ * backup exists yet (a genuinely fresh account) does this upload a plain
+ * local snapshot directly, since there's nothing to merge with.
+ *
+ * Two files live in the hidden appData folder either way: `remi_backup.db`
+ * (the SQLCipher-encrypted snapshot — `VACUUM INTO` rather than copying the
+ * live file, since the live file can be mid-write and `VACUUM INTO`
+ * guarantees a clean point-in-time copy) and `remi_backup.key` (the raw
+ * database encryption key, needed on restore since SQLCipher can't be
+ * opened without the exact key it was written with). The merge path never
+ * needs to re-upload the key: it opens and writes to the downloaded backup
+ * using the key IT was already encrypted with, so that file stays valid
+ * under the same key throughout.
  *
  * Security tradeoff, stated plainly: normally this app's database key never
  * leaves the device's hardware-backed keystore (see keyManager.ts). Backing
@@ -492,35 +623,106 @@ async function deleteIfExists(uri: string): Promise<void> {
  * without shipping the key alongside the data, a restore on a new device
  * (whose keystore would mint an unrelated fresh key) could never decrypt
  * the restored file, defeating the point of a backup.
- *
- * Throws `BackupWouldReplaceExistingBackupError` (see its own doc comment
- * for the live incident this closes) instead of uploading, if the LOCAL
- * vault is empty AND a remote backup already exists — pass
- * `{ force: true }` to proceed anyway once a caller has explicitly
- * confirmed that with the user.
  */
-export async function backupToDrive(options?: { force?: boolean }): Promise<BackupRecord> {
+export async function backupToDrive(): Promise<BackupResult> {
   const accessToken = await requireAccessToken();
 
-  // Safety net, added 2026-09-16 after a live data-loss report — see
-  // BackupWouldReplaceExistingBackupError's own doc comment for the full
-  // incident. An empty local vault is the ONE local-note-count value that
-  // can never legitimately justify overwriting a real remote backup: either
-  // this is a genuinely fresh account (no remote backup exists either, and
-  // this check is a no-op), or a remote backup DOES exist and the far more
-  // likely explanation is a fresh/reinstalled app rather than the user
-  // having actually deleted every note on purpose. `options?.force` is the
-  // explicit, confirmed-by-the-user override for the rare real case.
-  if (!options?.force) {
-    const localNotes = await listNotes();
-    if (localNotes.length === 0) {
-      const remoteBackup = await getBackupMetadata();
-      if (remoteBackup) {
-        throw new BackupWouldReplaceExistingBackupError(remoteBackup);
-      }
-    }
-  }
+  const [dbFile, keyFile] = await Promise.all([
+    findAppDataFile(accessToken, BACKUP_DB_FILENAME),
+    findAppDataFile(accessToken, BACKUP_KEY_FILENAME),
+  ]);
 
+  if (dbFile && keyFile) {
+    return mergeLocalIntoExistingRemoteBackup(accessToken, dbFile.id, keyFile.id);
+  }
+  return uploadFreshLocalSnapshot(accessToken);
+}
+
+/** The merge path — see `backupToDrive()`'s own doc comment for the full
+ * design and why this is what actually fixes the live data-loss incident. */
+async function mergeLocalIntoExistingRemoteBackup(
+  accessToken: string,
+  dbFileId: string,
+  keyFileId: string
+): Promise<BackupResult> {
+  const mergeId = Crypto.randomUUID();
+  const downloadedDbFilename = `remi-backup-merge-download-${mergeId}.sqlite`;
+  const downloadedDbUri = `${FileSystem.cacheDirectory}${downloadedDbFilename}`;
+  const downloadedKeyUri = `${FileSystem.cacheDirectory}remi-backup-merge-key-${mergeId}.txt`;
+  const mergedSnapshotUri = `${FileSystem.cacheDirectory}remi-backup-merged-snapshot-${mergeId}.sqlite`;
+
+  let mergeDb: DB | null = null;
+  try {
+    await Promise.all([
+      downloadFileContent(accessToken, dbFileId, downloadedDbUri),
+      downloadFileContent(accessToken, keyFileId, downloadedKeyUri),
+    ]);
+    const remoteKey = (await FileSystem.readAsStringAsync(downloadedKeyUri)).trim();
+    if (!remoteKey) {
+      throw new DriveSyncError("Downloaded backup key was empty.");
+    }
+
+    // Writable (unlike restoreFromDrive's read-only open) — this connection
+    // exists specifically to ADD rows to it.
+    mergeDb = open({
+      name: downloadedDbFilename,
+      location: toBarePath(FileSystem.cacheDirectory ?? ""),
+      encryptionKey: remoteKey,
+    });
+
+    const [localNotes, localToDos] = await Promise.all([listNotes(), listAllToDos()]);
+    const addedNoteCount = await insertMissingNoteRows(mergeDb, localNotes.map(toCloudNoteRecord));
+    const addedToDoCount = await insertMissingToDoRows(mergeDb, localToDos.map(toCloudToDoRecord));
+
+    // VACUUM INTO again here, exactly like the fresh-snapshot path below —
+    // guarantees every just-inserted row is flushed into one clean file
+    // (not left sitting in a WAL side-car) before its bytes are read for
+    // upload, rather than relying on close()'s own checkpoint behavior.
+    await deleteIfExists(mergedSnapshotUri);
+    await mergeDb.execute("VACUUM INTO ?", [toBarePath(mergedSnapshotUri)]);
+    mergeDb.close();
+    mergeDb = null;
+
+    const snapshotInfo = await FileSystem.getInfoAsync(mergedSnapshotUri);
+    if (!snapshotInfo.exists) {
+      throw new DriveSyncError("Failed to create a merged database snapshot to back up.");
+    }
+
+    await uploadFileContent(accessToken, dbFileId, mergedSnapshotUri);
+    // remi_backup.key is deliberately NOT re-uploaded — the merged file is
+    // still encrypted under the exact key it was downloaded and opened
+    // with, so the existing remote key file is already correct.
+
+    const record: BackupRecord = {
+      time: new Date().toISOString(),
+      sizeBytes: snapshotInfo.exists ? snapshotInfo.size : 0,
+    };
+    await writeLastBackupRecord(record);
+    return {
+      sizeBytes: record.sizeBytes,
+      addedNoteCount,
+      addedToDoCount,
+      message: formatBackupMessage(addedNoteCount, addedToDoCount),
+    };
+  } finally {
+    mergeDb?.close();
+    await deleteIfExists(downloadedDbUri);
+    // SQLCipher/SQLite side-car files the write connection may have left
+    // behind — same cleanup restoreFromDrive's own read-only connection
+    // goes through.
+    await deleteIfExists(`${downloadedDbUri}-wal`);
+    await deleteIfExists(`${downloadedDbUri}-shm`);
+    await deleteIfExists(`${downloadedDbUri}-journal`);
+    await deleteIfExists(downloadedKeyUri);
+    await deleteIfExists(mergedSnapshotUri);
+  }
+}
+
+/** No remote backup exists yet — nothing to merge with, so this uploads a
+ * plain local snapshot directly (the original, pre-2026-09-16 behavior,
+ * kept only for this one genuinely-safe case: an account with no existing
+ * backup has nothing a fresh upload could possibly overwrite). */
+async function uploadFreshLocalSnapshot(accessToken: string): Promise<BackupResult> {
   const snapshotUri = `${FileSystem.cacheDirectory}remi-backup-snapshot.sqlite`;
   const keyFileUri = `${FileSystem.cacheDirectory}remi-backup-key.txt`;
 
@@ -549,7 +751,13 @@ export async function backupToDrive(options?: { force?: boolean }): Promise<Back
       sizeBytes: snapshotInfo.exists ? snapshotInfo.size : 0,
     };
     await writeLastBackupRecord(record);
-    return record;
+    const [localNotes, localToDos] = await Promise.all([listNotes(), listAllToDos()]);
+    return {
+      sizeBytes: record.sizeBytes,
+      addedNoteCount: localNotes.length,
+      addedToDoCount: localToDos.length,
+      message: formatBackupMessage(localNotes.length, localToDos.length),
+    };
   } finally {
     // The key file in particular must not linger on disk unencrypted any
     // longer than it takes to upload it.
