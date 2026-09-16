@@ -24,7 +24,11 @@
 
 `npx tsc --noEmit` clean; `npx jest` — 15 suites, 46 tests, all passing (3 new tests for the delta backup redesign). No native code touched — both fixes are pure JS/TS logic, so no `prebuild`/native rebuild is required, but **both bugs were experienced on the Pixel 9's production Play Store build (versionCode 39, later superseded by the versionCode 40 production build cut earlier this session before these fixes existed)** — a further production build carrying Build 44's fixes is needed before real users stop hitting either bug.
 
-**Not yet done**: a decision from the user on whether to build a Drive-revision-based recovery tool for the specific notes lost in this incident; a new production EAS build carrying Build 44's two fixes (the versionCode 40 build cut earlier this session predates them).
+**Data recovery for the notes lost in the original incident**: the user explicitly said to drop this — "ignore what's already lost." Not built, not pursued further.
+
+**Production build cut 2026-09-16**: `eas build --platform android --profile production` — version `1.0.34`, versionCode `41` (EAS's `autoIncrement` bumped it from 40→41 during the build; synced back into `app.json`). Carries both Build 44 fixes (the Drive delta-backup redesign, Handsfree persisting across navigation) into a real production artifact for the first time. Build log: `https://expo.dev/accounts/gauravsinghverma/projects/silent-confidant/builds/57d5001a-8443-4d66-9df1-4a5b06384acb`. Artifact (`.aab`): `https://expo.dev/artifacts/eas/VhfPe5zUG9JTLkKHwwUby-Q3g1JyvzGatgOYAN498w0.aab`. **Not yet submitted to Play Console** — this project has no `eas submit` service-account credentials configured (same as every prior release); the `.aab` needs a manual upload to Play Console's Internal Testing track. Note: the versionCode 40 build cut earlier this same session (before Build 44's fixes existed) was also never uploaded — this versionCode 41 build supersedes it and is the one that should actually go up.
+
+**Not yet done**: the remaining QA-process items (P0-1 SQLite reentrant-mutex redesign, P1-6, P2-4's raw-capture audio-focus gap, the two Maestro blockers) — all unaffected by this build, none newly urgent.
 
 ## Build 41 — QA Stabilization Phase 1: Data & Concurrency Integrity
 
