@@ -581,7 +581,21 @@ export async function attemptOptimisticThreadCalibration(): Promise<
       // Cuts the actual native work short rather than leaving it running in
       // the background — without this, a struggling device would keep
       // burning CPU on the abandoned trial underneath whatever runs next.
-      await candidateContext.stopCompletion().catch(() => {});
+      // QA follow-up fix (2026-09-16): this called `.catch()` directly on
+      // `stopCompletion()`'s return value — a THIRD instance of the exact
+      // bug `safelyStopCompletion()` was built for (see its own doc
+      // comment): confirmed on-device that llama.rn's `stopCompletion()`
+      // can genuinely return `undefined` at runtime despite its `.d.ts`
+      // claiming `Promise<void>`, and calling `.catch()` on that throws
+      // synchronously — here, inside an `await`, which would reject the
+      // whole onboarding calibration trial instead of just falling back to
+      // the conservative thread count as intended. Found by grepping for
+      // every remaining `stopCompletion().catch(` call site after fixing
+      // the first two (enqueue()'s preemption path, Build 41;
+      // cancelActiveLlamaCompletion(), Build 43) — worth re-checking after
+      // any future change near stopCompletion() calls, since this exact
+      // pattern has now recurred three times independently.
+      safelyStopCompletion(candidateContext);
       // The real completion may still resolve or reject shortly after being
       // asked to stop — swallow it here so it can't surface as an unhandled
       // rejection later, unobserved. Its result is discarded either way.
