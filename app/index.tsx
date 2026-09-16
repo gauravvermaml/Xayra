@@ -700,22 +700,34 @@ export default function HomeScreen() {
   );
   const activeMode = useActiveMode(handleActiveModeUtterance);
 
-  const activeModeStopRef = useRef(activeMode.stop);
-  activeModeStopRef.current = activeMode.stop;
   // Build 42 P3-b fix (qa/05-consolidated-triage.md P3-b): this cleanup
-  // already stopped Handsfree on blur, but never touched a plain manual
-  // recording — navigating to Archive while a Home-screen recording was
-  // still running left it capturing invisibly in the background, where
-  // Archive's own note playback could then run concurrently with it (a
-  // cross-screen instance of the same "single active audio source" gap
-  // P1-1's fixes close elsewhere). `stopRecording()` itself no-ops if
-  // nothing is recording, so this is safe to call unconditionally.
+  // stops a plain manual recording on blur — navigating to Archive while a
+  // Home-screen recording was still running left it capturing invisibly in
+  // the background, where Archive's own note playback could then run
+  // concurrently with it (a cross-screen instance of the same "single
+  // active audio source" gap P1-1's fixes close elsewhere). `stopRecording()`
+  // itself no-ops if nothing is recording, so this is safe to call
+  // unconditionally.
+  //
+  // Live user report, fixed 2026-09-16: this used to ALSO stop Handsfree
+  // (`activeMode.stop()`) on the exact same blur — so engaging Handsfree,
+  // then navigating to Archive/Settings/To-Dos, silently turned it back off
+  // with no visible feedback. Handsfree is a deliberately hands-free,
+  // ongoing mode (the whole point is not needing to stay on the Home
+  // screen); a manual recording is a short, actively-watched foreground
+  // action, so the two don't warrant the same on-navigate behavior.
+  // Removing Handsfree's stop-on-blur here does NOT reopen the cross-screen
+  // echo hazard P3-b was built to prevent: `AudioPlayerControls.tsx`'s
+  // `isMicInUse()` guard (P1-1c) already blocks any note's "Listen" button
+  // — on Archive or anywhere else — while Handsfree is active, independent
+  // of which screen is currently focused. The only real, separate case
+  // that still correctly turns Handsfree off is leaving the app entirely
+  // (`useActiveMode()`'s own `AppState` listener, P2-3) — untouched here.
   const recorderStopRef = useRef(recorder.stopRecording);
   recorderStopRef.current = recorder.stopRecording;
   useFocusEffect(
     useCallback(() => {
       return () => {
-        void activeModeStopRef.current();
         void recorderStopRef.current();
       };
     }, [])

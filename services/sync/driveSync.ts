@@ -12,7 +12,7 @@ import { Platform } from "react-native";
 
 import { getRawDatabase } from "../../db/client";
 import { getOrCreateDatabaseKey } from "../crypto/keyManager";
-import { mergeMissingNotes, type CloudNoteRecord } from "../notes/noteManager";
+import { listNotes, mergeMissingNotes, type CloudNoteRecord } from "../notes/noteManager";
 import { mergeMissingToDos, type CloudToDoRecord } from "../todos/todoManager";
 import type { Recurrence } from "../../db/schema";
 
@@ -66,6 +66,37 @@ export class NoBackupFoundError extends DriveSyncError {
   constructor() {
     super("No backup was found in this Google account's Drive.");
     this.name = "NoBackupFoundError";
+  }
+}
+
+/**
+ * Found from a live user report (2026-09-16): a user uninstalled the dev
+ * build on their Pixel 9, installed the Play Store tester build (a fresh
+ * app identity — its local encrypted database starts genuinely empty,
+ * unrelated to anything the dev build had), then reached for the wrong one
+ * of the two Cloud Backup buttons. `backupToDrive()` had ZERO awareness of
+ * what was already in Drive — it unconditionally `VACUUM INTO`s whatever is
+ * in the LOCAL database right now and overwrites the remote file with it,
+ * no matter how empty that local database is or how much real data the
+ * remote backup already held. Tapping "Back Up Now" with 0 local notes
+ * permanently replaced a real, populated backup with an empty one — by the
+ * time "Restore / Sync Notes" was tapped afterward, there was nothing left
+ * in Drive to restore. `getSyncStatus()`'s own "last backup" reading comes
+ * from LOCAL `AsyncStorage` (also wiped by the uninstall), so the UI had no
+ * way to warn "a backup already exists" from local state alone — only a
+ * live Drive read (`getBackupMetadata()`) can see it, which nothing
+ * previously checked before an upload. Thrown by `backupToDrive()` before
+ * ever touching Drive; see `settings.tsx`'s `handleBackupNow` for how this
+ * is surfaced with an explicit confirm-to-override choice.
+ */
+export class BackupWouldReplaceExistingBackupError extends DriveSyncError {
+  constructor(public readonly remoteBackup: BackupMetadata) {
+    super(
+      "This device currently has no notes, but a backup already exists in this account's Google " +
+        "Drive. Backing up now would permanently replace it with nothing — this cannot be undone. " +
+        'If you meant to bring your existing notes onto this device, use "Restore / Sync Notes" instead.'
+    );
+    this.name = "BackupWouldReplaceExistingBackupError";
   }
 }
 
@@ -461,9 +492,34 @@ async function deleteIfExists(uri: string): Promise<void> {
  * without shipping the key alongside the data, a restore on a new device
  * (whose keystore would mint an unrelated fresh key) could never decrypt
  * the restored file, defeating the point of a backup.
+ *
+ * Throws `BackupWouldReplaceExistingBackupError` (see its own doc comment
+ * for the live incident this closes) instead of uploading, if the LOCAL
+ * vault is empty AND a remote backup already exists — pass
+ * `{ force: true }` to proceed anyway once a caller has explicitly
+ * confirmed that with the user.
  */
-export async function backupToDrive(): Promise<BackupRecord> {
+export async function backupToDrive(options?: { force?: boolean }): Promise<BackupRecord> {
   const accessToken = await requireAccessToken();
+
+  // Safety net, added 2026-09-16 after a live data-loss report — see
+  // BackupWouldReplaceExistingBackupError's own doc comment for the full
+  // incident. An empty local vault is the ONE local-note-count value that
+  // can never legitimately justify overwriting a real remote backup: either
+  // this is a genuinely fresh account (no remote backup exists either, and
+  // this check is a no-op), or a remote backup DOES exist and the far more
+  // likely explanation is a fresh/reinstalled app rather than the user
+  // having actually deleted every note on purpose. `options?.force` is the
+  // explicit, confirmed-by-the-user override for the rare real case.
+  if (!options?.force) {
+    const localNotes = await listNotes();
+    if (localNotes.length === 0) {
+      const remoteBackup = await getBackupMetadata();
+      if (remoteBackup) {
+        throw new BackupWouldReplaceExistingBackupError(remoteBackup);
+      }
+    }
+  }
 
   const snapshotUri = `${FileSystem.cacheDirectory}remi-backup-snapshot.sqlite`;
   const keyFileUri = `${FileSystem.cacheDirectory}remi-backup-key.txt`;
