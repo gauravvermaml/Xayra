@@ -21,7 +21,6 @@
       },
       "predictiveBackGestureEnabled": false,
       "versionCode": 41,
-      "navigationBarColor": "#1C1C1E",
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.USE_BIOMETRIC",
@@ -82,7 +81,9 @@
         {
           "color": "#0E0F12"
         }
-      ]
+      ],
+      "expo-font",
+      "expo-asset"
     ],
     "extra": {
       "router": {},
