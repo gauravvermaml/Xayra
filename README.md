@@ -155,24 +155,46 @@ npx expo run:android
 
 ### Model files
 
-None of the model files ship with the app — in normal use, the onboarding flow (`components/OnboardingSetupScreen.tsx` + `services/ai/modelDownloadManager.ts`) streams them on demand from the Cloudflare Worker CDN, always starting with the 1B Llama model (see [Hardware Requirements](#hardware-requirements--constraints) for why RAM alone no longer picks the 3B model outright). For local development without going through that flow, each file can also be pushed manually to the app's document directory — this bypasses the onboarding gate/DownloadManager plumbing entirely and lands the files exactly where `FileSystem.documentDirectory` expects them:
+None of the model files ship with the app — in normal use, the onboarding flow (`components/OnboardingSetupScreen.tsx` + `services/ai/modelDownloadManager.ts`) streams them on demand from the Cloudflare Worker CDN, always starting with the 1B Llama model (see [Hardware Requirements](#hardware-requirements--constraints) for why RAM alone no longer picks the 3B model outright). For local development without going through that flow, each file can also be pushed manually to the app's document directory — this bypasses the onboarding gate/DownloadManager plumbing entirely and lands the files exactly where `FileSystem.documentDirectory` expects them.
+
+**On a rooted device/emulator**, a plain `adb push` straight to the app's private storage works:
+
+```bash
+adb push <file> /data/data/com.anonymous.silentconfidant/files/
+```
+
+**On a non-rooted device** (confirmed live, 2026-09-16, on a Redmi Note 8 Pro) that fails with `remote secure_mkdirs failed` or `Permission denied` — `/data/data/<package>/` isn't writable by a plain `adb push` without root. Use the standard two-step workaround instead: push to the world-writable `/data/local/tmp/`, then copy into the app's own storage as the app's own user via `run-as` (only works on a debuggable build):
+
+```bash
+adb push <file> /data/local/tmp/<file>
+adb shell run-as com.anonymous.silentconfidant cp /data/local/tmp/<file> files/<file>
+adb shell rm /data/local/tmp/<file>   # optional cleanup — the temp copy still counts against device storage until removed
+```
+
+(On Windows/Git Bash specifically, prefix both `adb push`/`adb shell` calls with `MSYS_NO_PATHCONV=1` — otherwise MSYS mangles the `/data/...` remote path into a Windows path before adb ever sees it.)
+
+Files to push:
 
 ```bash
 # 1. Whisper (speech-to-text) — tiny is preferred for lower latency; base is used as a fallback if present instead
-adb push ggml-tiny.en.bin /data/data/com.anonymous.silentconfidant/files/
+ggml-tiny.en.bin
 
 # 2. bge-small-en-v1.5 (embeddings) — quantized ONNX export + its vocab
-adb push bge-small-en-v1.5-quantized.onnx /data/data/com.anonymous.silentconfidant/files/
-adb push bge-small-en-v1.5-vocab.txt /data/data/com.anonymous.silentconfidant/files/
+bge-small-en-v1.5-quantized.onnx
+bge-small-en-v1.5-vocab.txt
 
-# 3. Llama 3.2 Instruct (chat answers) — pick ONE, matching the -UD-Q4_K_XL quantization.
-# Pushing the 3B file directly here skips the in-app measured-performance
-# trial entirely — fine for local dev, but means the device never actually
-# proved it can run 3B at a usable speed the way a real opportunistic
-# upgrade would have required.
-adb push Llama-3.2-1B-Instruct-UD-Q4_K_XL.gguf /data/data/com.anonymous.silentconfidant/files/
+# 3. A local LLM (chat answers) — pick ONE.
+# Pushing the 3B Llama file directly here skips the in-app measured-
+# performance trial entirely — fine for local dev, but means the device
+# never actually proved it can run 3B at a usable speed the way a real
+# opportunistic upgrade would have required.
+Llama-3.2-1B-Instruct-UD-Q4_K_XL.gguf
 # — or —
-adb push Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf /data/data/com.anonymous.silentconfidant/files/
+Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf
+# — or, since Build 46, an on-trial alternative (manual-push-only, not
+# part of the automatic download tier logic — see PROJECT_STATE_HANDOFF.md's
+# Build 46 section) —
+Qwen2.5-3B-Instruct-Q4_K_M.gguf
 ```
 
 Each local-model service throws a clear error naming exactly which file is missing if you try to use a feature before its model is present.
