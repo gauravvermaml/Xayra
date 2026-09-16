@@ -75,21 +75,59 @@ export async function computeInferenceThreadCount(): Promise<number> {
 }
 
 /**
+ * Which raw special-token wrapping a GGUF model's own instruct fine-tuning
+ * expects — `buildPrompt()` below and `transformationEngine.ts`'s own
+ * `buildPrompt()` both branch on this. This app builds prompts as hand-
+ * assembled raw strings rather than via llama.rn's chat-template/messages-
+ * array helper (a decision that predates this comment), so swapping in a
+ * model from a different family is NOT a drop-in filename change — every
+ * raw-string prompt builder needs a matching branch, or the model sees its
+ * OTHER family's literal token text as ordinary characters instead of the
+ * structural markers its fine-tuning actually expects, badly degrading
+ * output quality without any error being thrown.
+ */
+export type ChatTemplateFamily = "llama3" | "qwen2";
+
+let activeTemplateFamily: ChatTemplateFamily = "llama3";
+
+/** Read by any prompt builder that needs to know which raw-token wrapping
+ * to use for whatever model is currently loaded — see `ChatTemplateFamily`'s
+ * own doc comment. Reflects whichever model `loadContext()` most recently
+ * loaded; defaults to "llama3" before any context has ever loaded, since
+ * that's what every model on this list used until Qwen was added. */
+export function getActiveChatTemplateFamily(): ChatTemplateFamily {
+  return activeTemplateFamily;
+}
+
+/**
  * Not bundled — hundreds of MB to ~2GB — same resolution pattern as
  * localWhisper.ts and localEmbeddings.ts: expected to already be sitting in
- * the document directory before generation is attempted. These exact
+ * the document directory before generation is attempted. The two Llama
  * filenames (`-UD-Q4_K_XL.gguf`, unsloth's "Unsloth Dynamic" quantization)
  * are what services/ai/modelDownloadManager.ts downloads from Cloudflare
  * R2 — one of the two, chosen automatically per-device by RAM tier, never
- * both. Priority order here still checks 3B before 1B on disk: on the rare
- * device where both happen to be present (e.g. the 3B was manually pushed
- * after the manager already fetched 1B), the strictly more capable model
- * wins.
+ * both; `modelDownloadManager.ts` looks these two up by label directly, so
+ * adding further entries here (like Qwen below) doesn't affect what it
+ * auto-downloads. Priority order here matters: on a device where more than
+ * one happens to be present (e.g. manually pushed for an A/B comparison),
+ * the first match wins.
+ *
+ * Qwen2.5-3B-Instruct-Q4_K_M.gguf added 2026-09-16 for an on-device
+ * quality/prompt-behavior comparison against the Llama 3.2 3B this app has
+ * shipped since Build 26 — see qa/ or PROJECT_STATE_HANDOFF.md for the
+ * outcome once tested. Uploaded to the same R2 bucket
+ * (`xayra-models`/Cloudflare Worker proxy) the two Llama files already live
+ * in, but NOT wired into `modelDownloadManager.ts`'s automatic tier-based
+ * download — this is manual-push-only for now, a deliberate comparison
+ * step before any production download-pipeline change. Placed first in
+ * priority so pushing it to a test device is enough to make the app prefer
+ * it without needing to remove the Llama file too.
  */
 export const LLAMA_MODEL_FILENAMES = [
-  { filename: "Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf", label: "3B" },
-  { filename: "Llama-3.2-1B-Instruct-UD-Q4_K_XL.gguf", label: "1B" },
-] as const;
+  { filename: "Qwen2.5-3B-Instruct-Q4_K_M.gguf", label: "Qwen2.5-3B", templateFamily: "qwen2" },
+  { filename: "Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf", label: "3B", templateFamily: "llama3" },
+  { filename: "Llama-3.2-1B-Instruct-UD-Q4_K_XL.gguf", label: "1B", templateFamily: "llama3" },
+] as const satisfies readonly { filename: string; label: string; templateFamily: ChatTemplateFamily }[];
 const MODEL_FILENAMES = LLAMA_MODEL_FILENAMES;
 
 /** Missing-model errors are matched against this exact prefix by
@@ -322,7 +360,11 @@ const REPEAT_PENALTY = 1.15;
 
 let contextPromise: Promise<LlamaContext> | null = null;
 
-type ResolvedModel = { path: string; label: (typeof MODEL_FILENAMES)[number]["label"] };
+type ResolvedModel = {
+  path: string;
+  label: (typeof MODEL_FILENAMES)[number]["label"];
+  templateFamily: ChatTemplateFamily;
+};
 
 async function resolveModelPath(): Promise<ResolvedModel> {
   const dir = FileSystem.documentDirectory;
@@ -330,11 +372,11 @@ async function resolveModelPath(): Promise<ResolvedModel> {
     throw new Error("No writable document directory available on this platform.");
   }
 
-  for (const { filename, label } of MODEL_FILENAMES) {
+  for (const { filename, label, templateFamily } of MODEL_FILENAMES) {
     const path = `${dir}${filename}`;
     const info = await FileSystem.getInfoAsync(path);
     if (info.exists) {
-      return { path, label };
+      return { path, label, templateFamily };
     }
   }
 
@@ -354,9 +396,15 @@ async function resolveModelPath(): Promise<ResolvedModel> {
  * measurement before it's been accepted/persisted — every other caller omits
  * it and gets whatever `computeInferenceThreadCount()` currently resolves to.
  */
-async function loadContext(path: string, label: string, threadsOverride?: number): Promise<LlamaContext> {
+async function loadContext(
+  path: string,
+  label: string,
+  templateFamily: ChatTemplateFamily,
+  threadsOverride?: number
+): Promise<LlamaContext> {
   const coldStart = nowMs();
-  console.log(`[Llama] Initialized Model: ${label} (q4_k_m)`);
+  activeTemplateFamily = templateFamily;
+  console.log(`[Llama] Initialized Model: ${label} (${templateFamily})`);
   const threads = threadsOverride ?? (await computeInferenceThreadCount());
   // Build 26: `use_mmap: true` maps the GGUF file straight into the
   // process's address space instead of reading it into a heap buffer — the
@@ -377,7 +425,7 @@ async function loadContext(path: string, label: string, threadsOverride?: number
  */
 async function getContext(): Promise<LlamaContext> {
   if (!contextPromise) {
-    contextPromise = resolveModelPath().then(({ path, label }) => loadContext(path, label));
+    contextPromise = resolveModelPath().then(({ path, label, templateFamily }) => loadContext(path, label, templateFamily));
     contextPromise.catch(() => {
       contextPromise = null;
     });
@@ -419,8 +467,13 @@ export async function attemptTierUpgrade(
   return runExclusiveLlamaTask(async () => {
     await releaseLocalLlama();
 
-    const candidateContext = await loadContext(candidatePath, candidateLabel);
-    const result = await candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
+    // Both candidate and fallback here are always Llama tier options —
+    // modelDownloadManager.ts's tier-upgrade trial has no Qwen involvement.
+    const candidateContext = await loadContext(candidatePath, candidateLabel, "llama3");
+    const result = await candidateContext.completion(
+      { prompt: buildWarmupPrompt("llama3"), n_predict: TRIAL_N_PREDICT },
+      () => {}
+    );
     const tokensPerSecond = result.timings?.predicted_per_second ?? 0;
     const passed = tokensPerSecond >= MIN_USABLE_TOKENS_PER_SECOND;
 
@@ -431,7 +484,7 @@ export async function attemptTierUpgrade(
       contextPromise = Promise.resolve(candidateContext);
     } else {
       await candidateContext.release();
-      contextPromise = loadContext(fallbackPath, fallbackLabel);
+      contextPromise = loadContext(fallbackPath, fallbackLabel, "llama3");
       contextPromise.catch(() => {
         contextPromise = null;
       });
@@ -482,13 +535,16 @@ export async function attemptThreadEscalation(
   baselineTokensPerSecond: number
 ): Promise<{ passed: boolean; tokensPerSecond: number }> {
   return runExclusiveLlamaTask(async () => {
-    const { path, label } = await resolveModelPath();
+    const { path, label, templateFamily } = await resolveModelPath();
     const previousThreads = await computeInferenceThreadCount();
 
     await releaseLocalLlama();
 
-    const candidateContext = await loadContext(path, label, candidateThreads);
-    const result = await candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
+    const candidateContext = await loadContext(path, label, templateFamily, candidateThreads);
+    const result = await candidateContext.completion(
+      { prompt: buildWarmupPrompt(templateFamily), n_predict: TRIAL_N_PREDICT },
+      () => {}
+    );
     const tokensPerSecond = result.timings?.predicted_per_second ?? 0;
     const passed = tokensPerSecond >= baselineTokensPerSecond * THREAD_ESCALATION_MIN_IMPROVEMENT_MULTIPLE;
 
@@ -496,7 +552,7 @@ export async function attemptThreadEscalation(
       contextPromise = Promise.resolve(candidateContext);
     } else {
       await candidateContext.release();
-      contextPromise = loadContext(path, label, previousThreads);
+      contextPromise = loadContext(path, label, templateFamily, previousThreads);
       contextPromise.catch(() => {
         contextPromise = null;
       });
@@ -567,11 +623,14 @@ export async function attemptOptimisticThreadCalibration(): Promise<
   }
 
   return runExclusiveLlamaTask(async () => {
-    const { path, label } = await resolveModelPath();
+    const { path, label, templateFamily } = await resolveModelPath();
     await releaseLocalLlama();
-    const candidateContext = await loadContext(path, label, candidateThreads);
+    const candidateContext = await loadContext(path, label, templateFamily, candidateThreads);
 
-    const completionPromise = candidateContext.completion({ prompt: WARMUP_PROMPT, n_predict: TRIAL_N_PREDICT }, () => {});
+    const completionPromise = candidateContext.completion(
+      { prompt: buildWarmupPrompt(templateFamily), n_predict: TRIAL_N_PREDICT },
+      () => {}
+    );
     const timedOut = await Promise.race([
       completionPromise.then(() => false),
       new Promise<true>((resolve) => setTimeout(() => resolve(true), CALIBRATION_TIMEOUT_MS)),
@@ -601,7 +660,7 @@ export async function attemptOptimisticThreadCalibration(): Promise<
       // rejection later, unobserved. Its result is discarded either way.
       await completionPromise.catch(() => {});
       await candidateContext.release().catch(() => {});
-      contextPromise = loadContext(path, label, conservativeThreads);
+      contextPromise = loadContext(path, label, templateFamily, conservativeThreads);
       contextPromise.catch(() => {
         contextPromise = null;
       });
@@ -617,7 +676,7 @@ export async function attemptOptimisticThreadCalibration(): Promise<
       // instead), but handled the same way as a timeout for safety: fall
       // back, don't keep it.
       await candidateContext.release().catch(() => {});
-      contextPromise = loadContext(path, label, conservativeThreads);
+      contextPromise = loadContext(path, label, templateFamily, conservativeThreads);
       contextPromise.catch(() => {
         contextPromise = null;
       });
@@ -647,10 +706,41 @@ export async function attemptOptimisticThreadCalibration(): Promise<
  * context-grounded answer shape expected for open-ended "summarize my
  * notes" requests — the failure mode this whole prompt revision targets.
  */
+/** Qwen2/2.5's own chat-template turn marker (ChatML) — the exact
+ * equivalent of Llama 3's `<|eot_id|>` for this family: both a turn
+ * delimiter within the prompt AND a stop string during generation (see the
+ * `stop` array on every `runQueuedLlamaCompletion()` call below). Added
+ * 2026-09-16 alongside `ChatTemplateFamily` for the Qwen2.5-3B comparison —
+ * see that type's own doc comment for why this app needs a second raw-
+ * string prompt builder at all rather than a one-line model swap. */
+const QWEN_IM_END = "<|im_end|>";
+
+/**
+ * Every turn-delimiter stop string across every template family this app
+ * supports, used as one fixed superset on every completion call (here and
+ * in transformationEngine.ts) rather than branching per family — a literal
+ * stop-string match is harmless when it can never occur (a Qwen-loaded
+ * context will never emit "<|eot_id|>", and a Llama-loaded one will never
+ * emit "<|im_end|>"), so there's no ambiguity risk to including both.
+ * Exported so transformationEngine.ts's own completion calls share the
+ * exact same list rather than keeping a second copy that could drift.
+ */
+export const CHAT_TEMPLATE_STOP_TOKENS = [EOT_TOKEN, "<|end_of_text|>", QWEN_IM_END, "<|endoftext|>"];
+
 function buildPrompt(userQuery: string, noteContext: string): string {
+  const systemPrompt = buildSystemPromptWithDate();
+  if (getActiveChatTemplateFamily() === "qwen2") {
+    return (
+      `<|im_start|>system\n${systemPrompt}${QWEN_IM_END}\n` +
+      `<|im_start|>user\n${FEW_SHOT_CONTEXT}\n\n${FEW_SHOT_USER_QUERY}${QWEN_IM_END}\n` +
+      `<|im_start|>assistant\n${FEW_SHOT_ANSWER}${QWEN_IM_END}\n` +
+      `<|im_start|>user\n${noteContext}\n\n${userQuery}${QWEN_IM_END}\n` +
+      "<|im_start|>assistant\n"
+    );
+  }
   return (
     "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" +
-    `${buildSystemPromptWithDate()}${EOT_TOKEN}` +
+    `${systemPrompt}${EOT_TOKEN}` +
     "<|start_header_id|>user<|end_header_id|>\n\n" +
     `${FEW_SHOT_CONTEXT}\n\n${FEW_SHOT_USER_QUERY}${EOT_TOKEN}` +
     "<|start_header_id|>assistant<|end_header_id|>\n\n" +
@@ -1042,7 +1132,7 @@ export async function generateLocalRAGAnswer(
       temperature: GENERATION_TEMPERATURE,
       top_p: TOP_P,
       penalty_repeat: REPEAT_PENALTY,
-      stop: [EOT_TOKEN, "<|end_of_text|>"],
+      stop: CHAT_TEMPLATE_STOP_TOKENS,
     },
     "interactive", // a person is actively watching this — jumps ahead of any queued background extraction
     (data) => {
@@ -1060,12 +1150,26 @@ export async function generateLocalRAGAnswer(
   return result.text.trim();
 }
 
-/** A minimal, throwaway prompt for the silent warm-up pass below — real
- * instruct-template turn markers so llama.cpp exercises the actual
- * generation path, not a bare string it would reject or mishandle. */
-const WARMUP_PROMPT =
-  "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|>" +
-  "<|start_header_id|>assistant<|end_header_id|>\n\n";
+/**
+ * A minimal, throwaway prompt for the silent warm-up pass below and for the
+ * thread-calibration/tier-upgrade trials above — real instruct-template
+ * turn markers so llama.cpp exercises the actual generation path, not a
+ * bare string it would reject or mishandle. Family-aware since 2026-09-16
+ * (the Qwen2.5-3B comparison) — these trials load whichever model
+ * `resolveModelPath()` currently resolves to, which is no longer always
+ * Llama, so the turn markers need to match. Only the wrapping matters here,
+ * not the content — this is a throughput/latency measurement, not a real
+ * answer, so "Hi" as the query is fine for either family.
+ */
+function buildWarmupPrompt(templateFamily: ChatTemplateFamily): string {
+  if (templateFamily === "qwen2") {
+    return `<|im_start|>user\nHi${QWEN_IM_END}\n<|im_start|>assistant\n`;
+  }
+  return (
+    "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\nHi<|eot_id|>" +
+    "<|start_header_id|>assistant<|end_header_id|>\n\n"
+  );
+}
 
 /**
  * Fire-and-forget: loads the GGUF model into native memory AND runs one
@@ -1107,7 +1211,7 @@ const WARMUP_PROMPT =
 let warmupPromise: Promise<void> | null = null;
 
 /**
- * Build 38 REAL-PREFIX PREWARM: `WARMUP_PROMPT` above is deliberately a
+ * Build 38 REAL-PREFIX PREWARM: `buildWarmupPrompt()` above is deliberately a
  * throwaway one-word prompt — fine for `attemptTierUpgrade`/
  * `attemptThreadEscalation`'s trial completions, which only need to measure
  * DECODE speed and want the smallest possible prompt so their trial finishes

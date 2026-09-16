@@ -2,7 +2,12 @@ import * as chrono from "chrono-node";
 import { getThermalStatus, ThermalStatus } from "expo-device-cpu";
 
 import { DEFAULT_NOTIFICATION_TIME, RECURRENCE_OPTIONS, type Recurrence } from "../../db/schema";
-import { runQueuedLlamaCompletion, SHARED_XAYRA_PREAMBLE } from "./localLlama";
+import {
+  CHAT_TEMPLATE_STOP_TOKENS,
+  getActiveChatTemplateFamily,
+  runQueuedLlamaCompletion,
+  SHARED_XAYRA_PREAMBLE,
+} from "./localLlama";
 import { isTranscriptionInProgress } from "./localWhisper";
 import { logDuration, nowMs } from "./perf";
 
@@ -36,6 +41,10 @@ export type ExtractedToDo = {
 /** Llama-3.2's instruct template stop marker — see localLlama.ts's own
  * EOT_TOKEN for why this has to be in `stop`. */
 const EOT_TOKEN = "<|eot_id|>";
+/** Qwen2/2.5's equivalent turn marker — see localLlama.ts's
+ * `ChatTemplateFamily` doc comment for why this file needs its own
+ * template-aware `buildPrompt()`, same as the RAG one does. */
+const QWEN_IM_END = "<|im_end|>";
 
 /**
  * GBNF grammar passed to llama.rn's `completion()` `grammar` option —
@@ -775,6 +784,20 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
 ];
 
 function buildPrompt(rawText: string, todayISO: string, detectedPhrases: string[]): string {
+  const systemPrompt = buildSystemPrompt(todayISO, detectedPhrases);
+
+  if (getActiveChatTemplateFamily() === "qwen2") {
+    const fewShotTurns = FEW_SHOT_EXAMPLES.map(
+      ({ input, answer }) => `<|im_start|>user\n${input}${QWEN_IM_END}\n<|im_start|>assistant\n${answer}${QWEN_IM_END}\n`
+    ).join("");
+    return (
+      `<|im_start|>system\n${systemPrompt}${QWEN_IM_END}\n` +
+      fewShotTurns +
+      `<|im_start|>user\n${rawText}${QWEN_IM_END}\n` +
+      "<|im_start|>assistant\n"
+    );
+  }
+
   const fewShotTurns = FEW_SHOT_EXAMPLES.map(
     ({ input, answer }) =>
       "<|start_header_id|>user<|end_header_id|>\n\n" +
@@ -785,7 +808,7 @@ function buildPrompt(rawText: string, todayISO: string, detectedPhrases: string[
 
   return (
     "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n" +
-    `${buildSystemPrompt(todayISO, detectedPhrases)}${EOT_TOKEN}` +
+    `${systemPrompt}${EOT_TOKEN}` +
     fewShotTurns +
     "<|start_header_id|>user<|end_header_id|>\n\n" +
     `${rawText}${EOT_TOKEN}` +
@@ -1061,7 +1084,7 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
       // since no further character is valid under the grammar past that
       // point — this should rarely if ever actually trigger.
       grammar: TODO_EXTRACTION_GRAMMAR,
-      stop: [EOT_TOKEN, "<|end_of_text|>"],
+      stop: CHAT_TEMPLATE_STOP_TOKENS,
     }, "background"); // no one is waiting on this — always yields to a live "Ask" query already queued or arriving
     logDuration("Llama to-do extraction", start);
 

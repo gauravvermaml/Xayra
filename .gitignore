@@ -68,3 +68,6 @@ modules/*/android/build/
 # local build/prebuild logs and UI-dump artifacts from manual dev-loop testing
 *.log
 ui_dump.xml
+
+# Local wrangler dev-mode state/cache (r2 object put without --remote lands here)
+.wrangler/
