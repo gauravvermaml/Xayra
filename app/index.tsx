@@ -26,7 +26,12 @@ import {
   type PipelineStage,
 } from "../services/ai/pipelineStage";
 import { useChatSession } from "../services/ai/useChatSession";
-import { containsWakeWord, useActiveMode, type ActiveModeUtteranceHandler } from "../services/audio/activeMode";
+import {
+  containsWakeWord,
+  useActiveMode,
+  WAKE_PHRASE_DISPLAY,
+  type ActiveModeUtteranceHandler,
+} from "../services/audio/activeMode";
 import {
   initializeToDoNotifications,
   subscribeToToDoNotificationTap,
@@ -558,7 +563,7 @@ export default function HomeScreen() {
         // "why did it reject this" undiagnosable after the fact. adb logcat
         // only, never sent anywhere.
         console.log(`[Handsfree] Rejected — no wake word match in transcript: "${transcript}"`);
-        showToast("Ignored — wake word \"Xayra\" not detected");
+        showToast(`Ignored — say "${WAKE_PHRASE_DISPLAY}" to be heard`);
         return;
       }
 

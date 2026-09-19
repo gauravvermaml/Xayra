@@ -34,11 +34,12 @@ jest.mock("../services/ai/embeddingModel", () => ({
 jest.mock("../services/ai/localLlama", () => ({
   attemptOptimisticThreadCalibration: jest.fn(),
   attemptThreadEscalation: jest.fn(),
-  attemptTierUpgrade: jest.fn(),
   computeInferenceThreadCount: jest.fn(() => Promise.resolve(2)),
-  LLAMA_MODEL_FILENAMES: [
-    { filename: "Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf", label: "3B" },
-    { filename: "Llama-3.2-1B-Instruct-UD-Q4_K_XL.gguf", label: "1B" },
+  CHAT_MODEL: { filename: "qwen2.5-1.5b-instruct-q4_k_m.gguf", label: "Qwen2.5-1.5B" },
+  RETIRED_CHAT_MODEL_FILENAMES: [
+    "Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf",
+    "Llama-3.2-1B-Instruct-UD-Q4_K_XL.gguf",
+    "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
   ],
   prewarmLocalLlama: jest.fn(() => Promise.resolve()),
 }));

@@ -160,6 +160,42 @@ export const WAKE_WORD_CANONICAL = "xayra";
  */
 const MAX_EDIT_DISTANCE = 2;
 
+/**
+ * Carrier words that may precede the wake word ("Hey Xayra", "Listen Xayra").
+ *
+ * WHY THE CARRIER IS OPTIONAL AND NOT REQUIRED. The product ask was to
+ * standardize on a higher-density trigger phrase so a strong consonant onset
+ * survives ambient road noise. That reasoning is sound, but it only pays off
+ * in an ACOUSTIC engine that scores raw audio frames. This function sits
+ * after Whisper, on text — and the single best-documented failure mode on
+ * this path (see `armListening()`'s own comment below, confirmed via
+ * on-device logcat) is that the FIRST word of an utterance is the one most
+ * likely to be dropped entirely during native audio-hardware cold-start.
+ * Hard-requiring "hey" before "xayra" would therefore have made the miss
+ * rate worse, not better, by adding a second token that has to survive
+ * exactly where transcription is weakest.
+ *
+ * So the carrier is used the other way round: as CORROBORATION. When one is
+ * present, the following token is allowed a looser fuzzy match, because
+ * "hey <something-xayra-shaped>" is far less likely to be an accidental
+ * false positive than a bare five-letter token on its own. A bare "Xayra"
+ * still works exactly as before.
+ */
+const WAKE_WORD_CARRIERS = new Set(["hey", "hi", "ok", "okay", "listen", "yo"]);
+
+/**
+ * Edit distance allowed for the wake word when a carrier word immediately
+ * precedes it. Looser than `MAX_EDIT_DISTANCE` (3 vs 2) because the carrier
+ * already did most of the work of ruling out a coincidence — this is what
+ * actually buys back recall in noise, and it's why "Hey Xayra" is worth
+ * telling users to say even though the carrier isn't mandatory.
+ */
+const MAX_EDIT_DISTANCE_WITH_CARRIER = 3;
+
+/** What the UI should tell users to say. Kept here next to the matcher so
+ * the prompt and the thing that accepts it can't drift apart. */
+export const WAKE_PHRASE_DISPLAY = "Hey Xayra";
+
 /** Classic full Levenshtein DP — `a`/`b` are typically single short words
  * here (wake-word tokens), so the O(len(a)*len(b)) cost is negligible. */
 function levenshteinDistance(a: string, b: string): number {
@@ -194,7 +230,11 @@ export function containsWakeWord(transcript: string): boolean {
   if (!tokens) {
     return false;
   }
-  return tokens.some((token) => levenshteinDistance(token, WAKE_WORD_CANONICAL) <= MAX_EDIT_DISTANCE);
+  return tokens.some((token, index) => {
+    const precededByCarrier = index > 0 && WAKE_WORD_CARRIERS.has(tokens[index - 1]);
+    const budget = precededByCarrier ? MAX_EDIT_DISTANCE_WITH_CARRIER : MAX_EDIT_DISTANCE;
+    return levenshteinDistance(token, WAKE_WORD_CANONICAL) <= budget;
+  });
 }
 
 /**

@@ -33,12 +33,12 @@ describe("writePreferences (Phase 1 P1-2: lost-update race)", () => {
     const { writePreferences, readPreferences } = require("../services/settings/preferences");
 
     const first = writePreferences({ allowCellularDownloads: true });
-    const second = writePreferences({ tier3BStatus: "accepted" });
+    const second = writePreferences({ threadEscalationStatus: "accepted" });
     await Promise.all([first, second]);
 
     const final = await readPreferences();
     expect(final.allowCellularDownloads).toBe(true);
-    expect(final.tier3BStatus).toBe("accepted");
+    expect(final.threadEscalationStatus).toBe("accepted");
   });
 
   it("keeps every patch correct across many concurrent writers, not just two", async () => {
@@ -46,7 +46,7 @@ describe("writePreferences (Phase 1 P1-2: lost-update race)", () => {
 
     await Promise.all([
       writePreferences({ allowCellularDownloads: true }),
-      writePreferences({ tier3BStatus: "accepted" }),
+      writePreferences({ threadEscalationStatus: "accepted" }),
       writePreferences({ threadEscalationStatus: "accepted" }),
       writePreferences({ llamaThreadCount: 6 }),
       writePreferences({ onboardingCalibrationAttemptInFlight: true }),
@@ -54,7 +54,7 @@ describe("writePreferences (Phase 1 P1-2: lost-update race)", () => {
 
     const final = await readPreferences();
     expect(final.allowCellularDownloads).toBe(true);
-    expect(final.tier3BStatus).toBe("accepted");
+    expect(final.threadEscalationStatus).toBe("accepted");
     expect(final.threadEscalationStatus).toBe("accepted");
     expect(final.llamaThreadCount).toBe(6);
     expect(final.onboardingCalibrationAttemptInFlight).toBe(true);
@@ -69,12 +69,12 @@ describe("writePreferences (Phase 1 P1-2: lost-update race)", () => {
     );
 
     const first = writePreferences({ allowCellularDownloads: true }).catch(() => "failed" as const);
-    const second = writePreferences({ tier3BStatus: "accepted" });
+    const second = writePreferences({ threadEscalationStatus: "accepted" });
 
     await expect(first).resolves.toBe("failed");
     await second;
 
     const final = await readPreferences();
-    expect(final.tier3BStatus).toBe("accepted");
+    expect(final.threadEscalationStatus).toBe("accepted");
   });
 });

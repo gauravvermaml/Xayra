@@ -26,13 +26,6 @@ export type Preferences = {
    * usage is a much more honest signal of what this device can actually
    * sustain. */
   performanceSamples: number[];
-  /** Whether this device has ever attempted, and how it fared on, an
-   * opportunistic upgrade from the default 1B model to the 3B one — see
-   * `maybeAttemptTierUpgrade()` in modelDownloadManager.ts. "rejected" is
-   * permanent for this install: a device whose real 3B throughput came in
-   * under the usable floor isn't worth re-trying, since the underlying CPU
-   * doesn't change. */
-  tier3BStatus: "not_attempted" | "rejected" | "accepted";
   /** `null` (the default, for every device) means "use
    * `computeInferenceThreadCount()`'s conservative quarter-of-cores
    * formula" — a fixed number here is a MEASURED override, only ever
@@ -45,9 +38,9 @@ export type Preferences = {
    * a modern flagship with cores to spare — a ~2-minute retrieval on
    * hardware that should easily clear a few seconds. */
   llamaThreadCount: number | null;
-  /** Same shape/semantics as `tier3BStatus`, for the thread-escalation
-   * trial above — "rejected" is permanent for this install for the same
-   * reason (the CPU/core layout doesn't change between launches). */
+  /** Whether this device has attempted, and how it fared on, the
+   * thread-escalation trial above. "rejected" is permanent for this install:
+   * the CPU/core layout doesn't change between launches. */
   threadEscalationStatus: "not_attempted" | "rejected" | "accepted";
   /**
    * Build 40 onboarding resilience: set to `true` immediately before
@@ -81,7 +74,6 @@ const DEFAULT_PREFERENCES: Preferences = {
   allowCellularDownloads: false,
   nativeDownloadIds: {},
   performanceSamples: [],
-  tier3BStatus: "not_attempted",
   llamaThreadCount: null,
   threadEscalationStatus: "not_attempted",
   onboardingCalibrationAttemptInFlight: false,

@@ -1,21 +1,17 @@
 /**
- * 2026-09-16: added Qwen2.5-3B-Instruct as a second candidate model for a
- * quality/prompt-behavior comparison against the Llama 3.2 3B this app has
- * shipped since Build 26. This app hand-assembles its RAG/extraction
- * prompts as raw strings with Llama 3's own special tokens
- * (<|begin_of_text|>, <|start_header_id|>, <|eot_id|>) rather than going
- * through llama.rn's model-agnostic chat-template helper — so swapping in a
- * model from a different family is NOT a drop-in filename change: without a
- * matching prompt builder, Qwen's tokenizer would see Llama's literal
- * token text as ordinary characters instead of the structural turn markers
- * its own instruct fine-tuning expects, silently degrading output quality.
+ * The app ships exactly one chat model (Qwen2.5-1.5B-Instruct, ChatML) with
+ * no tier ladder beneath it. Because prompts here are hand-assembled raw
+ * strings rather than built through llama.rn's model-agnostic chat-template
+ * helper, the prompt builders are written against ChatML specifically —
+ * there is no runtime family detection left to get wrong, but there is still
+ * a real regression to guard against: a stray Llama-3 marker
+ * (<|begin_of_text|>, <|start_header_id|>, <|eot_id|>) left behind in a
+ * prompt string would be fed to Qwen's tokenizer as ordinary characters
+ * rather than structural turn markers, silently degrading output with no
+ * error thrown.
  *
- * Locks in that `buildPrompt()` (services/ai/localLlama.ts) actually
- * branches on which model is loaded — Qwen's ChatML markers
- * (<|im_start|>/<|im_end|>) when a Qwen model resolved, Llama 3's own
- * markers otherwise — by inspecting the real prompt string handed to the
- * (mocked) native completion() call, not just asserting the function
- * exists.
+ * These assertions inspect the real prompt handed to the (mocked) native
+ * completion() call, not just that the function exists.
  */
 
 jest.mock("expo-device-cpu", () => ({ getCpuCoreCount: () => 8 }));
@@ -52,45 +48,52 @@ function mockFileSystemWithOnlyThisFileExisting(existingFilename: string) {
   }));
 }
 
-describe("buildPrompt's chat-template-family branching (Qwen2.5-3B comparison, 2026-09-16)", () => {
+const LLAMA3_MARKERS = ["<|begin_of_text|>", "<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>"];
+
+describe("RAG prompts are ChatML, for the one model this app ships", () => {
   beforeEach(() => {
     jest.resetModules();
     jest.clearAllMocks();
     capturedPrompt = "";
   });
 
-  it("defaults to Llama 3's own template family before any context has loaded", () => {
-    const { getActiveChatTemplateFamily } = require("../services/ai/localLlama");
-    expect(getActiveChatTemplateFamily()).toBe("llama3");
-  });
-
-  it("uses Llama 3's special tokens when the resolved model is a Llama file", async () => {
-    mockFileSystemWithOnlyThisFileExisting("Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf");
-    const { generateLocalRAGAnswer, getActiveChatTemplateFamily } = require("../services/ai/localLlama");
+  it("wraps the prompt in Qwen's ChatML turn markers", async () => {
+    mockFileSystemWithOnlyThisFileExisting("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+    const { generateLocalRAGAnswer } = require("../services/ai/localLlama");
 
     await generateLocalRAGAnswer("what's on my list", "some note context", () => {});
 
-    expect(getActiveChatTemplateFamily()).toBe("llama3");
-    expect(capturedPrompt).toContain("<|begin_of_text|>");
-    expect(capturedPrompt).toContain("<|eot_id|>");
-    expect(capturedPrompt).not.toContain("<|im_start|>");
-  });
-
-  it("uses Qwen's ChatML tokens when the resolved model is the Qwen file", async () => {
-    mockFileSystemWithOnlyThisFileExisting("Qwen2.5-3B-Instruct-Q4_K_M.gguf");
-    const { generateLocalRAGAnswer, getActiveChatTemplateFamily } = require("../services/ai/localLlama");
-
-    await generateLocalRAGAnswer("what's on my list", "some note context", () => {});
-
-    expect(getActiveChatTemplateFamily()).toBe("qwen2");
     expect(capturedPrompt).toContain("<|im_start|>system");
+    expect(capturedPrompt).toContain("<|im_start|>user");
     expect(capturedPrompt).toContain("<|im_start|>assistant");
     expect(capturedPrompt).toContain("<|im_end|>");
-    expect(capturedPrompt).not.toContain("<|begin_of_text|>");
   });
 
-  it("the shared stop-token list covers both families' turn markers, so either model's real end-of-turn token actually stops generation", () => {
+  it("leaves no Llama-3 template markers anywhere in the prompt", async () => {
+    mockFileSystemWithOnlyThisFileExisting("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+    const { generateLocalRAGAnswer } = require("../services/ai/localLlama");
+
+    await generateLocalRAGAnswer("what's on my list", "some note context", () => {});
+
+    for (const marker of LLAMA3_MARKERS) {
+      expect(capturedPrompt).not.toContain(marker);
+    }
+  });
+
+  it("refuses to fall back to a retired model file that happens to still be on disk", async () => {
+    // The whole point of the single-model cutover: a leftover Llama GGUF from
+    // a previous install must never be loaded and prompted with ChatML.
+    mockFileSystemWithOnlyThisFileExisting("Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf");
+    const { generateLocalRAGAnswer, LLAMA_MODEL_MISSING_ERROR_PREFIX } = require("../services/ai/localLlama");
+
+    await expect(generateLocalRAGAnswer("what's on my list", "ctx", () => {})).rejects.toThrow(
+      LLAMA_MODEL_MISSING_ERROR_PREFIX
+    );
+  });
+
+  it("stops generation on ChatML's own end-of-turn marker", () => {
     const { CHAT_TEMPLATE_STOP_TOKENS } = require("../services/ai/localLlama");
-    expect(CHAT_TEMPLATE_STOP_TOKENS).toEqual(expect.arrayContaining(["<|eot_id|>", "<|im_end|>"]));
+    expect(CHAT_TEMPLATE_STOP_TOKENS).toEqual(expect.arrayContaining(["<|im_end|>"]));
+    expect(CHAT_TEMPLATE_STOP_TOKENS).not.toEqual(expect.arrayContaining(["<|eot_id|>"]));
   });
 });

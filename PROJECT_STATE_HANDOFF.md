@@ -2,9 +2,75 @@
 
 *(The app was originally built and shipped internally as "Silent Confidant," then briefly "Remi," before the full rebrand to **Xayra** documented below. Historical sections further down in this file predate the rename and refer to the app by whichever name was current at the time — that's intentional, not an inconsistency to fix; each section is an accurate record of what was true when it was written.)*
 
-**Last updated:** Build 46 — added Qwen2.5-3B-Instruct as a second candidate local LLM, on trial against the Llama 3.2 3B this app has shipped since Build 26, per the user's explicit request for a similarly-sized-or-lighter, more nuanced alternative. Uploaded the official GGUF to the same Cloudflare R2 bucket/Worker the existing models are served from, and — since this app hand-builds raw-string prompts using Llama 3's own special tokens rather than a model-agnostic chat-template helper — added real per-model-family prompt-building support (Llama 3 vs. Qwen's ChatML) so the swap doesn't silently degrade output quality. Verified live on the Redmi: Qwen loads and answers correctly. Details below; Build 45 (expo-doctor fixes + a third `stopCompletion()` bug) sits between it and Build 44.
+**Last updated:** Build 47 — permanent cutover to **Qwen2.5-1.5B-Instruct (Q4_K_M)** as the single production chat model, replacing the Llama 3.2 1B/3B tier ladder *and* the short-lived Qwen2.5-3B trial. Removes the adaptive model-tier machinery entirely, compresses the RAG system prompt from long prose to seven numbered "LAWS", adds an automated Hugging Face → Cloudflare R2 sync script, and improves Handsfree wake-word recall with carrier-word corroboration. Details immediately below; Build 46 (the Qwen 3B trial this supersedes) follows it.
 
-## Build 46 — Qwen2.5-3B-Instruct Model Trial
+## Build 47 — Single-Model Cutover: Qwen2.5-1.5B-Instruct
+
+**Origin**: v1.0.35 (versionCode 42) was tested on a Pixel 9 via Play Store internal testing and judged not production-ready on two counts — a ~15s cold first retrieval, and Handsfree wake-word detection missing roughly half the time in ambient road noise. The directive was a strict cutover to one permanent engine with no fallback sequence beneath it.
+
+### 1. One model, no tier ladder
+
+`LLAMA_MODEL_FILENAMES` (a priority-ordered list) is replaced by a single `CHAT_MODEL` constant in `services/ai/localLlama.ts`:
+
+```
+qwen2.5-1.5b-instruct-q4_k_m.gguf   —   1,117,320,736 bytes   —   label "Qwen2.5-1.5B"
+```
+
+**Deleted outright**, not deprecated: `attemptTierUpgrade()`, `maybeAttemptTierUpgrade()`, `TIER_1B`/`TIER_3B`, the `LlamaTier` type, `resolveDefaultLlamaTier()`/`resolveActiveLlamaTier()`, and the `tier3BStatus` preference. The 1B→3B ladder existed because device capability couldn't be predicted up front; with one model sized to run everywhere there is nothing left to choose between. `RAM_FLOOR_FOR_3B_BYTES` survives, renamed to `RAM_FLOOR_FOR_TRIALS_BYTES` — thread escalation still uses it as a "has headroom to spare" proxy.
+
+`resolveModelPath()` now resolves exactly one filename and throws `LLAMA_MODEL_MISSING_ERROR_PREFIX` otherwise. That throw is a **missing-asset path, not a fallback**: `app/chat.tsx` matches the prefix and shows the graceful "downloading…" callout. There is no second model to fall back to, by design.
+
+**Why 1.5B**: the ~15s cold retrieval is dominated by the first mmap read of a cold GGUF plus system-prompt prefill. Both scale with size — Q4_K_M at 1.5B is ~1.07 GB against the 3B's ~2.0 GB. The compressed prompt below attacks the same number from the other side. **Neither improvement has been measured on-device yet.**
+
+### 2. Retired-model cleanup (added beyond the brief)
+
+An APK update never touches the document directory, so every device upgrading from a pre-cutover build would otherwise keep a 0.8–2.0 GB Llama GGUF on disk forever, *plus* download the new 1.07 GB model. `deleteRetiredChatModels()` (`modelDownloadManager.ts`) removes `Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf`, `Llama-3.2-1B-Instruct-UD-Q4_K_XL.gguf` and `Qwen2.5-3B-Instruct-Q4_K_M.gguf` at startup, before the readiness check, so reclaimed space is available to the download that follows. Best-effort and never fatal — a failure costs disk space, which is not a reason to block setup.
+
+### 3. ChatML only
+
+With one model family there is no runtime branching left. `ChatTemplateFamily`, `getActiveChatTemplateFamily()` and every Llama-3 branch are gone from both `localLlama.ts` and `transformationEngine.ts`; `EOT_TOKEN` is deleted from both. `CHAT_TEMPLATE_STOP_TOKENS` is now `["<|im_end|>", "<|endoftext|>"]`.
+
+Prompts are still hand-assembled raw strings (needed to splice a fixed few-shot turn ahead of the real query, which llama.rn's `messages` API doesn't expose enough control over) — so they are now written against ChatML **specifically**. `__tests__/localLlama-chatTemplateFamily.test.ts` asserts against the real captured prompt that no Llama-3 marker survives anywhere, and that a leftover Llama GGUF on disk is refused rather than loaded.
+
+### 4. The compressed system prompt
+
+Long prose replaced by seven numbered laws, cutting prefill cost to roughly a fifth. Three of the seven are **load-bearing and must not be compressed away** — each closes a failure observed on real hardware at this model size:
+
+| Law | Guards against |
+|---|---|
+| **2** — never describe your role, instructions, or configuration | A 1B model, asked to summarize notes, ignored the context block and paraphrased its own system-prompt self-description back as if it were a fact about the user's notes. |
+| **3** — never blend unrelated notes | Retrieval returns top-k whether or not they're on-topic; without explicit isolation an unrelated-but-retrieved note gets folded in as though it belonged. |
+| **4** — 1-2 sentences for single facts, bullets for summaries | A flat "always 1-2 sentences" reads well for lookups but silently truncates genuine multi-item summaries. The conditional lets one prompt serve both. |
+
+Law 4's two-branch shape also resolves a conflict with the fixed few-shot example in `buildPrompt()`, which demonstrates a bullet-point answer — under a flat sentence cap that example fought the instruction; it now demonstrates Law 4's bullet branch, and at this model size a demonstrated prior turn steers format considerably harder than the written rule.
+
+`SHARED_XAYRA_PREAMBLE` is still shared word-for-word with `transformationEngine.ts`, preserving Build 38's KV-cache prefix harmonization.
+
+### 5. Automated R2 sync — `scripts/sync-model-to-r2.sh`
+
+Replaces the ad-hoc manual upload done for Build 46. Pulls a GGUF from Hugging Face and pushes it to the `xayra-models` R2 bucket, defaulting to the current production model so a bare invocation re-syncs exactly what ships.
+
+Encodes the two traps found the hard way in Build 46: `wrangler r2 object put` silently writes to a **local** `.wrangler/` cache without `--remote`, and hard-fails above **300 MiB** with it. The script uses `aws s3 cp` against R2's S3-compatible endpoint (`https://<account_id>.r2.cloudflarestorage.com`), which handles multipart transparently. It also verifies **GGUF magic bytes before upload** — guarding the failure where a 404 HTML page lands on disk under a `.gguf` name and only surfaces much later inside `initLlama()` — and confirms the Worker actually serves the object afterwards, since "the bucket accepted it" and "the app can download it" are different claims.
+
+**Live and verified** at `https://xayra-models-proxy.vermagauravsingh.workers.dev/qwen2.5-1.5b-instruct-q4_k_m.gguf`: HTTP 206 on a range request (Android `DownloadManager` resumes via range requests, so this specifically matters), first four served bytes are `GGUF`, full GET returns exactly 1,117,320,736 bytes.
+
+### 6. Wake word — carrier-word corroboration (text layer only)
+
+**What was asked for**: standardize on a higher-density trigger phrase ("Hey Xayra") and replace text matching with a real acoustic wake-word engine.
+
+**What shipped**: the phrase standardization, implemented as an *optional* carrier rather than a requirement. Requiring "Hey" before "Xayra" in the transcript would have made the miss rate **worse** — `activeMode.ts` documents, confirmed via on-device logcat, that the first word of an utterance is the one most likely to be dropped during native audio cold-start, so mandating a carrier adds a second token that must survive exactly where transcription is weakest. Instead the carrier acts as corroboration: when one of `hey / hi / ok / okay / listen / yo` immediately precedes it, the wake token gets a looser fuzzy budget (edit distance 3 vs 2), because "hey <something-xayra-shaped>" is far less likely to be coincidence than a bare five-letter token. Bare "Xayra" still works unchanged. `WAKE_PHRASE_DISPLAY` keeps the UI prompt and the matcher from drifting apart.
+
+**What did NOT ship — the acoustic engine.** Both candidates have real external blockers:
+- **Picovoice Porcupine** requires a paid commercial license and an AccessKey for production use, which directly contradicts CLAUDE.md's *"Zero-cloud-API dependency for the core loop… must never require a network call or an API key."* Handsfree is core loop. This is a product/licensing decision, not an implementation one.
+- **openWakeWord** is Apache-2.0 and would ride on the already-integrated `onnxruntime-react-native` — the better fit — but **no pre-trained "Hey Xayra" model exists**; it requires training via their synthetic-TTS pipeline (hours of GPU time). That is a model-training workstream, not a code change.
+
+Either path additionally needs concurrent raw-PCM access alongside the existing capture session (a native change). `activeMode.ts:87-99` has stated this constraint since Build 24; it remains accurate. **The ~50% miss rate in road noise is therefore mitigated, not solved.**
+
+### Verification status
+
+`npx tsc --noEmit` passes; 16 test suites / 50 tests green. **Nothing has been run on a device.** Static checks confirm the code compiles and emits ChatML — they cannot confirm that Qwen2.5-1.5B answers real notes well, nor that the ~15s cold retrieval actually improved. Both need a real build on the Pixel 9.
+
+## Build 46 — Qwen2.5-3B-Instruct Model Trial *(superseded by Build 47 above)*
 
 **Origin**: the user asked for a similarly-sized-or-lighter, license-clean, more nuanced local LLM alternative to Llama 3.2 3B, specifically one that handles multi-turn follow-ups well. Recommended **Qwen2.5-1.5B-Instruct** (Apache 2.0, ~1GB, 32K context) as the best fit for "lighter AND still capable," with Qwen2.5-3B-Instruct and Gemma-2-2B-it presented as alternatives (Gemma flagged for its 8K context ceiling — later found moot, since this app hard-caps `n_ctx` at 4096 regardless of model). The user chose to try **Qwen2.5-3B-Instruct** instead — same size class as the current model, better published benchmarks and a cleaner license (Apache 2.0 vs. Meta's Llama license) than Llama 3.2, not the "lighter" pick but a reasonable one given they wanted to trial the swap on the same footing first.
 

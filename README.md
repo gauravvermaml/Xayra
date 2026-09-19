@@ -183,18 +183,19 @@ ggml-tiny.en.bin
 bge-small-en-v1.5-quantized.onnx
 bge-small-en-v1.5-vocab.txt
 
-# 3. A local LLM (chat answers) — pick ONE.
-# Pushing the 3B Llama file directly here skips the in-app measured-
-# performance trial entirely — fine for local dev, but means the device
-# never actually proved it can run 3B at a usable speed the way a real
-# opportunistic upgrade would have required.
-Llama-3.2-1B-Instruct-UD-Q4_K_XL.gguf
-# — or —
-Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf
-# — or, since Build 46, an on-trial alternative (manual-push-only, not
-# part of the automatic download tier logic — see PROJECT_STATE_HANDOFF.md's
-# Build 46 section) —
-Qwen2.5-3B-Instruct-Q4_K_M.gguf
+# 3. The local LLM (chat answers + to-do extraction).
+# There is exactly one, with no tier ladder and no fallback beneath it.
+# The old Llama-3.2 1B/3B pair and the Qwen2.5-3B trial file are retired;
+# the app actively DELETES them from the document directory at startup
+# (see deleteRetiredChatModels() in services/ai/modelDownloadManager.ts),
+# so pushing one of those by hand will not do anything useful.
+qwen2.5-1.5b-instruct-q4_k_m.gguf
+```
+
+To (re-)publish this model to the CDN the app downloads it from:
+
+```bash
+./scripts/sync-model-to-r2.sh          # defaults to the production model
 ```
 
 Each local-model service throws a clear error naming exactly which file is missing if you try to use a feature before its model is present.
