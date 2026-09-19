@@ -2,7 +2,7 @@
 
 *(The app was originally built and shipped internally as "Silent Confidant," then briefly "Remi," before the full rebrand to **Xayra** documented below. Historical sections further down in this file predate the rename and refer to the app by whichever name was current at the time — that's intentional, not an inconsistency to fix; each section is an accurate record of what was true when it was written.)*
 
-**Last updated:** Build 47 — permanent cutover to **Qwen2.5-1.5B-Instruct (Q4_K_M)** as the single production chat model, replacing the Llama 3.2 1B/3B tier ladder *and* the short-lived Qwen2.5-3B trial. Removes the adaptive model-tier machinery entirely, compresses the RAG system prompt from long prose to seven numbered "LAWS", adds an automated Hugging Face → Cloudflare R2 sync script, and improves Handsfree wake-word recall with carrier-word corroboration. Details immediately below; Build 46 (the Qwen 3B trial this supersedes) follows it.
+**Last updated:** Build 47 — permanent cutover to **Qwen2.5-1.5B-Instruct (Q4_K_M)** as the single production chat model, replacing the Llama 3.2 1B/3B tier ladder *and* the short-lived Qwen2.5-3B trial. Removes the adaptive model-tier machinery entirely, compresses the RAG system prompt from long prose to seven numbered "LAWS", adds an automated Hugging Face → Cloudflare R2 sync script, improves Handsfree wake-word recall with carrier-word corroboration, and adds a disk-persisted prompt-session cache that cuts the static-prefix prefill from **~14 s to 18 ms** while keeping the background memory release (1.98 GB → 0.51 GB) intact. Details immediately below; Build 46 (the Qwen 3B trial this supersedes) follows it.
 
 ## Build 47 — Single-Model Cutover: Qwen2.5-1.5B-Instruct
 
@@ -66,9 +66,41 @@ Encodes the two traps found the hard way in Build 46: `wrangler r2 object put` s
 
 Either path additionally needs concurrent raw-PCM access alongside the existing capture session (a native change). `activeMode.ts:87-99` has stated this constraint since Build 24; it remains accurate. **The ~50% miss rate in road noise is therefore mitigated, not solved.**
 
+### 7. Prompt-session cache (`saveSession`/`loadSession`)
+
+Added after the on-device measurements below showed prefill — not model load — was the dominant cost in the reported ~15s cold retrieval.
+
+llama.cpp's KV state for the static prompt prefix is persisted to disk and restored into each fresh context, so the prefix is evaluated once rather than on every cold start and every reload after the background release.
+
+- **Restore lives in `loadContext()`**, not in the warm-up, so every fresh context benefits — including the post-background reload, which is the common case in real use. Skipped for thread-escalation trials, which measure decode against a throwaway prompt sharing no prefix.
+- **Invalidation hashes the fully-built warm-up prompt.** `buildSystemPromptWithDate()` bakes today's date and the Monday-to-today baseline into that text, so the key changes at local midnight with no separate date field. A session restored the next morning would otherwise leave the model resolving "yesterday" and "this week" against a stale baseline — silently, with no error. Model filename and `n_ctx` are in the key too, since a session is only valid for the exact model that produced it.
+- **Every failure path is non-fatal**: missing, stale, corrupt or model-mismatched all degrade to paying the prefill once, which is the pre-cache behaviour. A session that fails to load is discarded *and replaced*, so a bad file is never retried every launch.
+- **`saveSession` does not strip a `file://` prefix** the way `loadSession` does — it must be given a bare filesystem path, or it writes somewhere that never loads back.
+- The background release now also re-arms the memoized warm-up. Without that, sitting backgrounded across midnight would discard the stale session with nothing left to write a fresh one.
+
+### Measured on-device (Redmi Note 8 Pro, 2-thread inference)
+
+All figures from the dev build of 1.0.36/versionCode 43, models freshly downloaded from R2.
+
+| Metric | Value | Notes |
+|---|---|---|
+| Llama cold model load | **11.4 s** first-ever read; **4.8–6.7 s** warm | Qwen2.5-3B measured 21.6 s on this same device in Build 46 — the ~47% drop tracks the file-size ratio (1.07 GB vs 2.1 GB), consistent with load being I/O-bound. |
+| Static prompt prefill (556 tokens) | **~14.0 s** | The cost the session cache removes. Measured as the gap between model load completing and the session save starting, so it includes queue scheduling. |
+| Prompt-session restore | **18 ms** | Replaces the ~14 s above. |
+| Prompt-session save | 45–52 ms | Written once per invalidation key, not per launch. |
+| Session file size | 15.95 MB for 556 tokens | 28.7 KB/token, matching the architecture estimate (28 layers × 2 KV heads × 128 head_dim). |
+| Native heap, model resident | **1.98 GB** (2.4 GB total PSS) | |
+| Native heap, after background release | **0.51 GB** (0.83 GB total PSS) | The release reclaims ~1.5 GB. |
+
+**Why the background release was kept.** The cutover to a 1.07 GB model did *not* reduce the footprint proportionally — a resident context still costs ~2 GB once the KV cache at `n_ctx: 4096`, llama.cpp's compute buffers and the Whisper context are counted alongside the weights. That is at or above the 1.75 GB that motivated the Build 41 release, so holding it while backgrounded remains exactly the profile Android's low-memory killer reaps. The session cache does not replace that release — it removes its cost.
+
+**The ~14 s prefill figure is close to the originally-reported ~15 s Pixel 9 cold retrieval**, which suggests prefill was essentially the whole of that symptom. On that reading the session cache, rather than the model swap, is the change that addresses the complaint that started Build 47.
+
 ### Verification status
 
-`npx tsc --noEmit` passes; 16 test suites / 50 tests green. **Nothing has been run on a device.** Static checks confirm the code compiles and emits ChatML — they cannot confirm that Qwen2.5-1.5B answers real notes well, nor that the ~15s cold retrieval actually improved. Both need real use on the Pixel 9.
+`npx tsc --noEmit` passes; 18 test suites / 65 tests green. Model loading, the full R2 → DownloadManager → disk path, and the session cache are all confirmed working on-device (see the table above).
+
+**Still unverified: answer quality.** No RAG query has been run against a realistic corpus — the test device has a single note on it. Whether Qwen2.5-1.5B is nuanced enough for real notes is the cutover's headline claim and remains untested. Note also that the Redmi is the CPU-starved 2019 device capped at 2 inference threads; it is a poor proxy for Pixel 9 *latency*, though fine for correctness and grounding behaviour.
 
 ### Production build — 1.0.36 / versionCode 43
 
