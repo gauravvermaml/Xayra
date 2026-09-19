@@ -100,6 +100,51 @@ All figures from the dev build of 1.0.36/versionCode 43, models freshly download
 
 `npx tsc --noEmit` passes; 18 test suites / 65 tests green. Model loading, the full R2 → DownloadManager → disk path, and the session cache are all confirmed working on-device (see the table above).
 
+### 8. Dual prompt-session cache (both prefixes, not just RAG)
+
+RAG answers and to-do extraction share one llama context and do NOT share a prefix. Each evicted the other's KV state, so alternating between asking and saving — ordinary use — paid a full re-prefill every time. Only RAG had a disk cache, so extraction paid worst.
+
+Session files are now namespaced per prefix (`llama-prompt-session-rag.*`, `llama-prompt-session-extraction.*`), the completion queue tracks which prefix is resident, and a job whose prefix differs restores its own copy first.
+
+Two implementation notes worth keeping:
+
+- **The save must be awaited inside the queue's exclusive slot.** Fired as `void` it raced the next job for the context and failed on-device with `"Context is busy"`, and with `"Context not found"` when the background handler released the context underneath it.
+- **`residentPrefixKind` resets on release**, since the KV cache dies with the context; a stale value would skip the restore and silently re-prefill.
+
+A related fix in `transformationEngine.ts` was a precondition for this paying off: the per-note detected-phrases block used to sit near the TOP of the extraction system prompt, ahead of ~2,000 tokens of rules and fourteen few-shot turns. Cache reuse stops at the first differing token, so that placement capped reuse at a few hundred tokens. Moving it into the user turn made the whole static opening byte-identical between notes.
+
+**Measured on-device (Redmi Note 8 Pro), all swaps confirmed in both directions and across a process restart:**
+
+| Scenario | Before | After |
+|---|---|---|
+| Boot → first RAG | ~14s prefill | 42ms restore |
+| Cold process → first extraction | 77s | **8.2s** |
+| After a RAG query → extraction | 77s | 8.6s |
+| After an extraction → RAG (TTFT) | 54s | **2.0–3.4s** |
+| Swap cost, either direction | — | 18–136ms |
+
+Session file sizes: **16 MB** (rag), **64 MB** (extraction). The extraction file is large because its prefix is; it grows with the prompt, which is a real cost of this approach and an argument for shortening the prompt rather than only caching it.
+
+**Full cold-start cycle** (force-stopped process → voice note → extraction → spoken question → answer):
+
+| Step | Time |
+|---|---|
+| Note saved → to-do created | 12.4s |
+| Question STT (Whisper) | 4.9s |
+| Retrieval | 28ms |
+| TTFT | 1.97s |
+| Full answer | 5.1s |
+
+**Memory through that same cycle — watch this:**
+
+| Point | Native heap | Total PSS |
+|---|---|---|
+| Cold idle (model loaded, RAG restored) | 1.47 GB | 1.72 GB |
+| After voice note + extraction | 1.87 GB | 3.01 GB |
+| After the question was answered | 1.89 GB | 3.04 GB |
+
+The ~1.3 GB jump from idle to post-extraction is **not explained**. Whisper's model is only ~150 MB, so it does not account for the gap. Thread count is not a plausible cause (threads add scratch buffers in MB, not GB). Nor is this device's RAM management: the app's own footprint should travel to a Pixel 9 largely unchanged — what differs is headroom, and 3 GB resident is comfortable on 12 GB and not on 6 GB. Build 40's onboarding kills came from exactly this pressure. Worth investigating before assuming it is fine.
+
 ### QA against a realistic corpus
 
 `app/dev-seed.tsx` (dev-only, `xayra://dev-seed`) seeds 12 notes spanning 25 days, chosen to exercise specific guardrails rather than to look plausible. It must go through `createTextNote()` rather than raw INSERTs — that is what generates each note's embedding, and a directly-inserted row is invisible to vector search.
