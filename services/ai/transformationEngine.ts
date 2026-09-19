@@ -621,9 +621,19 @@ function hasRecurrenceEvidence(rawNoteText: string): boolean {
  * place instead of relying entirely on the deterministic single-candidate
  * fallback to correct it after the fact.
  */
-function buildSystemPrompt(todayISO: string, detectedPhrases: string[]): string {
-  const detectedPhrasesBlock =
-    detectedPhrases.length > 0
+/**
+ * The one part of the extraction prompt that changes per note.
+ *
+ * Deliberately NOT part of `buildSystemPrompt()`. It used to sit near the top
+ * of the system prompt, ahead of the rules and all fourteen few-shot turns —
+ * which meant llama.cpp's KV cache could only reuse tokens up to that block,
+ * and every extraction re-evaluated roughly 2,000 tokens of instructions that
+ * had not changed. Splicing it into the USER turn instead (see `buildPrompt`)
+ * keeps the whole system prompt plus few-shot exchange byte-identical between
+ * notes, so consecutive extractions reuse all of it.
+ */
+function buildDetectedPhrasesBlock(detectedPhrases: string[]): string {
+  return detectedPhrases.length > 0
       ? "A separate, exact string-matching pass already found these date/time phrases in this note — " +
         "treat this as your answer key: " +
         JSON.stringify(detectedPhrases) +
@@ -635,12 +645,14 @@ function buildSystemPrompt(todayISO: string, detectedPhrases: string[]): string 
         (detectedPhrases.length > 1
           ? " More than one phrase is listed here because the note mentions more than one date — pick " +
             "ONLY the one that says when the task ITSELF must be done, never one that's just explaining " +
-            "why the task exists (an expiry date is context, not a due date; see the rule below about " +
-            "this exact trap)."
+            "why the task exists (an expiry date is context, not a due date; see the rule about " +
+            "this exact trap in your instructions)."
           : "") +
         "\n\n"
       : "";
+}
 
+function buildSystemPrompt(todayISO: string): string {
   return (
     // Build 38 PREFIX HARMONIZATION — see SHARED_XAYRA_PREAMBLE's own doc
     // comment in localLlama.ts. This exact string must stay word-for-word
@@ -657,7 +669,6 @@ function buildSystemPrompt(todayISO: string, detectedPhrases: string[]): string 
     "array entry. Never stop after the first task you find; keep reading to the end of the note and " +
     "list all of them, however many there are.\n\n" +
     `Today's Date: ${todayISO}\n\n` +
-    detectedPhrasesBlock +
     "Each item has three fields:\n" +
     '  "task": a short, clear description of the action item\n' +
     '  "date_phrase": the date/time reference exactly as it appears in the note (e.g. "tomorrow", ' +
@@ -943,16 +954,25 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
 ];
 
 function buildPrompt(rawText: string, todayISO: string, detectedPhrases: string[]): string {
-  const systemPrompt = buildSystemPrompt(todayISO, detectedPhrases);
+  const systemPrompt = buildSystemPrompt(todayISO);
 
   const fewShotTurns = FEW_SHOT_EXAMPLES.map(
     ({ input, answer }) => `<|im_start|>user\n${input}${QWEN_IM_END}\n<|im_start|>assistant\n${answer}${QWEN_IM_END}\n`
   ).join("");
 
+  // KV-CACHE PREFIX ORDER, not cosmetic. Everything above this point — the
+  // system prompt and all fourteen few-shot turns, roughly 2,000 tokens — is
+  // byte-identical for every note on a given day, so llama.cpp reuses it
+  // wholesale between consecutive extractions. The per-note detected-phrases
+  // block therefore has to live HERE, in the user turn beside the note text,
+  // not inside the system prompt where it used to sit. Placed there it was
+  // the first point of divergence, which capped reuse at a few hundred tokens
+  // and forced every extraction to re-evaluate the entire rule set and every
+  // example from scratch.
   return (
     `<|im_start|>system\n${systemPrompt}${QWEN_IM_END}\n` +
     fewShotTurns +
-    `<|im_start|>user\n${rawText}${QWEN_IM_END}\n` +
+    `<|im_start|>user\n${buildDetectedPhrasesBlock(detectedPhrases)}${rawText}${QWEN_IM_END}\n` +
     "<|im_start|>assistant\n"
   );
 }
