@@ -298,7 +298,106 @@ type ResolvedDateInfo = {
  * (confirmed: `chrono.parse("every day at 6am", ...)` correctly returns
  * `isCertain('hour') === true` with hour 6).
  */
-function resolveDateAndTime(datePhrase: string, todayISO: string, recurrence: Recurrence): ResolvedDateInfo {
+const MONTH_NAME_TO_INDEX: Record<string, number> = {
+  january: 0, jan: 0,
+  february: 1, feb: 1,
+  march: 2, mar: 2,
+  april: 3, apr: 3,
+  may: 4,
+  june: 5, jun: 5,
+  july: 6, jul: 6,
+  august: 7, aug: 7,
+  september: 8, sept: 8, sep: 8,
+  october: 9, oct: 9,
+  november: 10, nov: 10,
+  december: 11, dec: 11,
+};
+
+const MONTH_LABELS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+
+/** "end of September", "the end of the month", "end of Sept 2027" —
+ * optionally followed by a year qualifier.
+ *
+ * The leading `(?:the\s+)?` is load-bearing, not cosmetic: it must be
+ * CONSUMED by the match, not left behind. "7 days before the end of
+ * September" rewritten to "7 days before the 30 September 2026" still
+ * misparses (chrono falls back to the "7 days before" fragment and returns a
+ * past date), whereas "7 days before 30 September 2026" resolves correctly.
+ * A stray article between the offset and the date is enough to break it. */
+const END_OF_MONTH_PATTERN =
+  /\b(?:the\s+)?end of (?:the\s+|this\s+)?(month|january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|september|sept|sep|august|aug|october|oct|november|nov|december|dec)\b(?:\s+(?:of\s+)?(this year|next year|\d{4}))?/gi;
+
+function lastDayOfMonth(year: number, monthIndex: number): number {
+  return new Date(year, monthIndex + 1, 0).getDate();
+}
+
+/**
+ * Rewrites "end of <month>" phrasing into an explicit "D Month YYYY" date
+ * before chrono-node ever sees it.
+ *
+ * chrono-node has no concept of "end of <month>": it silently discards those
+ * words, keeps whatever fragment it does recognise, and anchors that to the
+ * reference date. Confirmed directly against chrono 2.x with a reference of
+ * 2026-09-19:
+ *
+ *   "7 days before the end of September this year"
+ *        -> matches only "7 days before"  -> 2026-09-12   (a PAST date)
+ *   "end of September"
+ *        -> matches only "September"      -> 2027-09-01   (wrong day AND year)
+ *
+ * The first case is the damaging one: a reminder created already overdue.
+ * Both were reproduced from a real on-device note ("File the tax returns").
+ *
+ * Rewriting to an explicit date fixes both, because chrono handles offsets
+ * against a concrete date correctly — verified: "7 days before 30 September
+ * 2026" resolves to 2026-09-23, which is the right answer.
+ *
+ * Year selection: an explicit year or "this year"/"next year" is honoured as
+ * written; otherwise the NEXT occurrence is chosen, matching the
+ * `forwardDate: true` intent applied everywhere else in this file (a bare
+ * "end of September" said in October means next year's September).
+ */
+function expandEndOfMonthPhrases(text: string, today: Date): string {
+  return text.replace(END_OF_MONTH_PATTERN, (match, monthToken: string, yearToken?: string) => {
+    const token = monthToken.toLowerCase();
+    const qualifier = yearToken?.toLowerCase();
+
+    if (token === "month") {
+      // "end of the month" / "end of this month" — always the current month.
+      const day = lastDayOfMonth(today.getFullYear(), today.getMonth());
+      return `${day} ${MONTH_LABELS[today.getMonth()]} ${today.getFullYear()}`;
+    }
+
+    const monthIndex = MONTH_NAME_TO_INDEX[token];
+    if (monthIndex === undefined) {
+      return match;
+    }
+
+    let year: number;
+    if (qualifier && /^\d{4}$/.test(qualifier)) {
+      year = Number(qualifier);
+    } else if (qualifier === "next year") {
+      year = today.getFullYear() + 1;
+    } else if (qualifier === "this year") {
+      year = today.getFullYear();
+    } else {
+      const candidate = new Date(today.getFullYear(), monthIndex, lastDayOfMonth(today.getFullYear(), monthIndex));
+      year = candidate >= today ? today.getFullYear() : today.getFullYear() + 1;
+    }
+
+    return `${lastDayOfMonth(year, monthIndex)} ${MONTH_LABELS[monthIndex]} ${year}`;
+  });
+}
+
+// Exported for the same test-only reason as
+// WARMUP_TRANSCRIPTION_RECHECK_DELAYS_MS in localLlama.ts: date arithmetic is
+// the part of extraction most worth asserting directly, and reaching it
+// through extractToDosFromText() would mean mocking a whole LLM completion to
+// test pure date math.
+export function resolveDateAndTime(datePhrase: string, todayISO: string, recurrence: Recurrence): ResolvedDateInfo {
   const trimmed = datePhrase.trim();
   if (!trimmed) {
     return { actionDate: todayISO, toDate: null, notificationTime: DEFAULT_NOTIFICATION_TIME };
@@ -307,7 +406,7 @@ function resolveDateAndTime(datePhrase: string, todayISO: string, recurrence: Re
   const today = parseIsoDateLocal(todayISO);
 
   const bareDayMatch = trimmed.match(BARE_DAY_OF_MONTH_PATTERN);
-  const results = chrono.parse(trimmed, today, { forwardDate: true });
+  const results = chrono.parse(expandEndOfMonthPhrases(trimmed, today), today, { forwardDate: true });
   const result = results[0];
 
   // Only treat this as a bare day-of-month if chrono itself finds no
@@ -336,8 +435,26 @@ function resolveDateAndTime(datePhrase: string, todayISO: string, recurrence: Re
     return { actionDate: todayISO, toDate: null, notificationTime };
   }
 
+  // A to-do whose action date is already in the past is never useful — it
+  // arrives pre-overdue and its reminder can never fire. Two ways to get
+  // here, both wrong for a to-do: chrono matched only a FRAGMENT of the
+  // phrase and anchored it to today (the "7 days before <something chrono
+  // can't parse>" failure that motivated expandEndOfMonthPhrases above —
+  // this guard is the general safety net for the same shape appearing in
+  // phrasings not yet handled), or the phrase genuinely pointed backwards
+  // ("3 days ago"), which is a note ABOUT the past, not a task to action in
+  // it. Safe to clamp because `forwardDate: true` already pushes explicit
+  // dates forward — verified against chrono: "September 12" on 2026-09-19
+  // resolves to 2027, not the past — so a past result here is never a
+  // deliberate future date being overridden. Falls back to today, exactly
+  // as an unparseable phrase already does above.
+  const startDate = formatIsoDate(result.start.date());
+  if (startDate < todayISO) {
+    return { actionDate: todayISO, toDate: null, notificationTime };
+  }
+
   return {
-    actionDate: formatIsoDate(result.start.date()),
+    actionDate: startDate,
     toDate: result.end ? formatIsoDate(result.end.date()) : null,
     notificationTime,
   };
