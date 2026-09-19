@@ -1,6 +1,7 @@
 import { useCallback, useState } from "react";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Pressable, ScrollView, StyleSheet, Text } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { useRouter } from "expo-router";
 
 import { getRawDatabase } from "../db/client";
 import { colors, spacing, typography } from "../constants/theme";
@@ -68,8 +69,21 @@ const SEED_NOTES: SeedNote[] = [
 const SECONDS_PER_DAY = 86_400;
 
 export default function DevSeedScreen() {
+  const router = useRouter();
   const [log, setLog] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+
+  /**
+   * `replace`, never `back()`. Opening this route via its deep link
+   * (`xayra://dev-seed`) makes it the ROOT of the navigation stack, so there
+   * is nothing behind it — `back()` there raises "The action 'GO_BACK' was
+   * not handled by any navigator" and strands whoever tapped it. Replacing
+   * with the home route works whether this screen was deep-linked into or
+   * pushed onto an existing stack.
+   */
+  const goHome = useCallback(() => {
+    router.replace("/");
+  }, [router]);
 
   const append = useCallback((line: string) => {
     setLog((prev) => [...prev, line]);
@@ -133,6 +147,10 @@ export default function DevSeedScreen() {
         <Text style={styles.buttonLabel}>{busy ? "Seeding…" : `Seed ${SEED_NOTES.length} notes`}</Text>
       </Pressable>
 
+      <Pressable accessibilityRole="button" onPress={goHome} disabled={busy} style={styles.secondaryButton}>
+        <Text style={styles.secondaryLabel}>Done — back to Xayra</Text>
+      </Pressable>
+
       <ScrollView style={styles.log} contentContainerStyle={styles.logContent}>
         {log.map((line, i) => (
           <Text key={i} style={styles.logLine}>
@@ -157,6 +175,15 @@ const styles = StyleSheet.create({
   },
   buttonDisabled: { opacity: 0.5 },
   buttonLabel: { ...typography.body, color: colors.background, fontWeight: "600" },
+  secondaryButton: {
+    borderColor: colors.textSecondary,
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingVertical: spacing.md,
+    alignItems: "center",
+    marginBottom: spacing.lg,
+  },
+  secondaryLabel: { ...typography.body, color: colors.textPrimary },
   log: { flex: 1 },
   logContent: { paddingBottom: spacing.xl },
   logLine: { ...typography.caption, color: colors.textSecondary, marginBottom: 4 },
