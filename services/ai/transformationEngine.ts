@@ -2,7 +2,12 @@ import * as chrono from "chrono-node";
 import { getThermalStatus, ThermalStatus } from "expo-device-cpu";
 
 import { DEFAULT_NOTIFICATION_TIME, RECURRENCE_OPTIONS, type Recurrence } from "../../db/schema";
-import { CHAT_TEMPLATE_STOP_TOKENS, runQueuedLlamaCompletion, SHARED_XAYRA_PREAMBLE } from "./localLlama";
+import {
+  CHAT_TEMPLATE_STOP_TOKENS,
+  runQueuedLlamaCompletion,
+  SHARED_XAYRA_PREAMBLE,
+  type PromptPrefix,
+} from "./localLlama";
 import { isTranscriptionInProgress } from "./localWhisper";
 import { logDuration, nowMs } from "./perf";
 
@@ -652,6 +657,26 @@ function buildDetectedPhrasesBlock(detectedPhrases: string[]): string {
       : "";
 }
 
+/**
+ * Identifies the cached KV prefix this file's prompts open with, so the shared
+ * completion queue can restore it from disk instead of re-prefilling ~2,000
+ * tokens of rules and fourteen few-shot turns every time a RAG answer has
+ * evicted it. Measured at ~77s to re-prefill on a Redmi Note 8 Pro.
+ *
+ * The key covers the whole static opening — system prompt plus few-shot turns
+ * — so a prompt edit or a date rollover invalidates the cache rather than
+ * silently restoring yesterday's instructions.
+ */
+function extractionPrefix(todayISO: string): PromptPrefix {
+  const staticOpening = buildSystemPrompt(todayISO) + FEW_SHOT_EXAMPLES.map((e) => e.input + e.answer).join("");
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < staticOpening.length; i++) {
+    hash ^= staticOpening.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return { kind: "extraction", key: `${hash.toString(16).padStart(8, "0")}-ctx4096` };
+}
+
 function buildSystemPrompt(todayISO: string): string {
   return (
     // Build 38 PREFIX HARMONIZATION — see SHARED_XAYRA_PREAMBLE's own doc
@@ -1286,7 +1311,10 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
       // point — this should rarely if ever actually trigger.
       grammar: TODO_EXTRACTION_GRAMMAR,
       stop: CHAT_TEMPLATE_STOP_TOKENS,
-    }, "background"); // no one is waiting on this — always yields to a live "Ask" query already queued or arriving
+    },
+    "background", // no one is waiting on this — always yields to a live "Ask" query already queued or arriving
+    undefined,
+    extractionPrefix(todayISO));
     logDuration("Llama to-do extraction", start);
 
     const rawOutput = result.text.trim();

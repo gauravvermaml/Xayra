@@ -30,8 +30,8 @@ jest.mock("../services/settings/preferences", () => ({
 }));
 
 const MODEL_FILENAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
-const SESSION_FILE = "llama-prompt-session.bin";
-const META_FILE = "llama-prompt-session.json";
+const SESSION_FILE = "llama-prompt-session-rag.bin";
+const META_FILE = "llama-prompt-session-rag.json";
 
 /** In-memory stand-in for the document directory. */
 let files: Record<string, string> = {};

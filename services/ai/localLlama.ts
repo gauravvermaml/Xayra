@@ -383,23 +383,43 @@ async function resolveModelPath(): Promise<ResolvedModel> {
  * is ~28KB per token, so the few-hundred-token static prefix lands in the
  * low tens of MB — a cheap read, and cheap to discard.
  */
-const PROMPT_SESSION_FILENAME = "llama-prompt-session.bin";
-const PROMPT_SESSION_META_FILENAME = "llama-prompt-session.json";
+/**
+ * Which cached prefix a completion needs resident before it runs.
+ *
+ * Two prompts share this one llama context and they do NOT share a prefix:
+ * RAG answers open with their own system prompt, to-do extraction with a much
+ * longer one plus fourteen few-shot turns. Only one can occupy the KV cache at
+ * a time, so alternating between them used to evict the other and force a full
+ * re-prefill — measured at ~14s for RAG and ~77s for extraction on a Redmi
+ * Note 8 Pro. Keeping a pre-evaluated copy of EACH on disk turns that eviction
+ * from a re-prefill into a file read.
+ */
+export type PromptPrefix = {
+  /** Namespaces the session files. One pair of files per kind. */
+  kind: "rag" | "extraction";
+  /** Changes whenever the prefix text does — see `computeRagPrefixKey()` for
+   * the RAG one and `transformationEngine.ts` for extraction's. */
+  key: string;
+};
 
 type PromptSessionMeta = {
-  /** Invalidation key — see `computePromptSessionKey()`. */
   key: string;
   savedAt: number;
 };
 
-function promptSessionPaths(): { sessionPath: string; metaPath: string } | null {
+/** Which prefix is currently sitting in the context's KV cache, so a swap is
+ * only paid for when the next completion actually needs the other one. Reset
+ * whenever the context itself goes away. */
+let residentPrefixKind: PromptPrefix["kind"] | null = null;
+
+function promptSessionPaths(kind: PromptPrefix["kind"]): { sessionPath: string; metaPath: string } | null {
   const dir = FileSystem.documentDirectory;
   if (!dir) {
     return null;
   }
   return {
-    sessionPath: `${dir}${PROMPT_SESSION_FILENAME}`,
-    metaPath: `${dir}${PROMPT_SESSION_META_FILENAME}`,
+    sessionPath: `${dir}llama-prompt-session-${kind}.bin`,
+    metaPath: `${dir}llama-prompt-session-${kind}.json`,
   };
 }
 
@@ -433,8 +453,14 @@ function hashString(value: string): string {
  * only valid for the exact model and `n_ctx` it was produced with; restoring
  * across a model swap is undefined behaviour at the llama.cpp level.
  */
-function computePromptSessionKey(): string {
+function computeRagPrefixKey(): string {
   return `${hashString(buildCacheWarmupPrompt())}-${CHAT_MODEL.filename}-ctx4096`;
+}
+
+/** The RAG prefix descriptor, rebuilt on demand so it always reflects today's
+ * date baseline. */
+function ragPrefix(): PromptPrefix {
+  return { kind: "rag", key: computeRagPrefixKey() };
 }
 
 async function readPromptSessionMeta(metaPath: string): Promise<PromptSessionMeta | null> {
@@ -465,8 +491,8 @@ async function discardPromptSession(sessionPath: string, metaPath: string): Prom
  * is exactly the behaviour before this cache existed. A throw would turn a
  * cache miss into a broken app.
  */
-async function tryRestorePromptSession(context: LlamaContext): Promise<boolean> {
-  const paths = promptSessionPaths();
+async function tryRestorePromptSession(context: LlamaContext, prefix: PromptPrefix): Promise<boolean> {
+  const paths = promptSessionPaths(prefix.kind);
   if (!paths) {
     return false;
   }
@@ -477,7 +503,7 @@ async function tryRestorePromptSession(context: LlamaContext): Promise<boolean> 
     if (!meta) {
       return false;
     }
-    if (meta.key !== computePromptSessionKey()) {
+    if (meta.key !== prefix.key) {
       // Most often: the date rolled over. Drop it now rather than leaving
       // tens of MB of unusable cache sitting in the document directory.
       await discardPromptSession(sessionPath, metaPath);
@@ -491,7 +517,8 @@ async function tryRestorePromptSession(context: LlamaContext): Promise<boolean> 
 
     const restoreStart = nowMs();
     await context.loadSession(sessionPath);
-    logDuration("Llama prompt-session restore (KV cache from disk)", restoreStart);
+    residentPrefixKind = prefix.kind;
+    logDuration(`Llama prompt-session restore [${prefix.kind}] (KV cache from disk)`, restoreStart);
     return true;
   } catch (err) {
     console.warn("[Llama] Prompt-session restore failed, falling back to prefill:", err instanceof Error ? err.message : err);
@@ -507,8 +534,8 @@ async function tryRestorePromptSession(context: LlamaContext): Promise<boolean> 
  * has evaluated the static prefix. Best-effort: a failure here (no space,
  * permissions) costs a slower next start and nothing else.
  */
-async function persistPromptSession(context: LlamaContext): Promise<void> {
-  const paths = promptSessionPaths();
+async function persistPromptSession(context: LlamaContext, prefix: PromptPrefix): Promise<void> {
+  const paths = promptSessionPaths(prefix.kind);
   if (!paths) {
     return;
   }
@@ -521,10 +548,10 @@ async function persistPromptSession(context: LlamaContext): Promise<void> {
     // filesystem path.
     const bareSessionPath = sessionPath.startsWith("file://") ? sessionPath.slice(7) : sessionPath;
     const tokensSaved = await context.saveSession(bareSessionPath);
-    const meta: PromptSessionMeta = { key: computePromptSessionKey(), savedAt: Date.now() };
+    const meta: PromptSessionMeta = { key: prefix.key, savedAt: Date.now() };
     await FileSystem.writeAsStringAsync(metaPath, JSON.stringify(meta));
-    logDuration("Llama prompt-session save (KV cache to disk)", saveStart);
-    console.log(`[Llama] Prompt session cached (${tokensSaved} tokens)`);
+    logDuration(`Llama prompt-session save [${prefix.kind}] (KV cache to disk)`, saveStart);
+    console.log(`[Llama] Prompt session cached [${prefix.kind}] (${tokensSaved} tokens)`);
   } catch (err) {
     console.warn("[Llama] Prompt-session save failed:", err instanceof Error ? err.message : err);
     // Leave no half-written pair behind for a later load to trip over.
@@ -542,23 +569,27 @@ async function persistPromptSession(context: LlamaContext): Promise<void> {
  * key has genuinely moved on (the date rolled over, or an app update changed
  * the prompt).
  */
-async function persistPromptSessionIfStale(): Promise<void> {
-  const paths = promptSessionPaths();
+async function persistPromptSessionIfStale(prefix: PromptPrefix, context?: LlamaContext): Promise<void> {
+  const paths = promptSessionPaths(prefix.kind);
   if (!paths) {
     return;
   }
   const existing = await readPromptSessionMeta(paths.metaPath);
-  if (existing?.key === computePromptSessionKey()) {
+  if (existing?.key === prefix.key) {
+    return;
+  }
+  if (context) {
+    await persistPromptSession(context, prefix);
     return;
   }
   // Read the context directly rather than via getContext(): by the time this
   // runs the warm-up completion has already forced the context to exist, and
   // this must never be the thing that triggers a model load on its own.
-  const context = await contextPromise?.catch(() => null);
-  if (!context) {
+  const resolved = await contextPromise?.catch(() => null);
+  if (!resolved) {
     return;
   }
-  await persistPromptSession(context);
+  await persistPromptSession(resolved, prefix);
 }
 
 async function loadContext(
@@ -587,7 +618,7 @@ async function loadContext(
   // throughput with a throwaway one-word prompt that shares no prefix with
   // the cached one, so reading ~15MB back would be pure waste.
   if (restorePromptSession) {
-    await tryRestorePromptSession(context);
+    await tryRestorePromptSession(context, ragPrefix());
   }
   return context;
 }
@@ -946,6 +977,10 @@ type CompletionPriority = "interactive" | "background";
 type QueuedCompletion = {
   kind: "completion";
   params: CompletionParams;
+  /** Which cached prefix this prompt opens with, so the queue can swap it in
+   * before running. Omitted by trial/warm-up completions, which have no
+   * stable prefix worth caching. */
+  prefix?: PromptPrefix;
   onToken?: (data: TokenData) => void;
   resolve: (result: NativeCompletionResult) => void;
   reject: (err: unknown) => void;
@@ -1064,11 +1099,38 @@ function processCompletionQueue(): void {
   const settled: Promise<void> =
     job.kind === "completion"
       ? getContext()
-          .then((context) => {
+          .then(async (context) => {
             if (runningCompletion?.job === job) {
               runningCompletion.context = context;
             }
-            return context.completion(job.params, job.onToken);
+            // Swap the cached prefix in only when this job needs a different
+            // one than is already resident. Two prompts share this context and
+            // evict each other; restoring from disk costs a file read instead
+            // of a full re-prefill (~14s for RAG, ~77s for extraction).
+            if (job.prefix && job.prefix.kind !== residentPrefixKind) {
+              await tryRestorePromptSession(context, job.prefix);
+            }
+            const result = await context.completion(job.params, job.onToken);
+            // Whatever ran just left its prefix in the KV cache.
+            if (job.prefix) {
+              residentPrefixKind = job.prefix.kind;
+              // First real completion for this prefix doubles as the thing
+              // that produces its cache — the static opening is already
+              // evaluated, so saving now costs one file write and nothing is
+              // prefilled twice.
+              //
+              // AWAITED, deliberately. Firing this as `void` put the write
+              // outside the queue's exclusive window, where it raced the next
+              // job for the context: observed on-device failing with
+              // "Context is busy" when a queued completion had already
+              // started, and "Context not found" when the context had been
+              // released out from under it by the background handler.
+              // Awaiting keeps the save inside the slot this job already
+              // owns. It costs ~240ms, once per invalidation, and the
+              // `.catch` keeps a failed write from ever failing the answer.
+              await persistPromptSessionIfStale(job.prefix, context).catch(() => {});
+            }
+            return result;
           })
           .then((result) => {
             if (job.userCancelled) {
@@ -1134,10 +1196,11 @@ function processCompletionQueue(): void {
 export function runQueuedLlamaCompletion(
   params: CompletionParams,
   priority: CompletionPriority,
-  onToken?: (data: TokenData) => void
+  onToken?: (data: TokenData) => void,
+  prefix?: PromptPrefix
 ): Promise<NativeCompletionResult> {
   return new Promise((resolve, reject) => {
-    enqueue(priority, { kind: "completion", params, onToken, resolve, reject });
+    enqueue(priority, { kind: "completion", params, prefix, onToken, resolve, reject });
   });
 }
 
@@ -1258,7 +1321,8 @@ export async function generateLocalRAGAnswer(
         }
         onToken(data.token);
       }
-    }
+    },
+    ragPrefix()
   );
 
   logDuration("Llama total generation time", generationStart);
@@ -1399,7 +1463,7 @@ export async function prewarmLocalLlama(): Promise<void> {
       // restored — the completion above then had almost nothing to evaluate
       // — and skipped entirely when an identical, still-valid session is
       // already on disk.
-      await persistPromptSessionIfStale();
+      await persistPromptSessionIfStale(ragPrefix());
     })();
     // Same reset-on-failure as getContext()'s own contextPromise — a failed
     // warm-up (model not downloaded yet, a corrupt file) shouldn't poison
@@ -1428,6 +1492,10 @@ export async function releaseLocalLlama(): Promise<void> {
   }
   const pending = contextPromise;
   contextPromise = null;
+  // The KV cache dies with the context, so nothing is resident any more.
+  // Leaving this set would make the next completion skip its restore and
+  // silently pay a full prefill.
+  residentPrefixKind = null;
   const context = await pending.catch(() => null);
   await context?.release();
 }
