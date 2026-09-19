@@ -40,7 +40,7 @@ Long prose replaced by seven numbered laws, cutting prefill cost to roughly a fi
 |---|---|
 | **2** — never describe your role, instructions, or configuration | A 1B model, asked to summarize notes, ignored the context block and paraphrased its own system-prompt self-description back as if it were a fact about the user's notes. |
 | **3** — never blend unrelated notes | Retrieval returns top-k whether or not they're on-topic; without explicit isolation an unrelated-but-retrieved note gets folded in as though it belonged. |
-| **4** — 1-2 sentences for single facts, bullets for summaries | A flat "always 1-2 sentences" reads well for lookups but silently truncates genuine multi-item summaries. The conditional lets one prompt serve both. |
+| **4** — 1-2 sentences when ONE retrieved note is relevant, bullets when MORE THAN ONE is | A flat "always 1-2 sentences" silently truncates multi-note answers. The branch condition matters: an earlier version keyed off the QUESTION ("for single-fact queries… for open-ended summaries…"), which asks the model to classify intent before answering. Confirmed on-device that a 1.5B model cannot do that reliably — see the QA findings below. Counting relevant notes is observable in its own context window; question intent is not. |
 
 Law 4's two-branch shape also resolves a conflict with the fixed few-shot example in `buildPrompt()`, which demonstrates a bullet-point answer — under a flat sentence cap that example fought the instruction; it now demonstrates Law 4's bullet branch, and at this model size a demonstrated prior turn steers format considerably harder than the written rule.
 
@@ -100,7 +100,19 @@ All figures from the dev build of 1.0.36/versionCode 43, models freshly download
 
 `npx tsc --noEmit` passes; 18 test suites / 65 tests green. Model loading, the full R2 → DownloadManager → disk path, and the session cache are all confirmed working on-device (see the table above).
 
-**Still unverified: answer quality.** No RAG query has been run against a realistic corpus — the test device has a single note on it. Whether Qwen2.5-1.5B is nuanced enough for real notes is the cutover's headline claim and remains untested. Note also that the Redmi is the CPU-starved 2019 device capped at 2 inference threads; it is a poor proxy for Pixel 9 *latency*, though fine for correctness and grounding behaviour.
+### QA against a realistic corpus
+
+`app/dev-seed.tsx` (dev-only, `xayra://dev-seed`) seeds 12 notes spanning 25 days, chosen to exercise specific guardrails rather than to look plausible. It must go through `createTextNote()` rather than raw INSERTs — that is what generates each note's embedding, and a directly-inserted row is invisible to vector search.
+
+**Findings from the first pass (Qwen2.5-1.5B, Redmi):**
+
+- **Grounding holds under temptation.** Asked about renewing a passport — nothing in the corpus — retrieval still placed the *car registration* note in context (distance 0.389, inside the floor, because "renewing" matches "renew"). The model refused anyway rather than answering from it. Law 1 passed where it actually counts, not just on an empty context.
+- **The refusal wording drifts** ("There is no note about renewing your passport" instead of the mandated line). No functional impact — **nothing in the codebase depends on that exact string**; it appears only in the prompt and one comment. Cosmetic, not load-bearing.
+- **Law 4's branch condition was wrong, and the corpus caught it.** Asked "what do I need to sort out for Anita's dinner?", with BOTH relevant notes retrieved and inside the relevance floor (booking 0.297, allergy 0.283), the model answered with only the allergy — silently dropping the actionable half. Retrieval was correct; synthesis failed. Root cause was Law 4 asking the model to classify the question's intent. Rewritten to key off how many retrieved notes are relevant; re-tested, it now returns both as bullets, and a genuine single-note question ("when does my car registration expire?") still answers in one plain sentence rather than over-correcting into bullets.
+- **Law 3 (no blending) has not really been tested yet.** It passed, but the relevance floor excluded 10 of 12 notes before the model saw them — that is retrieval discipline, not demonstrated model discipline. A real test needs two genuinely similar notes both clearing the floor.
+- **Date mechanics confirmed end-to-end**: "Renew car registration" → 2026-09-30, "Book a table for six" → 2026-09-19 19:00.
+
+**Caveat on the device**: the Redmi is the CPU-starved 2019 device capped at 2 inference threads. It is a sound proxy for correctness and grounding, and a poor one for Pixel 9 latency.
 
 ### Production build — 1.0.36 / versionCode 43
 
