@@ -345,10 +345,213 @@ async function resolveModelPath(): Promise<ResolvedModel> {
  * accepted/persisted — every other caller omits it and gets whatever
  * `computeInferenceThreadCount()` currently resolves to.
  */
+/**
+ * PROMPT-SESSION CACHE — persists the evaluated KV state of the static
+ * prompt prefix to disk so a fresh context skips re-prefilling it.
+ *
+ * The problem this solves: `buildCacheWarmupPrompt()` runs the entire system
+ * prompt, date baseline and few-shot exchange through prefill, which is CPU
+ * work measured in seconds on a mid-range device. That cost is paid again on
+ * every cold start AND every reload after
+ * `releaseLocalLlamaOnBackground()` frees the context — and the release is
+ * deliberately kept (measured on a Redmi Note 8 Pro: 1.98GB native heap with
+ * the model resident, 0.51GB after release; holding ~2GB while backgrounded
+ * is what gets a process reaped by Android's low-memory killer). Session
+ * persistence doesn't replace that release, it removes its cost: the memory
+ * is still handed back, but coming home is a file read instead of a prefill.
+ *
+ * llama.cpp's own `--prompt-cache` works exactly this way; `saveSession`/
+ * `loadSession` are llama.rn's binding for it. Restoring seeds the context
+ * with the cached token sequence and its KV state, and the next completion
+ * reuses everything up to the first divergent token.
+ *
+ * Sizing (Qwen2.5-1.5B: 28 layers, 2 KV heads x 128 head_dim): the KV state
+ * is ~28KB per token, so the few-hundred-token static prefix lands in the
+ * low tens of MB — a cheap read, and cheap to discard.
+ */
+const PROMPT_SESSION_FILENAME = "llama-prompt-session.bin";
+const PROMPT_SESSION_META_FILENAME = "llama-prompt-session.json";
+
+type PromptSessionMeta = {
+  /** Invalidation key — see `computePromptSessionKey()`. */
+  key: string;
+  savedAt: number;
+};
+
+function promptSessionPaths(): { sessionPath: string; metaPath: string } | null {
+  const dir = FileSystem.documentDirectory;
+  if (!dir) {
+    return null;
+  }
+  return {
+    sessionPath: `${dir}${PROMPT_SESSION_FILENAME}`,
+    metaPath: `${dir}${PROMPT_SESSION_META_FILENAME}`,
+  };
+}
+
+/** FNV-1a, 32-bit. Not cryptographic and doesn't need to be — this only has
+ * to change reliably when the prompt text changes, and a collision would at
+ * worst reuse a stale cache for one day. Hand-rolled rather than pulling in
+ * expo-crypto, which is async and would make every context load await a
+ * native round-trip for a value used purely as a cache key. */
+function hashString(value: string): string {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i++) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+/**
+ * Everything that must invalidate the cached session, folded into one string.
+ *
+ * Hashing the fully-built warmup prompt covers the date automatically:
+ * `buildSystemPromptWithDate()` bakes today's date and the Monday-to-today
+ * calendar baseline directly into that text, so the hash changes at local
+ * midnight without needing a separate date field. That matters — a session
+ * restored the next morning would otherwise leave the model resolving
+ * "yesterday" and "this week" against a stale baseline, confidently and
+ * silently. The same hash also covers any edit to SYSTEM_PROMPT or the
+ * few-shot example shipped in an app update.
+ *
+ * The model filename and context size are appended because a session file is
+ * only valid for the exact model and `n_ctx` it was produced with; restoring
+ * across a model swap is undefined behaviour at the llama.cpp level.
+ */
+function computePromptSessionKey(): string {
+  return `${hashString(buildCacheWarmupPrompt())}-${CHAT_MODEL.filename}-ctx4096`;
+}
+
+async function readPromptSessionMeta(metaPath: string): Promise<PromptSessionMeta | null> {
+  try {
+    const raw = await FileSystem.readAsStringAsync(metaPath);
+    const parsed = JSON.parse(raw) as PromptSessionMeta;
+    return typeof parsed?.key === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Best-effort removal of a stale/corrupt session pair. Never throws — a
+ * leftover file costs disk space, which is not worth failing a load over. */
+async function discardPromptSession(sessionPath: string, metaPath: string): Promise<void> {
+  await Promise.all([
+    FileSystem.deleteAsync(sessionPath, { idempotent: true }).catch(() => {}),
+    FileSystem.deleteAsync(metaPath, { idempotent: true }).catch(() => {}),
+  ]);
+}
+
+/**
+ * Seeds a freshly-created context from the on-disk session, when one exists
+ * and is still valid for today's prompt. Returns whether it actually landed.
+ *
+ * Every failure path here is non-fatal by design: a missing, stale, corrupt
+ * or model-mismatched session just means paying the prefill this once, which
+ * is exactly the behaviour before this cache existed. A throw would turn a
+ * cache miss into a broken app.
+ */
+async function tryRestorePromptSession(context: LlamaContext): Promise<boolean> {
+  const paths = promptSessionPaths();
+  if (!paths) {
+    return false;
+  }
+  const { sessionPath, metaPath } = paths;
+
+  try {
+    const meta = await readPromptSessionMeta(metaPath);
+    if (!meta) {
+      return false;
+    }
+    if (meta.key !== computePromptSessionKey()) {
+      // Most often: the date rolled over. Drop it now rather than leaving
+      // tens of MB of unusable cache sitting in the document directory.
+      await discardPromptSession(sessionPath, metaPath);
+      return false;
+    }
+    const info = await FileSystem.getInfoAsync(sessionPath);
+    if (!info.exists) {
+      await discardPromptSession(sessionPath, metaPath);
+      return false;
+    }
+
+    const restoreStart = nowMs();
+    await context.loadSession(sessionPath);
+    logDuration("Llama prompt-session restore (KV cache from disk)", restoreStart);
+    return true;
+  } catch (err) {
+    console.warn("[Llama] Prompt-session restore failed, falling back to prefill:", err instanceof Error ? err.message : err);
+    // A session that failed to load will keep failing — don't retry it every
+    // launch.
+    await discardPromptSession(sessionPath, metaPath);
+    return false;
+  }
+}
+
+/**
+ * Writes the current context's KV state to disk, after the warm-up prefill
+ * has evaluated the static prefix. Best-effort: a failure here (no space,
+ * permissions) costs a slower next start and nothing else.
+ */
+async function persistPromptSession(context: LlamaContext): Promise<void> {
+  const paths = promptSessionPaths();
+  if (!paths) {
+    return;
+  }
+  const { sessionPath, metaPath } = paths;
+
+  try {
+    const saveStart = nowMs();
+    // `saveSession` (unlike `loadSession`) does NOT strip a `file://` prefix
+    // before handing the path to native, so it must be given a bare
+    // filesystem path.
+    const bareSessionPath = sessionPath.startsWith("file://") ? sessionPath.slice(7) : sessionPath;
+    const tokensSaved = await context.saveSession(bareSessionPath);
+    const meta: PromptSessionMeta = { key: computePromptSessionKey(), savedAt: Date.now() };
+    await FileSystem.writeAsStringAsync(metaPath, JSON.stringify(meta));
+    logDuration("Llama prompt-session save (KV cache to disk)", saveStart);
+    console.log(`[Llama] Prompt session cached (${tokensSaved} tokens)`);
+  } catch (err) {
+    console.warn("[Llama] Prompt-session save failed:", err instanceof Error ? err.message : err);
+    // Leave no half-written pair behind for a later load to trip over.
+    await discardPromptSession(sessionPath, metaPath);
+  }
+}
+
+/**
+ * Saves the current shared context's prefix state, unless an identical and
+ * still-valid session is already on disk.
+ *
+ * The skip matters: without it, every warm-up would rewrite tens of MB that
+ * are byte-for-byte equivalent to what is already there — on every launch,
+ * on flash storage, for no benefit. With it, a save happens only when the
+ * key has genuinely moved on (the date rolled over, or an app update changed
+ * the prompt).
+ */
+async function persistPromptSessionIfStale(): Promise<void> {
+  const paths = promptSessionPaths();
+  if (!paths) {
+    return;
+  }
+  const existing = await readPromptSessionMeta(paths.metaPath);
+  if (existing?.key === computePromptSessionKey()) {
+    return;
+  }
+  // Read the context directly rather than via getContext(): by the time this
+  // runs the warm-up completion has already forced the context to exist, and
+  // this must never be the thing that triggers a model load on its own.
+  const context = await contextPromise?.catch(() => null);
+  if (!context) {
+    return;
+  }
+  await persistPromptSession(context);
+}
+
 async function loadContext(
   path: string,
   label: string,
-  threadsOverride?: number
+  threadsOverride?: number,
+  restorePromptSession = true
 ): Promise<LlamaContext> {
   const coldStart = nowMs();
   console.log(`[Llama] Initialized Model: ${label}`);
@@ -362,6 +565,16 @@ async function loadContext(
   // n_ctx/n_threads below.)
   const context = await initLlama({ model: path, n_ctx: 4096, n_threads: threads, use_mmap: true });
   logDuration("Llama cold-start (GGUF model load from disk)", coldStart);
+  // Restoring here rather than in prewarmLocalLlama() means EVERY fresh
+  // context gets the cached prefix — the cold start, and equally the reload
+  // after `releaseLocalLlamaOnBackground()` has torn the context down, which
+  // is the far more frequent case in real use. Skipped for the thread-
+  // escalation trials (`restorePromptSession: false`): those measure decode
+  // throughput with a throwaway one-word prompt that shares no prefix with
+  // the cached one, so reading ~15MB back would be pure waste.
+  if (restorePromptSession) {
+    await tryRestorePromptSession(context);
+  }
   return context;
 }
 
@@ -432,7 +645,13 @@ export async function attemptThreadEscalation(
 
     await releaseLocalLlama();
 
-    const candidateContext = await loadContext(path, label, candidateThreads);
+    // No session restore: this context exists to MEASURE decode throughput
+    // against a throwaway one-word prompt that shares no prefix with the
+    // cached session, so reading it back would cost I/O and skew nothing in
+    // return. If the candidate is promoted to the shared context, the next
+    // prewarm re-prefills and re-saves — thread escalation runs once per
+    // install, so that one-off cost is not worth complicating this path for.
+    const candidateContext = await loadContext(path, label, candidateThreads, false);
     const result = await candidateContext.completion(
       { prompt: buildWarmupPrompt(), n_predict: TRIAL_N_PREDICT },
       () => {}
@@ -517,7 +736,13 @@ export async function attemptOptimisticThreadCalibration(): Promise<
   return runExclusiveLlamaTask(async () => {
     const { path, label } = await resolveModelPath();
     await releaseLocalLlama();
-    const candidateContext = await loadContext(path, label, candidateThreads);
+    // No session restore: this context exists to MEASURE decode throughput
+    // against a throwaway one-word prompt that shares no prefix with the
+    // cached session, so reading it back would cost I/O and skew nothing in
+    // return. If the candidate is promoted to the shared context, the next
+    // prewarm re-prefills and re-saves — thread escalation runs once per
+    // install, so that one-off cost is not worth complicating this path for.
+    const candidateContext = await loadContext(path, label, candidateThreads, false);
 
     const completionPromise = candidateContext.completion(
       { prompt: buildWarmupPrompt(), n_predict: TRIAL_N_PREDICT },
@@ -1154,6 +1379,13 @@ export async function prewarmLocalLlama(): Promise<void> {
       // "background": nothing is waiting on a warm-up itself, though in
       // practice it only ever runs at boot when the queue's already empty.
       await runQueuedLlamaCompletion({ prompt: buildCacheWarmupPrompt(), n_predict: 1 }, "background", () => {});
+      // Persist the prefix this warm-up just evaluated, so the NEXT context
+      // (cold start, or the reload after a background release) restores it
+      // instead of prefilling again. Cheap when the session was already
+      // restored — the completion above then had almost nothing to evaluate
+      // — and skipped entirely when an identical, still-valid session is
+      // already on disk.
+      await persistPromptSessionIfStale();
     })();
     // Same reset-on-failure as getContext()'s own contextPromise — a failed
     // warm-up (model not downloaded yet, a corrupt file) shouldn't poison
@@ -1208,5 +1440,16 @@ export async function releaseLocalLlama(): Promise<void> {
  * an answer already being generated for the user.
  */
 export function releaseLocalLlamaOnBackground(): Promise<void> {
-  return runExclusiveLlamaTask(() => releaseLocalLlama(), "interactive");
+  return runExclusiveLlamaTask(async () => {
+    await releaseLocalLlama();
+    // Re-arm the warm-up. `warmupPromise` is memoized and only cleared on
+    // FAILURE, so without this a successful warm-up stays "done" for the
+    // life of the JS runtime even though the context it warmed has just been
+    // torn down. Restoring the prefix is handled by `loadContext()` on the
+    // next load, so this is not about the reload path — it is about the
+    // SAVE: if the app sits backgrounded across local midnight, the cached
+    // session's date key goes stale and gets discarded, and only a re-armed
+    // warm-up will write a fresh one for the new day.
+    warmupPromise = null;
+  }, "interactive");
 }
