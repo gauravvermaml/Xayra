@@ -708,7 +708,16 @@ function buildSystemPrompt(todayISO: string, detectedPhrases: string[]): string 
     "- A note may mention more than one date for context (e.g. when something expires) while only one " +
     "of them is when the TASK itself should happen. Use the date attached to the action the user needs " +
     "to DO, never a date that's only explaining why the task exists.\n" +
-    "- Never invent a date phrase that isn't actually in the note — leave date_phrase empty instead.\n\n" +
+    "- Never invent a date phrase that isn't actually in the note — leave date_phrase empty instead.\n" +
+    "- WHO has to act: check the SUBJECT of the sentence the task comes from. Notes often mention " +
+    "what OTHER people are doing, and that is context about their life, not a to-do for the user. If " +
+    "the subject is someone else (\"Elias is moving to Perth in January\", \"Sarah starts her new job " +
+    "Monday\", \"the builder is coming Tuesday\"), extract NOTHING from it — skip that clause " +
+    "entirely. Never turn another person's action into a task for the user, and never insert the " +
+    "user into it (\"move to Perth WITH Elias\" is wrong twice: the user isn't moving, and \"with\" " +
+    "was never in the note). Only extract when the user is the one who must do something — including " +
+    "when that is implied by an instruction aimed at them (\"Dr Patel wants the blood test redone\" " +
+    "means the USER must book it).\n\n" +
     "If the note contains no actionable to-do items at all, respond with exactly: []"
   );
 }

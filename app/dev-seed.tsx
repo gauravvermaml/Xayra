@@ -68,6 +68,11 @@ const SEED_NOTES: SeedNote[] = [
 
 const SECONDS_PER_DAY = 86_400;
 
+/** Same text as seed note index 5 — kept as its own constant so the probe
+ * button re-tests the exact wording that failed, not a paraphrase. */
+const ATTRIBUTION_PROBE_NOTE =
+  "Eli recommended the book The Overstory. His brother Elias is moving to Perth in January.";
+
 export default function DevSeedScreen() {
   const router = useRouter();
   const [log, setLog] = useState<string[]>([]);
@@ -88,6 +93,32 @@ export default function DevSeedScreen() {
   const append = useCallback((line: string) => {
     setLog((prev) => [...prev, line]);
   }, []);
+
+  /**
+   * Adds ONE note whose second clause has a third party as its subject.
+   *
+   * Re-running the full 12-note seed to re-test a single extraction rule
+   * would add eleven duplicates and ~20 minutes of extraction to get at one
+   * answer. This exists because that note produced a real failure: the model
+   * turned "His brother Elias is moving to Perth in January" into a to-do for
+   * the USER — "Move to Perth with Elias in January" — inventing both the
+   * subject and the word "with".
+   */
+  const handleProbe = useCallback(async () => {
+    setBusy(true);
+    setLog([]);
+    try {
+      await createTextNote(ATTRIBUTION_PROBE_NOTE);
+      append("Added attribution probe note.");
+      append('PASS = a to-do for "Read The Overstory" only (or nothing at all).');
+      append('FAIL = any to-do about moving to Perth — that is Elias\'s life, not a user task.');
+      append("Extraction takes ~2 min on this device; check Your To-Dos after.");
+    } catch (err) {
+      append(`FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [append]);
 
   const handleSeed = useCallback(async () => {
     setBusy(true);
@@ -145,6 +176,10 @@ export default function DevSeedScreen() {
         style={[styles.button, busy && styles.buttonDisabled]}
       >
         <Text style={styles.buttonLabel}>{busy ? "Seeding…" : `Seed ${SEED_NOTES.length} notes`}</Text>
+      </Pressable>
+
+      <Pressable accessibilityRole="button" onPress={handleProbe} disabled={busy} style={styles.secondaryButton}>
+        <Text style={styles.secondaryLabel}>Add 1 attribution probe note</Text>
       </Pressable>
 
       <Pressable accessibilityRole="button" onPress={goHome} disabled={busy} style={styles.secondaryButton}>
