@@ -31,7 +31,7 @@ jest.mock("../services/ai/localWhisper", () => ({
   isTranscriptionInProgress: jest.fn(() => false),
 }));
 
-import { resolveDateAndTime } from "../services/ai/transformationEngine";
+import { detectDatePhrases, resolveDateAndTime } from "../services/ai/transformationEngine";
 
 // A Saturday, deliberately mid-month so "end of September" is still ahead of
 // it while "7 days before today" would land in the past.
@@ -71,6 +71,36 @@ describe('"end of <month>" phrasing', () => {
 
   it("still applies the offset when the phrase points into next year", () => {
     expect(resolveDateAndTime("3 days before the end of March", TODAY, "none").actionDate).toBe("2027-03-28");
+  });
+});
+
+describe("candidate phrases offered to the model", () => {
+  /**
+   * The seeded-corpus run showed this matters more than the resolver alone.
+   * For the note "File the tax returns 7 days before the end of September
+   * this year", un-rewritten chrono offered three fragments — "7 days
+   * before" (2026-09-12), "September" (2027-09-01) and "this year"
+   * (2026-01-01) — and the 1.5B model, told to pick from that menu, stitched
+   * two of them into "7 days before this year". The resolver then had no
+   * "end of <month>" text left to rewrite, fell back to the bare offset,
+   * resolved into the past, and got clamped to today. Fixing the resolver
+   * alone could never have caught this; the bad candidate set had to go.
+   */
+  it("offers one correct candidate for the end-of-month note, not misleading fragments", () => {
+    const phrases = detectDatePhrases(
+      "File the tax returns 7 days before the end of September this year.",
+      TODAY
+    );
+
+    expect(phrases).toHaveLength(1);
+    expect(resolveDateAndTime(phrases[0], TODAY, "none").actionDate).toBe("2026-09-23");
+    // The fragments the model previously assembled a wrong answer from.
+    expect(phrases).not.toContain("7 days before");
+    expect(phrases).not.toContain("this year");
+  });
+
+  it("still detects ordinary date phrases untouched", () => {
+    expect(detectDatePhrases("Call the dentist tomorrow.", TODAY)).toContain("tomorrow");
   });
 });
 

@@ -200,9 +200,26 @@ const BARE_DAY_OF_MONTH_PATTERN = /\b(?:on\s+)?(?:the\s+)?(\d{1,2})(?:st|nd|rd|t
  * legitimate to hand back as a task's date_phrase; the actual date
  * arithmetic still happens exactly once, in resolveDateAndTime, unchanged.
  */
-function detectDatePhrases(rawText: string, todayISO: string): string[] {
+// Exported for the same test-only reason as resolveDateAndTime below: the
+// candidate set this produces is what steers the model's date_phrase choice,
+// and it is worth asserting directly rather than through a mocked completion.
+export function detectDatePhrases(rawText: string, todayISO: string): string[] {
   const referenceDate = parseIsoDateLocal(todayISO);
-  const results = chrono.parse(rawText, referenceDate, { forwardDate: true });
+  // Same "end of <month>" rewrite `resolveDateAndTime` applies, and for a
+  // sharper reason than symmetry: this pass decides what the MODEL is offered
+  // as legitimate date phrases, and chrono's raw candidates for such a phrase
+  // are actively misleading. Confirmed on-device against
+  // "File the tax returns 7 days before the end of September this year":
+  // un-rewritten, chrono returns three fragments — "7 days before"
+  // (2026-09-12), "September" (2027-09-01) and "this year" (2026-01-01) — and
+  // the model, told to pick from that menu, stitched two together and emitted
+  // "7 days before this year". Not a hallucination so much as the best
+  // available choice from a bad set. After the rewrite there is exactly one
+  // candidate, "7 days before 30 September 2026", which resolves correctly.
+  //
+  // The rewritten text is not verbatim from the note, which is fine: a
+  // date_phrase is only ever fed back into date resolution, never shown.
+  const results = chrono.parse(expandEndOfMonthPhrases(rawText, referenceDate), referenceDate, { forwardDate: true });
 
   const seen = new Set<string>();
   const phrases: string[] = [];
