@@ -20,7 +20,7 @@
         "backgroundColor": "#0E0F12"
       },
       "predictiveBackGestureEnabled": false,
-      "versionCode": 42,
+      "versionCode": 43,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.USE_BIOMETRIC",

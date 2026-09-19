@@ -68,7 +68,18 @@ Either path additionally needs concurrent raw-PCM access alongside the existing 
 
 ### Verification status
 
-`npx tsc --noEmit` passes; 16 test suites / 50 tests green. **Nothing has been run on a device.** Static checks confirm the code compiles and emits ChatML — they cannot confirm that Qwen2.5-1.5B answers real notes well, nor that the ~15s cold retrieval actually improved. Both need a real build on the Pixel 9.
+`npx tsc --noEmit` passes; 16 test suites / 50 tests green. **Nothing has been run on a device.** Static checks confirm the code compiles and emits ChatML — they cannot confirm that Qwen2.5-1.5B answers real notes well, nor that the ~15s cold retrieval actually improved. Both need real use on the Pixel 9.
+
+### Production build — 1.0.36 / versionCode 43
+
+Cut 2026-09-19 via `eas build --platform android --profile production`.
+
+- Build log: https://expo.dev/accounts/gauravsinghverma/projects/silent-confidant/builds/af8d48c9-85ce-4a46-a714-56fd06ea8843
+- Artifact (.aab): https://expo.dev/artifacts/eas/EJmL7YUysQmypgCEeh5QwigVrCRdpdGEMrcPt68wFAc.aab
+
+Needs manual upload to Play Console Internal Testing — not submitted automatically.
+
+**Expected first-launch behaviour on an upgrading device** (this is the first release where an existing install changes model): `deleteRetiredChatModels()` reclaims the old Llama GGUF, then setup re-runs to download the 1.07 GB Qwen model over Wi-Fi. Chat shows the "downloading…" callout until that finishes. This is correct behaviour on a one-time migration, but it presents exactly like a regression to anyone not expecting it.
 
 ## Build 46 — Qwen2.5-3B-Instruct Model Trial *(superseded by Build 47 above)*
 
