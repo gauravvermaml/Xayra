@@ -853,6 +853,29 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
     ]),
   },
   {
+    // Deliberately adjacent to the Shivanya turn above, because together
+    // they draw the line this file kept getting wrong. That one teaches
+    // "another person's POSSESSION that the user must act on IS a task."
+    // On its own it also taught, accidentally, "a third party appears ->
+    // emit a task," which is the opposite of what's wanted when the third
+    // party is doing something themselves.
+    //
+    // Confirmed on-device twice. From "Eli recommended the book The
+    // Overstory. His brother Elias is moving to Perth in January",
+    // extraction produced a to-do for the USER reading "Move to Perth with
+    // Elias in January" — a commitment the user never made, with "with"
+    // invented outright. Adding a prose rule (see "WHO has to act" in
+    // buildSystemPrompt) dropped the fabricated "with Elias" but STILL
+    // emitted "Move to Perth": the rule alone was not enough against eight
+    // worked examples that all end in a task being produced.
+    //
+    // So this turn demonstrates the skip itself. Note it deliberately keeps
+    // a date ("in March") in the clause being skipped: a date is not a
+    // licence to invent a task, and the failing note had one too.
+    input: "Ravi recommended the book Sapiens. His sister Meera is moving to Adelaide in March.",
+    answer: JSON.stringify([{ task: "Read Sapiens", date_phrase: "", recurrence: "none" }]),
+  },
+  {
     // Confirmed on-device miss: every other example above is a full
     // sentence with "I need to"/"remind me to" framing, and the date phrase
     // always has more words trailing after it ("...this Friday about the
@@ -968,7 +991,23 @@ function isRecurrence(value: unknown): value is Recurrence {
  * entirely (an empty/missing task), rather than throwing and discarding
  * every other item the model got right.
  */
-function normalizeExtracted(
+/**
+ * Whether the note is a single sentence — the precondition for auto-filling a
+ * missing date from chrono's lone candidate (see its call site below).
+ *
+ * Deliberately blunt: any terminator splitting the note into two or more
+ * non-empty parts disqualifies it. A note that is one long run-on clause, the
+ * natural shape of a short voice transcript, still qualifies.
+ */
+function isSingleSentence(text: string): boolean {
+  return text.split(/[.!?]+/).filter((part) => part.trim().length > 0).length <= 1;
+}
+
+// Exported test-only, same reason as resolveDateAndTime/detectDatePhrases
+// above: the auto-fill reconciliation below is pure, deterministic, and has
+// now produced one silent real-world regression — it is worth asserting
+// directly rather than only through a two-minute on-device extraction.
+export function normalizeExtracted(
   raw: unknown,
   todayISO: string,
   rawNoteText: string,
@@ -1028,7 +1067,12 @@ function normalizeExtracted(
         );
         datePhrase = "";
       }
-    } else if (validEntries.length === 1 && detectedPhrases.length === 1 && recurrence === "none") {
+    } else if (
+      validEntries.length === 1 &&
+      detectedPhrases.length === 1 &&
+      recurrence === "none" &&
+      isSingleSentence(rawNoteText)
+    ) {
       // The one case that's genuinely safe to auto-fill: a single-task,
       // NON-recurring note where chrono found exactly one date candidate
       // and the model still came back empty — no ambiguity about which
@@ -1047,6 +1091,25 @@ function normalizeExtracted(
       // chrono only ever detects calendar DATES, never recurrence CADENCES
       // ("every N days" isn't a date, it's a repeat rule) — so its
       // candidates are only trustworthy fill-ins for non-recurring tasks.
+      //
+      // The `isSingleSentence` guard is the second such correction, and it
+      // closes a hole that only OPENED once extraction started correctly
+      // skipping clauses. "1 task + 1 date candidate" used to imply the two
+      // belonged together, because every clause produced a task. Now that a
+      // third party's action is deliberately skipped (see the "WHO has to
+      // act" rule and the Ravi/Meera example), the surviving lone task can
+      // sit in one sentence while the lone date candidate belongs to a
+      // DIFFERENT, discarded one. Confirmed on-device: "Eli recommended the
+      // book The Overstory. His brother Elias is moving to Perth in
+      // January." correctly yielded only "Read The Overstory" with an empty
+      // date_phrase from the model — and this auto-fill then stapled
+      // January onto it, dating a book recommendation to 2027-01-01. The
+      // model was right and the reconciliation step overrode it.
+      //
+      // Requiring a single sentence keeps the original motivating fix
+      // ("Book a movie ticket this Friday.") working while refusing to
+      // guess across sentence boundaries. A multi-sentence note simply
+      // falls back to the no-date default, which is the safe direction.
       datePhrase = detectedPhrases[0];
     }
     // Multi-task, multi-candidate notes are deliberately left alone here —
