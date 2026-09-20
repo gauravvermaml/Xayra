@@ -53,6 +53,9 @@ export type CompletionRequest = {
   /** Fails the case rather than hanging the whole run on a model that has
    * started looping and will not emit a stop token. */
   timeoutMs?: number;
+  /** Stop strings, for prose (RAG) generation. When set, the output is taken
+   * as free text rather than scanned for a JSON array. */
+  stop?: readonly string[];
 };
 
 export type CompletionResult = {
@@ -131,6 +134,82 @@ function extractJsonArray(stdout: string): string {
 }
 
 /**
+ * Pulls a prose answer out of the interactive front-end's stdout: everything
+ * after the echoed prompt's final assistant marker, minus the trailing
+ * throughput line and "Exiting...".
+ */
+function extractProse(stdout: string, prompt: string): string {
+  // Anchor on the TAIL of the prompt, not on a turn marker.
+  //
+  // The obvious approach — slice after the last "<|im_start|>assistant" — is
+  // wrong here, and silently so. This build echoes the whole prompt back, the
+  // echo is line-wrapped, and the marker does not survive verbatim. The slice
+  // then failed, the full stdout was returned as the "answer", and every RAG
+  // case was scored against the PROMPT. Because the system prompt quotes the
+  // refusal line inside LAW 1, the refusal detector matched the instruction
+  // text and four correct answers were reported as wrongful refusals.
+  //
+  // The anchor is the prompt's last line of real CONTENT — the note text or
+  // the user's question — taken from the prompt itself so no caller has to
+  // supply it. Template markers and the trailing assistant cue are skipped
+  // because the echo reformats them; a content line survives intact.
+  //
+  // A fixed-length tail slice was tried first and did not work: the echo is
+  // line-wrapped, so the last N characters never matched, the slice silently
+  // returned the whole stdout, and the scorer graded the PROMPT.
+  // Works backwards from the end, keeping lines until one turns up that came
+  // from the prompt. Everything after the echo is the answer, and nothing in
+  // the answer should match a prompt line verbatim.
+  //
+  // Two anchor-based attempts failed before this. A fixed-length tail slice
+  // never matched because the echo is line-wrapped. Anchoring on the prompt's
+  // last content line did not work either: this front-end RENDERS the turn
+  // markers ("<|im_start|>system" prints as "> system"), so the echo is not a
+  // substring of the prompt at all. Both failures were silent — the slice
+  // returned the entire stdout, and because the system prompt quotes the
+  // refusal line inside LAW 1, the scorer read the instruction as the answer
+  // and reported four correct responses as wrongful refusals.
+  const promptLines = new Set(
+    prompt
+      .split(/\r?\n/)
+      .map((line) => line.replace(/<\|[a-zA-Z0-9_]+\|>/g, "").trim())
+      .filter((line) => line.length > 0)
+  );
+
+  const stdoutLines = stdout.split(/\r?\n/).map((line) => line.replace(/<\|[a-zA-Z0-9_]+\|>/g, "").trimEnd());
+
+  const answerLines: string[] = [];
+  for (let i = stdoutLines.length - 1; i >= 0; i--) {
+    const line = stdoutLines[i];
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      // Blank lines inside an answer are kept, but a run of them before any
+      // answer text has been seen is just the front-end's spacing.
+      if (answerLines.length > 0) answerLines.unshift(line);
+      continue;
+    }
+    if (trimmed.startsWith("[ Prompt:") || trimmed === "Exiting..." || trimmed.startsWith(">")) {
+      continue;
+    }
+    // The front-end elides long prompts with "... (truncated)", so that line
+    // is not a verbatim prompt line and would otherwise be read as answer
+    // text. It marks the end of the echo just as reliably.
+    if (promptLines.has(trimmed) || trimmed.includes("... (truncated)")) {
+      break;
+    }
+    answerLines.unshift(line);
+  }
+
+  let body = answerLines.join("\n");
+  // The front-end appends a throughput line and an exit notice after the
+  // answer; neither is model output.
+  return body
+    .split("[ Prompt:")[0]
+    .replace(/\bExiting\.\.\.\s*$/, "")
+    .trim();
+}
+
+/**
  * Runs one completion. Temp files are created under a unique directory per
  * call and removed in `finally`, so a thrown error, a timeout, or a failed
  * assertion never leaves a multi-KB prompt or grammar behind — a 150-case run
@@ -141,6 +220,7 @@ export async function runCompletion(request: CompletionRequest): Promise<Complet
     modelPath,
     prompt,
     grammar,
+    stop,
     contextSize = 4096,
     maxTokens = 512,
     timeoutMs = 120_000,
@@ -165,6 +245,10 @@ export async function runCompletion(request: CompletionRequest): Promise<Complet
       "-v",  // restores the absolute token count in the timing line
     ];
 
+    for (const stopString of stop ?? []) {
+      args.push("--reverse-prompt", stopString);
+    }
+
     if (grammar) {
       const grammarPath = join(workDir, "grammar.gbnf");
       await writeFile(grammarPath, grammar, "utf8");
@@ -178,7 +262,9 @@ export async function runCompletion(request: CompletionRequest): Promise<Complet
     });
 
     return {
-      text: extractJsonArray(stdout),
+      // Grammar-constrained cases emit a JSON array; prose cases do not, and
+      // scanning them for brackets would mangle the answer.
+      text: grammar ? extractJsonArray(stdout) : extractProse(stdout, prompt),
       outputTokens: parseOutputTokens(stdout, stderr),
       durationMs: Date.now() - startedAt,
     };

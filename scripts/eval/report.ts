@@ -74,6 +74,9 @@ export function renderReport(scores: CaseScore[], summary: Aggregate, modelLabel
   );
   lines.push(`    Negative constraints ${ratedPct(summary.negativeConstraintRate)}`);
   lines.push(
+    `    Grounding (RAG)      ${summary.grounding === null ? dim("n/a") : ratedPct(summary.grounding)}`
+  );
+  lines.push(
     `    Mean output tokens   ${summary.meanOutputTokens === null ? dim("n/a") : summary.meanOutputTokens.toFixed(0)}`
   );
   lines.push(dim(`    Wall clock           ${(summary.totalDurationMs / 1000).toFixed(1)}s`));

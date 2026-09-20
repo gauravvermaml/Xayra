@@ -11,9 +11,11 @@ import {
   TODO_EXTRACTION_GRAMMAR,
   type ExtractedToDo,
 } from "../../services/ai/extractionLogic";
+import { buildPrompt as buildRagPrompt, CHAT_TEMPLATE_STOP_TOKENS } from "../../services/ai/ragPrompt";
+import { formatNoteContext, sanitizeLLMResponse } from "../../services/ai/ragFormatting";
 import { runCompletion } from "./llamaRunner";
 import { renderReport } from "./report";
-import { aggregate, scoreCase, type EvalCase, type CaseScore } from "./scoring";
+import { aggregate, scoreCase, scoreRagCase, type EvalCase, type CaseScore } from "./scoring";
 
 /**
  * Tier 2 evaluation harness.
@@ -61,7 +63,39 @@ function parseAndReconcile(rawOutput: string, evalCase: EvalCase, detectedPhrase
   }
 }
 
+/**
+ * Mirrors generateRAGAnswer(), minus retrieval: the corpus supplies the notes
+ * directly so grounding is measured against a FIXED context. Letting real
+ * hybrid search pick the notes would conflate two different failures — bad
+ * retrieval and bad grounding — and make the score non-reproducible.
+ *
+ * The empty-context string is copied from rag.ts deliberately; the prompt's
+ * refusal behaviour is tuned to that exact framing.
+ */
+async function runRagCase(evalCase: EvalCase, modelPath: string): Promise<CaseScore> {
+  const contexts = evalCase.contexts ?? [];
+  const noteContext =
+    contexts.length > 0
+      ? formatNoteContext(contexts.map((c) => ({ content: c.content, transcript: null, createdAt: c.createdAt })))
+      : "--- NOTE CONTEXT ---\nNo relevant voice notes were found.";
+
+  const prompt = buildRagPrompt(evalCase.query ?? "", noteContext);
+  const completion = await runCompletion({
+    modelPath,
+    prompt,
+    contextSize: 4096,
+    maxTokens: 512,
+    stop: CHAT_TEMPLATE_STOP_TOKENS,
+  });
+
+  const answer = sanitizeLLMResponse(completion.text);
+  return scoreRagCase(evalCase, answer, completion.outputTokens, completion.durationMs);
+}
+
 async function runCase(evalCase: EvalCase, modelPath: string): Promise<CaseScore> {
+  if (evalCase.kind === "rag") {
+    return runRagCase(evalCase, modelPath);
+  }
   const detectedPhrases = detectDatePhrases(evalCase.note, evalCase.today);
   const prompt = buildPrompt(evalCase.note, evalCase.today, detectedPhrases);
 

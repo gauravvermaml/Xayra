@@ -24,7 +24,6 @@ export {
 import {
   CHAT_TEMPLATE_STOP_TOKENS,
   runQueuedLlamaCompletion,
-  SHARED_XAYRA_PREAMBLE,
   type PromptPrefix,
 } from "./localLlama";
 import { isTranscriptionInProgress } from "./localWhisper";
