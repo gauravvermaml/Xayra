@@ -5,6 +5,7 @@ import { initLlama, LlamaContext, type CompletionParams, type NativeCompletionRe
 import { isTranscriptionInProgress } from "./localWhisper";
 import { MIN_USABLE_TOKENS_PER_SECOND, recordCompletionSpeed } from "./modelPerformanceTracker";
 import { logDuration, nowMs } from "./perf";
+import { SHARED_XAYRA_PREAMBLE } from "./promptPreamble";
 import { readPreferences } from "../settings/preferences";
 
 /**
@@ -194,8 +195,9 @@ export const LLAMA_MODEL_MISSING_ERROR_PREFIX = "No local Llama model found.";
  * task text itself contains a mistranscribed word benefits from the same
  * tolerance RAG answers already had.
  */
-export const SHARED_XAYRA_PREAMBLE =
-  "You are Xayra, an on-device personal voice notes assistant. Audio was processed via STT; contextually correct phonetic typos (e.g., translate \"I need a\" or \"a neater\" to the name \"Anita\").\n\n";
+// Re-exported so existing importers keep their path; see promptPreamble.ts
+// for why the string itself lives in a module with no imports.
+export { SHARED_XAYRA_PREAMBLE } from "./promptPreamble";
 
 const SYSTEM_PROMPT =
   SHARED_XAYRA_PREAMBLE +
