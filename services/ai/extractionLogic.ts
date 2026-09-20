@@ -1011,7 +1011,16 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
     answer: JSON.stringify([]),
   },
   {
-    input: "Mark's flight got delayed by three hours.",
+    // No proper nouns anywhere in the empty-result examples, deliberately.
+    // This turn previously read "Mark's flight got delayed by three hours."
+    // and the name leaked: given an unrelated descriptive note about a
+    // garden, extraction returned "Mark the garden" — a name lifted from the
+    // example welded onto a real word from the note. Because "garden" IS in
+    // the note, the fabrication guard saw a legitimate anchor and let it
+    // through. A distinctive token in a negative example is exactly the kind
+    // of thing a small model splices into output when it has nothing to
+    // extract, so these examples stay impersonal.
+    input: "The train was delayed by twenty minutes.",
     answer: JSON.stringify([]),
   },
   {

@@ -75,3 +75,6 @@ ui_dump.xml
 # Local GGUF models for the desktop eval harness (multi-GB, never committed)
 models/
 *.gguf
+
+# Concatenation of corpus.jsonl + corpus-heldout.jsonl, rebuilt on demand
+scripts/eval/corpus-full.jsonl
