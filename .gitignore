@@ -71,3 +71,7 @@ ui_dump.xml
 
 # Local wrangler dev-mode state/cache (r2 object put without --remote lands here)
 .wrangler/
+
+# Local GGUF models for the desktop eval harness (multi-GB, never committed)
+models/
+*.gguf
