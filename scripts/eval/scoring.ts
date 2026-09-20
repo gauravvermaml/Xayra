@@ -9,6 +9,10 @@ import type { ExtractedToDo } from "../../services/ai/extractionLogic";
 
 export type ExpectedTask = {
   task: string;
+  /** Equally acceptable phrasings. Used where more than one wording is a
+   * genuinely correct reading of the note, rather than loosening the global
+   * match threshold and letting unrelated tasks through everywhere. */
+  alts?: string[];
   actionDate?: string;
   recurrence?: string;
 };
@@ -125,6 +129,15 @@ function taskKeywords(text: string): string[] {
 const TASK_MATCH_THRESHOLD = 0.6;
 
 function tasksMatch(expected: ExpectedTask, actual: ExtractedToDo): boolean {
+  if (expected.alts?.some((alt) => phrasesMatch(alt, actual.task))) {
+    return true;
+  }
+  return phrasesMatch(expected.task, actual.task);
+}
+
+function phrasesMatch(expectedText: string, actualText: string): boolean {
+  const expected: ExpectedTask = { task: expectedText };
+  const actual = { task: actualText } as ExtractedToDo;
   const expectedWords = taskKeywords(expected.task);
   const actualWords = taskKeywords(actual.task);
   if (expectedWords.length === 0 || actualWords.length === 0) {
@@ -166,6 +179,25 @@ function pairTasks(
   }
 
   return { pairs, unmatchedExpected, unmatchedActual: remaining };
+}
+
+/**
+ * Substring match, falling back to order-independent token containment.
+ *
+ * A plain `includes` asserts a FORMAT as much as a fact. The corpus asked for
+ * "30 September" and the model answered "September 30, 2026" — factually
+ * correct, scored as a missing fact. Requiring every token of the needle to
+ * appear somewhere keeps the assertion about content while tolerating the
+ * model's choice of date rendering.
+ */
+function containsPhrase(haystack: string, needle: string): boolean {
+  const lowerHaystack = haystack.toLowerCase();
+  const lowerNeedle = needle.toLowerCase();
+  if (lowerHaystack.includes(lowerNeedle)) {
+    return true;
+  }
+  const tokens = lowerNeedle.split(/\s+/).filter((token) => token.length > 0);
+  return tokens.length > 1 && tokens.every((token) => lowerHaystack.includes(token));
 }
 
 function f1Score(precision: number, recall: number): number {
@@ -219,7 +251,7 @@ export function scoreCase(
 
   const forbidden = evalCase.expect.mustNotContain ?? [];
   const haystack = `${rawOutput} ${resolved.map((t) => t.task).join(" ")}`.toLowerCase();
-  const violated = forbidden.filter((needle) => haystack.includes(needle.toLowerCase()));
+  const violated = forbidden.filter((needle) => containsPhrase(haystack, needle));
   for (const needle of violated) {
     failures.push(`forbidden content present: "${needle}"`);
   }
@@ -302,13 +334,13 @@ export function scoreRagCase(
   const lower = answer.toLowerCase();
 
   const required = evalCase.expect.mustContain ?? [];
-  const missing = required.filter((needle) => !lower.includes(needle.toLowerCase()));
+  const missing = required.filter((needle) => !containsPhrase(lower, needle));
   for (const needle of missing) {
     failures.push(`missing grounded fact: "${needle}"`);
   }
 
   const forbidden = evalCase.expect.mustNotContain ?? [];
-  const violated = forbidden.filter((needle) => lower.includes(needle.toLowerCase()));
+  const violated = forbidden.filter((needle) => containsPhrase(lower, needle));
   for (const needle of violated) {
     failures.push(`hallucinated / leaked content: "${needle}"`);
   }

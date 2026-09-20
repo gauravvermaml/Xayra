@@ -1014,6 +1014,18 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
     input: "Mark's flight got delayed by three hours.",
     answer: JSON.stringify([]),
   },
+  {
+    // A third party coming to DO something, with a date attached. Distinct
+    // from the Ravi/Meera turn above, where the other person's action carries
+    // no implication for the user at all: here the visit is arguably the
+    // user's business, and there is a concrete verb and time, which is enough
+    // for the model to read it as an instruction. It did exactly that —
+    // "The builder is coming Tuesday to look at the roof" produced "Look at
+    // the roof" as a task for the user, who is not the one looking at
+    // anything. Someone else's appointment is not the user's to-do.
+    input: "The electrician is coming Thursday to check the wiring.",
+    answer: JSON.stringify([]),
+  },
 ];
 
 export function buildPrompt(rawText: string, todayISO: string, detectedPhrases: string[]): string {
@@ -1126,11 +1138,20 @@ function contentWords(text: string): string[] {
  * lexical connection to the note does not. That is the property worth
  * checking.
  *
- * Prefix matching rather than equality, so ordinary morphology (`renewing` vs
- * `renew`, `photos` vs `photo`) still counts as a match. Deliberately lenient:
- * ONE shared content word is enough. The cost of being wrong in the strict
- * direction — silently dropping a real task — is far worse than letting an
- * occasional fabrication through to the other guards.
+ * Matching is prefix-or-near-miss, never equality. Prefix covers ordinary
+ * morphology (`renewing`/`renew`, `photos`/`photo`). The edit-distance
+ * allowance covers the case this app cannot afford to get wrong: every note
+ * arrives through speech-to-text, and correcting a mishearing is the model
+ * doing its job. The first version of this guard used prefix matching alone
+ * and immediately dropped a legitimate task — a note transcribed as "by milk
+ * and bred" yielded "Buy bread", which shares no prefix with "bred" and was
+ * deleted as fabricated. A guard that eats correctly-repaired STT output is
+ * worse than the leakage it was written to stop, because it fails silently
+ * and on the app's most common input.
+ *
+ * Deliberately lenient overall: ONE shared word is enough. Dropping a real
+ * task is far more damaging than letting an occasional fabrication reach the
+ * other guards.
  */
 function taskIsAnchoredInNote(task: string, rawNoteText: string): boolean {
   const taskWords = contentWords(task);
@@ -1140,9 +1161,55 @@ function taskIsAnchoredInNote(task: string, rawNoteText: string): boolean {
     return true;
   }
   const noteWords = contentWords(rawNoteText);
-  return taskWords.some((taskWord) =>
-    noteWords.some((noteWord) => noteWord.startsWith(taskWord) || taskWord.startsWith(noteWord))
-  );
+  return taskWords.some((taskWord) => noteWords.some((noteWord) => wordsAreRelated(taskWord, noteWord)));
+}
+
+/**
+ * Tolerance scales with word length rather than being flat. One edit on a
+ * four-letter word is a large proportion of it ("milk"/"silk"), so short
+ * words get a tighter budget than long ones where an edit or two is far more
+ * likely to be a transcription slip than a different word entirely.
+ */
+function editDistanceAllowanceFor(length: number): number {
+  if (length <= 5) return 1;
+  return 2;
+}
+
+function wordsAreRelated(a: string, b: string): boolean {
+  if (a.startsWith(b) || b.startsWith(a)) {
+    return true;
+  }
+  // Length gap alone rules most pairs out before the DP runs.
+  const allowance = editDistanceAllowanceFor(Math.min(a.length, b.length));
+  if (Math.abs(a.length - b.length) > allowance) {
+    return false;
+  }
+  return boundedEditDistance(a, b, allowance) <= allowance;
+}
+
+/** Levenshtein with early exit once the budget is blown — the words here are
+ * short, and most comparisons fail immediately. */
+function boundedEditDistance(a: string, b: string, budget: number): number {
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+
+  for (let i = 1; i <= a.length; i++) {
+    const current = new Array<number>(b.length + 1);
+    current[0] = i;
+    let rowMin = current[0];
+
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost);
+      rowMin = Math.min(rowMin, current[j]);
+    }
+
+    if (rowMin > budget) {
+      return budget + 1;
+    }
+    previous = current;
+  }
+
+  return previous[b.length];
 }
 
 export function normalizeExtracted(
