@@ -95,8 +95,51 @@ function normalizeTaskText(text: string): string {
     .trim();
 }
 
+/** Words too common to carry meaning when comparing two task phrasings. */
+const TASK_MATCH_STOPWORDS = new Set([
+  "a", "about", "an", "and", "at", "for", "from", "in", "into", "of", "on", "the", "to", "with",
+]);
+
+function taskKeywords(text: string): string[] {
+  return normalizeTaskText(text)
+    .split(" ")
+    .filter((word) => word.length > 0 && !TASK_MATCH_STOPWORDS.has(word));
+}
+
+/**
+ * Task equivalence by keyword containment, not string equality.
+ *
+ * The first version compared normalized strings exactly, which contradicted
+ * this file's own stated intent of being lenient about WORDING. The corpus run
+ * exposed it immediately: "Send photos to Anita" failed against "Send Anita
+ * the photos" — identical meaning, different word order — and "Call the
+ * plumber" failed against "Call the plumber about the leak" for dropping a
+ * qualifier. Both were scored as a miss AND a spurious extra, so one
+ * reasonable answer cost two penalties and dragged F1 down twice.
+ *
+ * Containment against the SHORTER phrase is what makes a legitimate
+ * abbreviation pass while an unrelated task still fails: "Call the plumber"
+ * contains everything meaningful in itself, whereas "Mark's flight got
+ * delayed" shares nothing with "Buy milk".
+ */
+const TASK_MATCH_THRESHOLD = 0.6;
+
 function tasksMatch(expected: ExpectedTask, actual: ExtractedToDo): boolean {
-  return normalizeTaskText(expected.task) === normalizeTaskText(actual.task);
+  const expectedWords = taskKeywords(expected.task);
+  const actualWords = taskKeywords(actual.task);
+  if (expectedWords.length === 0 || actualWords.length === 0) {
+    return normalizeTaskText(expected.task) === normalizeTaskText(actual.task);
+  }
+
+  const [shorter, longer] =
+    expectedWords.length <= actualWords.length ? [expectedWords, actualWords] : [actualWords, expectedWords];
+
+  // Prefix comparison absorbs ordinary morphology (photo/photos, renew/renewing).
+  const shared = shorter.filter((word) =>
+    longer.some((other) => other.startsWith(word) || word.startsWith(other))
+  );
+
+  return shared.length / shorter.length >= TASK_MATCH_THRESHOLD;
 }
 
 /**

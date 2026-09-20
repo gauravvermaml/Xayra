@@ -986,6 +986,34 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
       { task: "Submit the tax report", date_phrase: "27th September to 10th October at 3:30 PM", recurrence: "none" },
     ]),
   },
+  // ---- Notes with NOTHING to extract -------------------------------------
+  //
+  // Until these were added, every one of the thirteen examples above ended in
+  // a task being produced, and the only instruction to return "[]" was a
+  // single prose sentence at the end of the system prompt. The evaluation
+  // corpus scored 0/4 on descriptive notes as a result — the model invented a
+  // task every time, and one case ("Feeling much better today than
+  // yesterday.") came back with "Submit the tax report", lifted verbatim from
+  // the example directly above. That is demonstration overwhelming
+  // instruction, the same failure that made the third-party attribution rule
+  // ineffective until a worked example was added alongside it.
+  //
+  // Three shapes, because the failures had three different causes: a plain
+  // observation, a stated opinion, and an event happening to someone else.
+  // Deliberately worded differently from the corpus cases so what is learned
+  // is the shape, not the sentence.
+  {
+    input: "The weather turned really nice this afternoon.",
+    answer: JSON.stringify([]),
+  },
+  {
+    input: "Finished that documentary about deep sea life, it was fascinating.",
+    answer: JSON.stringify([]),
+  },
+  {
+    input: "Mark's flight got delayed by three hours.",
+    answer: JSON.stringify([]),
+  },
 ];
 
 export function buildPrompt(rawText: string, todayISO: string, detectedPhrases: string[]): string {
@@ -1062,6 +1090,61 @@ export function isSingleSentence(text: string): boolean {
 // above: the auto-fill reconciliation below is pure, deterministic, and has
 // now produced one silent real-world regression — it is worth asserting
 // directly rather than only through a two-minute on-device extraction.
+/** Words too common to prove a task came from the note. */
+const TASK_OVERLAP_STOPWORDS = new Set([
+  "about", "after", "again", "also", "back", "been", "before", "book", "both", "call",
+  "come", "does", "done", "down", "each", "from", "gets", "give", "going", "have",
+  "here", "into", "just", "like", "make", "more", "most", "much", "need", "next",
+  "once", "only", "over", "same", "some", "sure", "take", "than", "that", "them",
+  "then", "there", "these", "they", "this", "time", "very", "want", "well", "what",
+  "when", "where", "which", "will", "with", "your",
+]);
+
+/** Content words long enough to be evidence, lowercased, stopwords removed. */
+function contentWords(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length >= 4 && !TASK_OVERLAP_STOPWORDS.has(word));
+}
+
+/**
+ * Whether a task's wording is actually anchored in the note it supposedly
+ * came from.
+ *
+ * A real task is a paraphrase of something written: "Renew car registration"
+ * shares `renew`/`registration` with "Car registration expires 30 September.
+ * Renew it before then." A fabricated one shares nothing.
+ *
+ * This exists because of a specific, reproducible failure. Given a purely
+ * descriptive note ("Feeling much better today than yesterday."), the model
+ * returns a task copied verbatim out of the few-shot block rather than
+ * admitting there is nothing to extract — first "Submit the tax report", and
+ * after empty-result examples were added, the input text of one of those new
+ * examples. The leaked task changes with the prompt; the fact that it has no
+ * lexical connection to the note does not. That is the property worth
+ * checking.
+ *
+ * Prefix matching rather than equality, so ordinary morphology (`renewing` vs
+ * `renew`, `photos` vs `photo`) still counts as a match. Deliberately lenient:
+ * ONE shared content word is enough. The cost of being wrong in the strict
+ * direction — silently dropping a real task — is far worse than letting an
+ * occasional fabrication through to the other guards.
+ */
+function taskIsAnchoredInNote(task: string, rawNoteText: string): boolean {
+  const taskWords = contentWords(task);
+  if (taskWords.length === 0) {
+    // Nothing substantive to check (e.g. "Call him") — leave it to the other
+    // guards rather than dropping on no evidence.
+    return true;
+  }
+  const noteWords = contentWords(rawNoteText);
+  return taskWords.some((taskWord) =>
+    noteWords.some((noteWord) => noteWord.startsWith(taskWord) || taskWord.startsWith(noteWord))
+  );
+}
+
 export function normalizeExtracted(
   raw: unknown,
   todayISO: string,
@@ -1086,6 +1169,13 @@ export function normalizeExtracted(
   const results: ExtractedToDo[] = [];
   for (const record of validEntries) {
     const task = (record.task as string).trim();
+
+    if (!taskIsAnchoredInNote(task, rawNoteText)) {
+      console.warn(
+        `[transformationEngine] Dropping fabricated task "${task}" — shares no content word with the note.`
+      );
+      continue;
+    }
 
     // Recurrence is resolved BEFORE date_phrase reconciliation below, not
     // after (as an earlier version of this function did) — the single-
