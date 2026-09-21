@@ -877,8 +877,20 @@ def main() -> None:
 
     with args.out.open("w", encoding="utf-8", newline="\n") as handle:
         for sample in samples:
-            # Drop internal bookkeeping fields the trainer does not need.
-            row = {"text": sample["text"], "kind": sample["kind"]}
+            # "extraction" is split into "extraction_positive" /
+            # "extraction_refusal" at write time, matching TARGET_DISTRIBUTION's
+            # own bucket names. Writing only {"text","kind"} with kind still
+            # undifferentiated ("extraction") was tried first and shipped a
+            # file the training notebook's OWN validation cell could not read
+            # — it needs to independently confirm the positive/refusal split
+            # that caused v1's regression, and "extraction" alone throws that
+            # signal away. `tasks`/`note` stay dropped; `kind` alone is enough
+            # for that check, and keeping them out is what makes this a
+            # trainer-ready file rather than a debug dump.
+            kind = sample["kind"]
+            if kind == "extraction":
+                kind = "extraction_refusal" if not sample["tasks"] else "extraction_positive"
+            row = {"text": sample["text"], "kind": kind}
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     print(f"Wrote {len(samples)} samples to {args.out}\n")
