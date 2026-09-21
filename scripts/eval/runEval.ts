@@ -12,7 +12,11 @@ import {
   TODO_EXTRACTION_GRAMMAR,
   type ExtractedToDo,
 } from "../../services/ai/extractionLogic";
-import { buildPrompt as buildRagPrompt, CHAT_TEMPLATE_STOP_TOKENS } from "../../services/ai/ragPrompt";
+import {
+  buildPrompt as buildRagPrompt,
+  CHAT_TEMPLATE_STOP_TOKENS,
+  setRagPromptMode,
+} from "../../services/ai/ragPrompt";
 import { formatNoteContext, sanitizeLLMResponse } from "../../services/ai/ragFormatting";
 import { runCompletion } from "./llamaRunner";
 import { renderReport } from "./report";
@@ -122,6 +126,7 @@ async function main(): Promise<void> {
   const promptMode = promptArg !== -1 ? args[promptArg + 1] : process.env.XAYRA_EXTRACTION_PROMPT;
   if (promptMode === "minimal" || promptMode === "full") {
     setExtractionPromptMode(promptMode);
+    setRagPromptMode(promptMode);
   } else if (promptMode) {
     console.error(`  Unknown prompt mode "${promptMode}" — use "full" or "minimal".`);
     process.exit(2);

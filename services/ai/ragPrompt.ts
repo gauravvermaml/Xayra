@@ -54,6 +54,41 @@ export const SYSTEM_PROMPT =
   "7. Use the note's \"[Recorded: ...]\" timestamp to calculate relative time phrases into calendar dates. Ignore notes outside requested time windows.";
 
 /**
+ * Which RAG system prompt to build.
+ *
+ * "full" is the seven-LAW prompt above, the one the stock Qwen2.5-1.5B needs.
+ * "minimal" is a one-sentence prompt for a model fine-tuned to hold grounding
+ * and refusal behaviour in its weights instead of being told the rules on
+ * every call — mirrors `ExtractionPromptMode` in extractionLogic.ts exactly,
+ * including the same default-to-"full" safety reasoning: flipping the
+ * shipped app to this before a fine-tuned RAG model exists would hand the
+ * stock model a prompt stripped of the LAWS it currently depends on.
+ */
+export type RagPromptMode = "full" | "minimal";
+
+/**
+ * Trained into a fine-tuned RAG model; scripts/dataset/generate_sft.py must
+ * use this exact string, the same contract MINIMAL_EXTRACTION_SYSTEM_PROMPT
+ * has with extractionLogic.ts. Kept short deliberately — the point of a
+ * minimal prompt is that grounding/refusal live in the weights, not in
+ * instructions repeated on every call.
+ */
+export const MINIMAL_RAG_SYSTEM_PROMPT =
+  "You are Xayra, an on-device notes assistant. Answer the question using " +
+  "ONLY the note context provided below. If the answer is not in the " +
+  "notes, reply exactly: \"No information found in your notes.\"";
+
+let ragPromptMode: RagPromptMode = "full";
+
+export function setRagPromptMode(mode: RagPromptMode): void {
+  ragPromptMode = mode;
+}
+
+export function getRagPromptMode(): RagPromptMode {
+  return ragPromptMode;
+}
+
+/**
  * A fixed one-shot example, injected as a real prior user/assistant turn
  * (not just described in prose inside the system prompt) — few-shot
  * examples given as actual turns are materially more effective at steering
@@ -128,6 +163,13 @@ export function buildSystemPromptWithDate(): string {
     day: "numeric",
   });
 
+  if (ragPromptMode === "minimal") {
+    // Today's date is runtime context, not instruction — no amount of
+    // fine-tuning teaches a model what day it is at inference time, so this
+    // still has to be injected even in the minimal prompt.
+    return `${MINIMAL_RAG_SYSTEM_PROMPT}\n\nToday is ${today}.`;
+  }
+
   return (
     `${SYSTEM_PROMPT}\n\n` +
     `Today is ${today}.\n` +
@@ -159,10 +201,20 @@ export const CHAT_TEMPLATE_STOP_TOKENS = [QWEN_IM_END, "<|endoftext|>"];
 
 export function buildPrompt(userQuery: string, noteContext: string): string {
   const systemPrompt = buildSystemPromptWithDate();
+
+  // A fine-tuned model holds the answer format in its weights; replaying the
+  // fixed few-shot exchange would spend prefill teaching it something it
+  // already knows — the same reasoning extractionLogic.ts's minimal mode
+  // uses to drop its few-shot block.
+  const fewShotTurns =
+    ragPromptMode === "minimal"
+      ? ""
+      : `<|im_start|>user\n${FEW_SHOT_CONTEXT}\n\n${FEW_SHOT_USER_QUERY}${QWEN_IM_END}\n` +
+        `<|im_start|>assistant\n${FEW_SHOT_ANSWER}${QWEN_IM_END}\n`;
+
   return (
     `<|im_start|>system\n${systemPrompt}${QWEN_IM_END}\n` +
-    `<|im_start|>user\n${FEW_SHOT_CONTEXT}\n\n${FEW_SHOT_USER_QUERY}${QWEN_IM_END}\n` +
-    `<|im_start|>assistant\n${FEW_SHOT_ANSWER}${QWEN_IM_END}\n` +
+    fewShotTurns +
     `<|im_start|>user\n${noteContext}\n\n${userQuery}${QWEN_IM_END}\n` +
     "<|im_start|>assistant\n"
   );

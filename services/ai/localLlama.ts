@@ -339,6 +339,12 @@ function hashString(value: string): string {
  * across a model swap is undefined behaviour at the llama.cpp level.
  */
 function computeRagPrefixKey(): string {
+  // Hashing the built text, not a mode flag, is what makes this safe against
+  // getRagPromptMode()/setRagPromptMode() in ragPrompt.ts: buildWarmupPrompt
+  // already branches on the active mode, so switching modes changes this
+  // hash automatically. A key that only tracked the date, as it did before
+  // the minimal RAG mode existed, would let a mode switch silently restore
+  // the OTHER mode's cached prefix.
   return `${hashString(buildCacheWarmupPrompt())}-${CHAT_MODEL.filename}-ctx4096`;
 }
 
