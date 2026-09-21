@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   buildPrompt,
   detectDatePhrases,
+  setExtractionPromptMode,
   normalizeExtracted,
   parseExtractionOutput,
   TODO_EXTRACTION_GRAMMAR,
@@ -113,6 +114,18 @@ async function runCase(evalCase: EvalCase, modelPath: string): Promise<CaseScore
 
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
+
+  // Scoring a fine-tuned model means scoring it with the prompt it was
+  // trained against, not the one the stock model needs. Opt-in, because the
+  // minimal prompt strips every rule and example the stock model depends on.
+  const promptArg = args.indexOf("--prompt");
+  const promptMode = promptArg !== -1 ? args[promptArg + 1] : process.env.XAYRA_EXTRACTION_PROMPT;
+  if (promptMode === "minimal" || promptMode === "full") {
+    setExtractionPromptMode(promptMode);
+  } else if (promptMode) {
+    console.error(`  Unknown prompt mode "${promptMode}" — use "full" or "minimal".`);
+    process.exit(2);
+  }
   const modelArg = args.indexOf("--model");
   const modelPath = modelArg !== -1 ? args[modelArg + 1] : process.env.EVAL_MODEL ?? DEFAULT_MODEL;
 
@@ -153,7 +166,8 @@ async function main(): Promise<void> {
   process.stdout.write("\n");
 
   const summary = aggregate(scores);
-  console.log(renderReport(scores, summary, modelPath.split(/[\\/]/).pop() ?? modelPath));
+  const label = `${modelPath.split(/[\\/]/).pop() ?? modelPath}  [prompt: ${promptMode ?? "full"}]`;
+  console.log(renderReport(scores, summary, label));
 
   // Non-zero exit on any failure so this can gate a commit or CI step.
   process.exit(summary.passed === summary.total ? 0 : 1);

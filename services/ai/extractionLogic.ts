@@ -678,7 +678,10 @@ export function buildDetectedPhrasesBlock(detectedPhrases: string[]): string {
  * silently restoring yesterday's instructions.
  */
 export function extractionPrefix(todayISO: string): ExtractionPromptPrefix {
-  const staticOpening = buildSystemPrompt(todayISO) + FEW_SHOT_EXAMPLES.map((e) => e.input + e.answer).join("");
+  const staticOpening =
+    extractionPromptMode +
+    buildSystemPrompt(todayISO) +
+    (extractionPromptMode === "minimal" ? "" : FEW_SHOT_EXAMPLES.map((e) => e.input + e.answer).join(""));
   let hash = 0x811c9dc5;
   for (let i = 0; i < staticOpening.length; i++) {
     hash ^= staticOpening.charCodeAt(i);
@@ -687,7 +690,51 @@ export function extractionPrefix(todayISO: string): ExtractionPromptPrefix {
   return { kind: "extraction", key: `${hash.toString(16).padStart(8, "0")}-ctx4096` };
 }
 
+/**
+ * Which extraction prompt to build.
+ *
+ * "full" is the ~2,000-token prompt with sixteen few-shot turns that the
+ * stock Qwen2.5-1.5B needs. "minimal" is the one-sentence prompt a
+ * fine-tuned model is trained against, where the behaviour lives in the
+ * weights instead of being re-stated on every call.
+ *
+ * Defaults to "full" DELIBERATELY. Switching the shipped app to the minimal
+ * prompt before a fine-tuned model is actually in place would hand the stock
+ * model a prompt stripped of every rule and example it currently depends on —
+ * the categories now scoring 100% (dates, STT, multi-task, recurrence) all
+ * rely on those examples. This is a switch for evaluating a candidate model,
+ * not a migration that can be flipped ahead of one.
+ */
+export type ExtractionPromptMode = "full" | "minimal";
+
+/** Trained into the fine-tuned model; see scripts/dataset/generate_sft.py,
+ * which must use this exact string. */
+export const MINIMAL_EXTRACTION_SYSTEM_PROMPT =
+  "You are an executive task extraction assistant. Extract actionable user " +
+  "tasks into the requested JSON schema. If no tasks exist for the user, " +
+  "return [].";
+
+let extractionPromptMode: ExtractionPromptMode = "full";
+
+export function setExtractionPromptMode(mode: ExtractionPromptMode): void {
+  extractionPromptMode = mode;
+}
+
+export function getExtractionPromptMode(): ExtractionPromptMode {
+  return extractionPromptMode;
+}
+
 export function buildSystemPrompt(todayISO: string): string {
+  if (extractionPromptMode === "minimal") {
+    // Today's date still has to be injected: it is runtime context, not an
+    // instruction, and no amount of fine-tuning can teach a model what day it
+    // is at inference time.
+    return `${MINIMAL_EXTRACTION_SYSTEM_PROMPT}\n\nToday's Date: ${todayISO}\n`;
+  }
+  return buildFullSystemPrompt(todayISO);
+}
+
+function buildFullSystemPrompt(todayISO: string): string {
   return (
     // Build 38 PREFIX HARMONIZATION — see SHARED_XAYRA_PREAMBLE's own doc
     // comment in localLlama.ts. This exact string must stay word-for-word
@@ -1040,9 +1087,17 @@ const FEW_SHOT_EXAMPLES: { input: string; answer: string }[] = [
 export function buildPrompt(rawText: string, todayISO: string, detectedPhrases: string[]): string {
   const systemPrompt = buildSystemPrompt(todayISO);
 
-  const fewShotTurns = FEW_SHOT_EXAMPLES.map(
-    ({ input, answer }) => `<|im_start|>user\n${input}${QWEN_IM_END}\n<|im_start|>assistant\n${answer}${QWEN_IM_END}\n`
-  ).join("");
+  // A fine-tuned model carries these behaviours in its weights. Replaying
+  // sixteen worked examples at it would spend roughly 800 tokens of prefill on
+  // every extraction teaching it what it already knows — which is most of the
+  // latency saving the fine-tune exists to deliver.
+  const fewShotTurns =
+    extractionPromptMode === "minimal"
+      ? ""
+      : FEW_SHOT_EXAMPLES.map(
+          ({ input, answer }) =>
+            `<|im_start|>user\n${input}${QWEN_IM_END}\n<|im_start|>assistant\n${answer}${QWEN_IM_END}\n`
+        ).join("");
 
   // KV-CACHE PREFIX ORDER, not cosmetic. Everything above this point — the
   // system prompt and all fourteen few-shot turns, roughly 2,000 tokens — is
