@@ -1108,10 +1108,23 @@ export function buildPrompt(rawText: string, todayISO: string, detectedPhrases: 
   // the first point of divergence, which capped reuse at a few hundred tokens
   // and forced every extraction to re-evaluate the entire rule set and every
   // example from scratch.
+  // The detected-phrases "answer key" block is a FULL-mode-only crutch for
+  // the stock model, which the minimal-mode fine-tune was never shown. It was
+  // being prepended unconditionally here regardless of mode — confirmed
+  // on-device via the v2 eval: date-resolution collapsed 20/20 -> 1/20 and
+  // recurrence 8/8 -> 0/8 purely because the fine-tuned model's user turn at
+  // inference time carried ~90 tokens of instructional text no training
+  // sample ever contained, while third-party/refusal (already resolved to a
+  // trivial "[]") were untouched by the same noise. Every training sample's
+  // user turn was the bare note text; minimal mode must match that exactly,
+  // or evaluating "the fine-tune" is actually evaluating a prompt shape it
+  // was never trained on.
+  const phrasesBlock = extractionPromptMode === "minimal" ? "" : buildDetectedPhrasesBlock(detectedPhrases);
+
   return (
     `<|im_start|>system\n${systemPrompt}${QWEN_IM_END}\n` +
     fewShotTurns +
-    `<|im_start|>user\n${buildDetectedPhrasesBlock(detectedPhrases)}${rawText}${QWEN_IM_END}\n` +
+    `<|im_start|>user\n${phrasesBlock}${rawText}${QWEN_IM_END}\n` +
     "<|im_start|>assistant\n"
   );
 }
