@@ -1,8 +1,34 @@
 #!/usr/bin/env python3
-"""Synthetic SFT dataset generator for the Qwen2.5-1.5B model — v3.
+"""ORPO preference-pair generator for the Qwen2.5-1.5B extraction model — v4.
 
-WHY V3 EXISTS
--------------
+WHY V4 MOVES OFF PLAIN SFT
+---------------------------
+v2 and v3 both used the same lever — the ratio of positive-to-refusal SFT
+examples — and both broke, in opposite directions:
+
+    v2 (50% refusal):  third-party 0/8->8/8, refusal 11/17->17/17  [FIXED]
+                        date-resolution 20/20->6/20, recurrence 8/8->1/8 [BROKE]
+    v3 (15% refusal):  date-resolution 6/20->19/20, recurrence 1/8->8/8 [FIXED]
+                        third-party 8/8->0/8, refusal 17/17->6/17 [BROKE]
+
+Both runs showed the identical mechanism: plain SFT only ever teaches "this
+completion is correct," never "this completion is wrong." With no negative
+signal, the model's only lever for avoiding one failure mode is seeing MORE
+examples of the opposite behaviour — which just pushes it into the other
+failure mode once that behaviour dominates the training mix. Manually
+re-balancing the ratio is tuning a seesaw from one end; there is no ratio
+that pins both ends down at once with this objective.
+
+ORPO (Odds Ratio Preference Optimization) trains on (prompt, chosen,
+rejected) triples and directly penalises the WRONG completion for a given
+note, not just reward the right one. A refusal-note row's rejected side is a
+hallucinated task (exactly the "Garden" / "Plumber" / "Look at the roof"
+shape Run 3 actually produced on-device); a task-note row's rejected side is
+bare "[]" (exactly Run 2's failure). Both lessons live in the SAME file now,
+scored against each other rather than against two separately-tuned datasets.
+
+WHY V3 EXISTED (kept for history)
+-----------------------------------
 v2 (500 samples, extraction + RAG) fully fixed both v1 targets — third-party
 attribution 0/8 -> 8/8, zero-task refusal 11/17 -> 17/17 — but at a cost that
 made the checkpoint unshippable: date-resolution collapsed 20/20 -> 6/20 and
@@ -116,6 +142,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 from pathlib import Path
 
 # Must match services/ai/extractionLogic.ts's MINIMAL_EXTRACTION_SYSTEM_PROMPT
@@ -139,28 +166,35 @@ REFUSAL_ANSWER = "No information found in your notes."
 
 SEED = 20260922
 
-# Fraction of the 500-sample total in each top-level bucket. Verified to sum
-# to 1.0 by an assertion in `build()` rather than trusted by eye.
+# Qwen2/2.5 ChatML turn delimiter. A real completion always ends in this —
+# training `chosen`/`rejected` without it would teach the model a target that
+# never terminates, the same class of omission that makes a fine-tuned model
+# run on past its answer.
+IM_END = "<|im_end|>"
+
+# Fraction of the 350-note EXTRACTION total in each bucket. Verified to sum to
+# 1.0 by an assertion in `build()` rather than trusted by eye. Unchanged in
+# proportion from v3 (85/15 positive/refusal, 75+ floor on contrastive) —
+# ORPO changes the OUTPUT FORMAT of these same notes, not their balance,
+# which v3 already verified against the real thresholds.
 #
-# INTERPRETATION NOTE: the v3 directive's "85% positive / 15% refusal" is
-# applied WITHIN the extraction slice (350 of 500, unchanged from v2's split
-# between extraction and RAG), not across the whole 500-sample file. RAG had
-# no part in the over-refusal regression this rebalance exists to fix, so its
-# 30% share (rag_factual + rag_refusal) is left exactly as v2 had it rather
-# than diluted by a literal 85/15 read of the full file. If the intent was
-# 85/15 of all 500 samples including RAG, this needs a different split.
+# RAG IS OUT OF SCOPE FOR THIS FILE. ORPOTrainer requires every row to carry
+# prompt/chosen/rejected; it cannot share a dataset with the RAG samples'
+# plain single-answer shape, and no rejected-answer design for RAG was
+# specified. make_rag_factual/make_rag_refusal and their fragment pools are
+# left in this file, unused by build(), rather than deleted — nothing here
+# forecloses building a separate RAG-preference file later, but that is a
+# distinct design decision this file does not make unilaterally.
 #
-#   extraction_contrastive    80 / 350 = 22.9% of extraction (floor: 75+)
+#   extraction_contrastive    80 / 350 = 22.9% (floor: 75+)
 #   extraction_positive_other 218 / 350 = 62.3%
 #   extraction_refusal         52 / 350 = 14.9%   (target: 15%)
 #   -----------------------------------------------------------
 #   extraction positive total 298 / 350 = 85.1%   (target: 85%)
 TARGET_DISTRIBUTION = {
-    "extraction_contrastive": 0.16,     # 80/500 — third-party/observation + a real task, same note
-    "extraction_positive_other": 0.436,  # 218/500 — dated/STT/multi/recurring, no distractor
-    "extraction_refusal": 0.104,         # 52/500 — pure third-party or pure observation, no task at all
-    "rag_factual": 0.15,
-    "rag_refusal": 0.15,
+    "extraction_contrastive": 80 / 350,
+    "extraction_positive_other": 218 / 350,
+    "extraction_refusal": 52 / 350,
 }
 
 # --------------------------------------------------------------------------
@@ -362,15 +396,17 @@ def chatml_sample(system_prompt: str, user_content: str, assistant_content: str,
 
 
 def extraction_sample(note: str, tasks: list[dict], kind: str = "extraction") -> dict:
-    # `kind="extraction_contrastive"` (used only by make_contrastive, below)
-    # is what lets print_report() and the write-time refinement in main()
-    # count contrastive samples directly, rather than inferring them from
-    # note structure after the fact.
-    answer = json.dumps(tasks, separators=(",", ":"), ensure_ascii=False)
-    return chatml_sample(
-        EXTRACTION_SYSTEM_PROMPT, note, answer,
-        kind=kind, note=note, tasks=tasks,
-    )
+    # v4: this used to build the finished ChatML SFT row directly. It now
+    # returns the raw ingredients instead, and ORPO_ASSEMBLY (below, near
+    # build()) is the ONE place that turns (note, tasks, kind) into the final
+    # prompt/chosen/rejected training row. Every one of the seven call sites
+    # above (make_dated_task, make_stt, make_multi_task, make_recurring_task,
+    # make_zero_task, make_third_party, make_contrastive) is untouched by
+    # this — they all still call `extraction_sample(note, tasks[, kind=...])`
+    # exactly as before, and every one of v3's verified generation properties
+    # (85/15 balance, contrastive floor, date/recurrence coverage) survives
+    # unchanged, because none of that logic lived in this function.
+    return {"note": note, "tasks": tasks, "kind": kind}
 
 
 # --------------------------------------------------------------------------
@@ -955,28 +991,122 @@ def build(total: int, rng: random.Random) -> list[dict]:
     add([make_contrastive], counts["extraction_contrastive"])
     add(POSITIVE_FACTORIES, counts["extraction_positive_other"])
     add(REFUSAL_FACTORIES, counts["extraction_refusal"])
-    add([make_rag_factual], counts["rag_factual"])
-    add([make_rag_refusal], counts["rag_refusal"])
+    # No RAG here in v4 — see TARGET_DISTRIBUTION's own comment for why.
 
     rng.shuffle(samples)
     return samples
 
 
-def print_report(samples: list[dict]) -> None:
-    total = len(samples)
-    by_kind: dict[str, int] = {}
-    for s in samples:
-        by_kind[s["kind"]] = by_kind.get(s["kind"], 0) + 1
+# --------------------------------------------------------------------------
+# ORPO conversion — the one place (note, tasks, kind) becomes a trainer-ready
+# {"prompt", "chosen", "rejected"} row. Every factory above still returns raw
+# ingredients via extraction_sample(); nothing about note generation changed
+# for v4, only what happens to it afterward.
+# --------------------------------------------------------------------------
 
-    print(f"Total samples        : {total}")
-    print(f"Distinct text rows   : {len({s['text'] for s in samples})}")
-    print()
-    print("By kind:")
-    for kind, count in sorted(by_kind.items()):
-        print(f"  {kind:20s} {count:4d}  ({count / total:5.1%})")
+def _extraction_prompt(note: str) -> str:
+    """The shared prefix chosen/rejected are BOTH scored against. Ends
+    exactly where generation begins — this is what ORPOTrainer conditions
+    on, not an arbitrary split of a finished ChatML string."""
+    return (
+        f"<|im_start|>system\n{EXTRACTION_SYSTEM_PROMPT}{IM_END}\n"
+        f"<|im_start|>user\n{note}{IM_END}\n"
+        f"<|im_start|>assistant\n"
+    )
+
+
+# Words too short/common to plausibly be what a hallucinated task is "about" —
+# picking one would produce an obviously-fake rejected example ("The"), which
+# teaches nothing a model could not already tell was wrong for free.
+_HALLUCINATION_STOPWORDS = {
+    "that", "this", "then", "than", "with", "from", "your", "have", "will",
+    "been", "were", "also", "just", "very", "much", "some", "over", "next",
+}
+
+
+def _hallucinated_rejected(rng: random.Random, note: str) -> str:
+    """The wrong answer for a note that has no real task — built to match
+    the ACTUAL on-device failure shape from Run 3, not a strawman. Every one
+    of that run's spurious tasks was a bare CONCRETE NOUN or short phrase
+    lifted straight from the note's own words ("Garden", "Plumber", "Look at
+    the roof") — not a random unrelated fabrication, and not an adjective or
+    abstract noun either. ORPO needs the exact mistake it must learn to
+    avoid, not an easy one.
+
+    A first version picked any 4+ letter non-stopword uniformly at random and
+    produced "Energy" (from "Energy levels have been low") and "Long" (from
+    "Realised... how long")  — technically non-stopwords, but nothing like
+    what the real failures looked like. Real hallucinations grabbed the
+    NOUN PHRASE HEAD: the thing an article points at ("the roof", "the
+    garden"). Preferring the word right after "the"/"a"/"an" targets that
+    directly; falling back to the last content word only when no article
+    exists in the note at all.
+
+    Uses the same 3-key schema as `chosen` everywhere else, deliberately.
+    Making the rejected example ALSO malformed JSON or missing a field would
+    teach two lessons in one contrastive pair — schema compliance and
+    whether to extract at all — instead of isolating the one this file
+    exists to fix.
+    """
+    after_article = [
+        w for w in re.findall(r"\b(?:the|a|an)\s+([A-Za-z]{4,})\b", note, flags=re.IGNORECASE)
+        if w.lower() not in _HALLUCINATION_STOPWORDS
+    ]
+    if after_article:
+        candidate = rng.choice(after_article)
+    else:
+        content_words = [w for w in re.findall(r"[A-Za-z]{4,}", note) if w.lower() not in _HALLUCINATION_STOPWORDS]
+        candidate = content_words[-1] if content_words else "Follow up"
+    task_title = candidate[0].upper() + candidate[1:].lower()
+    return json.dumps(
+        [{"task": task_title, "date_phrase": "", "recurrence": "none"}],
+        separators=(",", ":"),
+    )
+
+
+def to_orpo_pair(sample: dict, rng: random.Random) -> dict:
+    """(note, tasks, kind) -> {"prompt", "chosen", "rejected"}.
+
+    Two shapes, matching the directive exactly:
+      - note has a real task (positive / contrastive): chosen = the correct
+        extraction, rejected = "[]". Penalises Run 2's over-refusal.
+      - note has no task (zero-task / third-party): chosen = "[]",
+        rejected = a hallucinated task pulled from the note's own words.
+        Penalises Run 3's over-extraction.
+
+    Both directions live in this ONE file, which is the actual point of
+    moving to ORPO: a preference pair scores chosen ABOVE rejected for THIS
+    prompt specifically, so the model is never pushed toward "prefer short
+    outputs" or "prefer JSON with content" in the abstract the way a skewed
+    SFT ratio does — only toward the right answer for the note in front of
+    it.
+    """
+    prompt = _extraction_prompt(sample["note"])
+    if sample["tasks"]:
+        chosen = json.dumps(sample["tasks"], separators=(",", ":"), ensure_ascii=False)
+        rejected = "[]"
+    else:
+        chosen = "[]"
+        rejected = _hallucinated_rejected(rng, sample["note"])
+    return {
+        "prompt": prompt,
+        "chosen": f"{chosen}{IM_END}",
+        "rejected": f"{rejected}{IM_END}",
+        "kind": sample["kind"],
+        "note": sample["note"],
+    }
+
+
+def print_report(samples: list[dict], pairs: list[dict]) -> None:
+    """`samples` are the raw (note, tasks, kind) ingredients — used for every
+    balance/coverage check, since `tasks` isn't preserved on the written ORPO
+    rows. `pairs` are the actual written {"prompt","chosen","rejected"} rows —
+    used only to report chosen/rejected shape and confirm the file itself is
+    well-formed."""
+    total = len(samples)
 
     contrastive = [s for s in samples if s["kind"] == "extraction_contrastive"]
-    extraction = [s for s in samples if s["kind"] in ("extraction", "extraction_contrastive")]
+    extraction = samples  # v4: every raw sample IS an extraction sample; no RAG mixed in
     all_tasks = [t for s in extraction for t in s["tasks"]]
     recurrence_counts: dict[str, int] = {}
     for t in all_tasks:
@@ -986,6 +1116,8 @@ def print_report(samples: list[dict]) -> None:
     empty = sum(1 for s in extraction if not s["tasks"])
     positive = len(extraction) - empty
 
+    print(f"Total notes          : {total}")
+    print(f"Distinct notes       : {len({s['note'] for s in samples})}")
     print()
     print(f"Extraction samples   : {len(extraction)}  (positive {positive}, refusal {empty})")
     print(f"  of which contrastive: {len(contrastive)}  (distractor clause + a real task, same note)")
@@ -996,19 +1128,29 @@ def print_report(samples: list[dict]) -> None:
     print(f"  tasks with date_phrase    : {with_date}/{len(all_tasks)}  (target: >150)")
     print(f"  multi-task samples        : {multi}")
 
-    rag_factual = [s for s in samples if s["kind"] == "rag_factual"]
-    rag_refusal = [s for s in samples if s["kind"] == "rag_refusal"]
+    # ORPO-specific: every row must have a genuine chosen != rejected pair —
+    # a row where they happen to match would train the model to be
+    # indifferent between right and wrong, silently defeating the entire
+    # point of this file.
+    degenerate = [p for p in pairs if p["chosen"] == p["rejected"]]
+    rejected_is_empty = sum(1 for p in pairs if p["rejected"] == f"[]{IM_END}")
+    chosen_is_empty = sum(1 for p in pairs if p["chosen"] == f"[]{IM_END}")
     print()
-    print(f"RAG factual samples  : {len(rag_factual)}")
-    print(f"RAG refusal samples  : {len(rag_refusal)}")
-    print(f"  distinct RAG questions: {len({s['query'] for s in rag_factual + rag_refusal})}")
+    print(f"ORPO pairs written   : {len(pairs)}")
+    print(f"  rejected == '[]' (over-refusal lesson): {rejected_is_empty}  (should equal positive count: {positive})")
+    print(f"  chosen == '[]' (over-extraction lesson): {chosen_is_empty}  (should equal refusal count: {empty})")
+    print(f"  degenerate (chosen == rejected)        : {len(degenerate)}  (must be 0)")
 
     # v1-regression guards: fail loudly rather than ship a dataset that
     # quietly reproduces the bug that made recurrence collapse 8/8 -> 3/8.
     assert non_none > 0, "REGRESSION: no non-'none' recurrence samples generated"
     assert with_date > 0, "REGRESSION: no dated tasks generated"
-    assert len(rag_factual) > 0 and len(rag_refusal) > 0, "REGRESSION: RAG samples missing"
     assert 0 < empty < len(extraction), "extraction set collapsed to all-positive or all-refusal"
+
+    # v4/ORPO-specific guards.
+    assert len(degenerate) == 0, f"REGRESSION: {len(degenerate)} pairs have identical chosen/rejected"
+    assert rejected_is_empty == positive, "REGRESSION: not every positive sample penalises '[]' as rejected"
+    assert chosen_is_empty == empty, "REGRESSION: not every refusal sample has '[]' as chosen"
 
     # v2-regression guards: the SFT Run 2 failure this file exists to fix —
     # date-resolution 20/20 -> 6/20, recurrence 8/8 -> 1/8, attribution
@@ -1039,11 +1181,11 @@ def print_report(samples: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--count", type=int, default=500, help="total samples")
+    parser.add_argument("--count", type=int, default=350, help="total extraction notes")
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path(__file__).parent / "sft_qwen_task_extraction.jsonl",
+        default=Path(__file__).parent / "orpo_qwen_task_extraction.jsonl",
         help="output JSONL path",
     )
     parser.add_argument("--seed", type=int, default=SEED)
@@ -1052,26 +1194,27 @@ def main() -> None:
     rng = random.Random(args.seed)
     samples = build(args.count, rng)
 
+    # "extraction" is split into "extraction_positive" / "extraction_refusal"
+    # here, matching TARGET_DISTRIBUTION's own bucket names, so the
+    # notebook's validation cell can independently confirm the balance that
+    # caused v1/v2's regressions without needing `tasks` (which is not
+    # written — a trainer-ready file, not a debug dump).
+    pairs: list[dict] = []
+    for sample in samples:
+        kind = sample["kind"]
+        if kind == "extraction":
+            kind = "extraction_refusal" if not sample["tasks"] else "extraction_positive"
+        pair = to_orpo_pair(sample, rng)
+        pair["kind"] = kind
+        pairs.append(pair)
+
     with args.out.open("w", encoding="utf-8", newline="\n") as handle:
-        for sample in samples:
-            # "extraction" is split into "extraction_positive" /
-            # "extraction_refusal" at write time, matching TARGET_DISTRIBUTION's
-            # own bucket names. Writing only {"text","kind"} with kind still
-            # undifferentiated ("extraction") was tried first and shipped a
-            # file the training notebook's OWN validation cell could not read
-            # — it needs to independently confirm the positive/refusal split
-            # that caused v1's regression, and "extraction" alone throws that
-            # signal away. `tasks`/`note` stay dropped; `kind` alone is enough
-            # for that check, and keeping them out is what makes this a
-            # trainer-ready file rather than a debug dump.
-            kind = sample["kind"]
-            if kind == "extraction":
-                kind = "extraction_refusal" if not sample["tasks"] else "extraction_positive"
-            row = {"text": sample["text"], "kind": kind}
+        for pair in pairs:
+            row = {"prompt": pair["prompt"], "chosen": pair["chosen"], "rejected": pair["rejected"], "kind": pair["kind"]}
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
-    print(f"Wrote {len(samples)} samples to {args.out}\n")
-    print_report(samples)
+    print(f"Wrote {len(pairs)} ORPO pairs to {args.out}\n")
+    print_report(samples, pairs)
 
 
 if __name__ == "__main__":
