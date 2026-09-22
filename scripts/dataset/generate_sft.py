@@ -1,7 +1,37 @@
 #!/usr/bin/env python3
-"""Synthetic SFT dataset generator for the Qwen2.5-1.5B model — v2.
+"""Synthetic SFT dataset generator for the Qwen2.5-1.5B model — v3.
 
-WHY V2 EXISTS
+WHY V3 EXISTS
+-------------
+v2 (500 samples, extraction + RAG) fully fixed both v1 targets — third-party
+attribution 0/8 -> 8/8, zero-task refusal 11/17 -> 17/17 — but at a cost that
+made the checkpoint unshippable: date-resolution collapsed 20/20 -> 6/20 and
+recurrence 8/8 -> 1/8, and attribution ITSELF regressed on cases it used to
+pass (attr-001: "Eli recommended The Overstory. His brother Elias is moving
+to Perth..." came back "[]", dropping the real task along with the
+third-party clause it sat next to).
+
+Root cause, found by reading the actual failing model output rather than
+trusting the score alone: every failure showed the identical 2-token bare
+"[]" signature. v2's extraction slice was 50% pure refusal (175 samples that
+NEVER contained a task) against only 50% positive, and among those
+positives, only ONE example anywhere (Ravi/Sapiens, in the few-shot prompt,
+not even in this generator) demonstrated "a note can mention someone else
+AND still contain a real task for you." The model generalised the
+overwhelming signal — mentioning another person/observation means refuse —
+rather than the rare one.
+
+v3 changes, directly answering that: extraction rebalanced to 85% positive /
+15% pure refusal, and 75+ of the positive samples are now CONTRASTIVE —
+built from a distractor clause (third-party or observation) AND a real task
+in the same note, so the model sees the actual needed distinction (skip
+their part, keep yours) at real volume instead of one prompt example doing
+all the work. Date and recurrence coverage are also pushed harder (>150
+dated tasks, >50 recurring tasks, both verified by assertion) since the
+contrastive bucket is large enough now to matter for those thresholds too,
+not just for attribution.
+
+WHY V2 EXISTED (kept for history)
 -------------
 v1 (450 samples, extraction only) was trained and evaluated against the
 103-case harness. The two target failures moved decisively:
@@ -111,9 +141,24 @@ SEED = 20260922
 
 # Fraction of the 500-sample total in each top-level bucket. Verified to sum
 # to 1.0 by an assertion in `build()` rather than trusted by eye.
+#
+# INTERPRETATION NOTE: the v3 directive's "85% positive / 15% refusal" is
+# applied WITHIN the extraction slice (350 of 500, unchanged from v2's split
+# between extraction and RAG), not across the whole 500-sample file. RAG had
+# no part in the over-refusal regression this rebalance exists to fix, so its
+# 30% share (rag_factual + rag_refusal) is left exactly as v2 had it rather
+# than diluted by a literal 85/15 read of the full file. If the intent was
+# 85/15 of all 500 samples including RAG, this needs a different split.
+#
+#   extraction_contrastive    80 / 350 = 22.9% of extraction (floor: 75+)
+#   extraction_positive_other 218 / 350 = 62.3%
+#   extraction_refusal         52 / 350 = 14.9%   (target: 15%)
+#   -----------------------------------------------------------
+#   extraction positive total 298 / 350 = 85.1%   (target: 85%)
 TARGET_DISTRIBUTION = {
-    "extraction_positive": 0.35,
-    "extraction_refusal": 0.35,  # zero-task observations + third-party, combined
+    "extraction_contrastive": 0.16,     # 80/500 — third-party/observation + a real task, same note
+    "extraction_positive_other": 0.436,  # 218/500 — dated/STT/multi/recurring, no distractor
+    "extraction_refusal": 0.104,         # 52/500 — pure third-party or pure observation, no task at all
     "rag_factual": 0.15,
     "rag_refusal": 0.15,
 }
@@ -289,6 +334,15 @@ RECURRENCE_PATTERNS = [
     ("check the smoke alarms", "every quarter", "monthly"),
     ("restock the first aid kit", "every 3 months", "monthly"),
     ("pay the storage fee", "on the 5th of every month", "monthly"),
+    # "biweekly"/"fortnightly"/"every other week" all map to "weekly" — the
+    # closest of the schema's four values — per the app's own recurrence
+    # classification rule (extractionLogic.ts's buildSystemPrompt, FULL-mode
+    # prose: "fortnightly", "biweekly" -> weekly is the closest of the four
+    # options"). Not a new schema value; new PHRASINGS of an existing one.
+    ("pay the cleaner", "every two weeks", "weekly"),
+    ("water the office plants", "every fortnight", "weekly"),
+    ("review the rota", "biweekly", "weekly"),
+    ("check in with the team", "every other week", "weekly"),
 ]
 
 
@@ -307,11 +361,15 @@ def chatml_sample(system_prompt: str, user_content: str, assistant_content: str,
     return {"text": text, **meta}
 
 
-def extraction_sample(note: str, tasks: list[dict]) -> dict:
+def extraction_sample(note: str, tasks: list[dict], kind: str = "extraction") -> dict:
+    # `kind="extraction_contrastive"` (used only by make_contrastive, below)
+    # is what lets print_report() and the write-time refinement in main()
+    # count contrastive samples directly, rather than inferring them from
+    # note structure after the fact.
     answer = json.dumps(tasks, separators=(",", ":"), ensure_ascii=False)
     return chatml_sample(
         EXTRACTION_SYSTEM_PROMPT, note, answer,
-        kind="extraction", note=note, tasks=tasks,
+        kind=kind, note=note, tasks=tasks,
     )
 
 
@@ -753,18 +811,101 @@ def make_rag_refusal(rng: random.Random) -> dict:
 
 
 # --------------------------------------------------------------------------
+# Contrastive mixed samples — a note with BOTH a distractor clause (third
+# party or observation) AND a real user task, where the correct answer
+# extracts ONLY the real task.
+#
+# WHY THIS EXISTS. v2's extraction_refusal bucket taught "a note mentioning
+# another person/observation -> []" using 175 PURE examples — every single
+# one of them had nothing else in it. Only ONE example anywhere in the
+# dataset (Ravi/Sapiens, in the few-shot prompt, not even in this generator)
+# demonstrated the actually-needed behaviour: extract the real task, skip
+# only the unrelated clause. Evaluated on the real corpus, the fine-tuned
+# model generalised the overwhelming signal ("mentions someone else -> refuse
+# entirely") rather than the rare one ("skip only their part"): attr-001
+# ("Eli recommended The Overstory. His brother Elias is moving to Perth...")
+# came back "[]", dropping a genuine task along with the third-party clause
+# it happened to sit next to.
+#
+# These factories are built from the SAME fragment pools as the standalone
+# make_third_party/make_zero_task/make_dated_task/make_recurring_task
+# factories above, not a second copy of similar-looking sentences — a
+# divergent second pool here would teach the model two different ideas of
+# what a "distractor" or a "real task" looks like for no reason.
+# --------------------------------------------------------------------------
+
+def _distractor_sentence(rng: random.Random) -> str:
+    """One standalone third-party or observation sentence — the part of a
+    contrastive note that must NOT appear in the extracted task."""
+    if rng.random() < 0.5:
+        shape = rng.randint(0, 3)
+        time_expr = rng.choice(VISIT_TIMES).format(weekday=rng.choice(WEEKDAYS), ord=rng.choice(ORDINALS))
+        if shape == 0:
+            return f"The {rng.choice(TRADES)} is coming {time_expr} {rng.choice(VISIT_REASONS)}."
+        if shape == 1:
+            return f"{rng.choice(THIRD_PARTY_ORGS).capitalize()} is sending someone {time_expr} {rng.choice(VISIT_REASONS)}."
+        if shape == 2:
+            return f"{rng.choice(THIRD_PARTY_PEOPLE).capitalize()} {rng.choice(THIRD_PARTY_ACTIONS)} {time_expr}."
+        return f"{rng.choice(THIRD_PARTY_PEOPLE).capitalize()} said the {rng.choice(TRADES)} will call round {time_expr}."
+    return rng.choice(rng.choice([WEATHER_OBS, OPINION_OBS, FEELING_OBS, EVENT_OBS, REFLECTION_OBS]))
+
+
+def _task_sentence(rng: random.Random) -> tuple[str, dict]:
+    """One standalone sentence containing exactly one real task, plus the
+    task dict it must extract to. Weighted toward dated/recurring (0.45/0.30)
+    over plain (0.25) specifically because contrastive samples are the
+    largest single bucket in v3 and are relied on to help clear the date- and
+    recurrence-coverage thresholds, not just the attribution fix."""
+    kind = rng.choices(["dated", "recurring", "plain"], weights=[0.45, 0.30, 0.25])[0]
+
+    if kind == "recurring":
+        verb_lower, phrase, recurrence = rng.choice(RECURRENCE_PATTERNS)
+        sentence = f"{rng.choice(LEAD_INS).capitalize()} {verb_lower} {phrase}."
+        task_title = verb_lower[0].upper() + verb_lower[1:]
+        return sentence, {"task": task_title, "date_phrase": phrase, "recurrence": recurrence}
+
+    verb_lower, verb_title = rng.choice(TASK_VERBS)
+    obj = rng.choice(TASK_OBJECTS)
+    if kind == "dated":
+        date_phrase = rng.choice(RELATIVE_DATES)
+        sentence = f"{rng.choice(LEAD_INS).capitalize()} {verb_lower} {obj} {date_phrase}."
+        return sentence, {"task": f"{verb_title} {obj}", "date_phrase": date_phrase, "recurrence": "none"}
+
+    sentence = f"{rng.choice(LEAD_INS).capitalize()} {verb_lower} {obj}."
+    return sentence, {"task": f"{verb_title} {obj}", "date_phrase": "", "recurrence": "none"}
+
+
+def make_contrastive(rng: random.Random) -> dict:
+    distractor = _distractor_sentence(rng)
+    task_sentence, task = _task_sentence(rng)
+    # Randomised order: the directive's own example puts the distractor
+    # first ("The electrician is coming Tuesday, buy lightbulbs tomorrow"),
+    # but a real note said the other way round is just as plausible, and a
+    # model that only ever saw the distractor lead would be learning a
+    # position heuristic instead of the actual distinction.
+    note = f"{distractor} {task_sentence}" if rng.random() < 0.5 else f"{task_sentence} {distractor}"
+    return extraction_sample(note, [task], kind="extraction_contrastive")
+
+
+# --------------------------------------------------------------------------
 # Assembly
 # --------------------------------------------------------------------------
 
-# Sub-factories and their share WITHIN the extraction_positive bucket. Four
-# roughly equal quarters: rich dates, STT noise, multi-task, recurrence —
-# matching the four things the directive named explicitly.
+# Sub-factories and their share WITHIN the "other positive" bucket (the
+# positive samples that are NOT contrastive — see build() for why contrastive
+# gets its own explicit, guaranteed count rather than competing for share
+# here). Four roughly equal quarters: rich dates, STT noise, multi-task,
+# recurrence.
 POSITIVE_FACTORIES = [make_dated_task, make_stt, make_multi_task, make_recurring_task]
 
 # Sub-factories within extraction_refusal: roughly half zero-task, half
 # third-party — kept distinct because attr-003/third-party-0-of-8 showed they
 # fail for different reasons and both need real coverage, not one standing in
-# for the other.
+# for the other. This bucket is intentionally now much smaller than v2's
+# (~15% of extraction instead of 50%) — see the module docstring's "WHY V3
+# EXISTS" section for why over-representing pure refusal was the root cause
+# of the over-refusal regression, and why contrastive samples, not more of
+# these, are the actual fix for attribution specifically.
 REFUSAL_FACTORIES = [make_zero_task, make_third_party]
 
 
@@ -782,7 +923,7 @@ def build(total: int, rng: random.Random) -> list[dict]:
     # the largest bucket rather than silently shipping a dataset one sample
     # short of what was requested.
     drift = total - sum(counts.values())
-    counts["extraction_positive"] += drift
+    counts["extraction_positive_other"] += drift
 
     samples: list[dict] = []
     seen: set[str] = set()
@@ -805,7 +946,14 @@ def build(total: int, rng: random.Random) -> list[dict]:
             "samples — widen the fragment pools"
         )
 
-    add(POSITIVE_FACTORIES, counts["extraction_positive"])
+    # Contrastive gets its OWN guaranteed count rather than competing for a
+    # random share inside POSITIVE_FACTORIES. The directive's floor is "75+";
+    # leaving that to rng.choice over five factories would only hit it by
+    # coincidence, and the whole point of this bucket existing is that it is
+    # not optional headroom — it is the specific, targeted fix for the
+    # attribution regression.
+    add([make_contrastive], counts["extraction_contrastive"])
+    add(POSITIVE_FACTORIES, counts["extraction_positive_other"])
     add(REFUSAL_FACTORIES, counts["extraction_refusal"])
     add([make_rag_factual], counts["rag_factual"])
     add([make_rag_refusal], counts["rag_refusal"])
@@ -827,7 +975,8 @@ def print_report(samples: list[dict]) -> None:
     for kind, count in sorted(by_kind.items()):
         print(f"  {kind:20s} {count:4d}  ({count / total:5.1%})")
 
-    extraction = [s for s in samples if s["kind"] == "extraction"]
+    contrastive = [s for s in samples if s["kind"] == "extraction_contrastive"]
+    extraction = [s for s in samples if s["kind"] in ("extraction", "extraction_contrastive")]
     all_tasks = [t for s in extraction for t in s["tasks"]]
     recurrence_counts: dict[str, int] = {}
     for t in all_tasks:
@@ -835,13 +984,16 @@ def print_report(samples: list[dict]) -> None:
     with_date = sum(1 for t in all_tasks if t.get("date_phrase"))
     multi = sum(1 for s in extraction if len(s["tasks"]) > 1)
     empty = sum(1 for s in extraction if not s["tasks"])
+    positive = len(extraction) - empty
 
     print()
-    print(f"Extraction samples   : {len(extraction)}  (positive {len(extraction) - empty}, refusal {empty})")
+    print(f"Extraction samples   : {len(extraction)}  (positive {positive}, refusal {empty})")
+    print(f"  of which contrastive: {len(contrastive)}  (distractor clause + a real task, same note)")
+    print(f"  positive/refusal    : {positive / len(extraction):.1%} / {empty / len(extraction):.1%}  (target: 85% / 15%)")
     print(f"  recurrence values  : {recurrence_counts}")
     non_none = sum(v for k, v in recurrence_counts.items() if k != "none")
-    print(f"  non-'none' recurring tasks: {non_none}  <-- was 0 in v1")
-    print(f"  tasks with date_phrase    : {with_date}/{len(all_tasks)}")
+    print(f"  non-'none' recurring tasks: {non_none}  (target: >50)")
+    print(f"  tasks with date_phrase    : {with_date}/{len(all_tasks)}  (target: >150)")
     print(f"  multi-task samples        : {multi}")
 
     rag_factual = [s for s in samples if s["kind"] == "rag_factual"]
@@ -851,13 +1003,38 @@ def print_report(samples: list[dict]) -> None:
     print(f"RAG refusal samples  : {len(rag_refusal)}")
     print(f"  distinct RAG questions: {len({s['query'] for s in rag_factual + rag_refusal})}")
 
-    # Fail loudly rather than ship a dataset that quietly reproduces v1's bug.
+    # v1-regression guards: fail loudly rather than ship a dataset that
+    # quietly reproduces the bug that made recurrence collapse 8/8 -> 3/8.
     assert non_none > 0, "REGRESSION: no non-'none' recurrence samples generated"
     assert with_date > 0, "REGRESSION: no dated tasks generated"
     assert len(rag_factual) > 0 and len(rag_refusal) > 0, "REGRESSION: RAG samples missing"
     assert 0 < empty < len(extraction), "extraction set collapsed to all-positive or all-refusal"
+
+    # v2-regression guards: the SFT Run 2 failure this file exists to fix —
+    # date-resolution 20/20 -> 6/20, recurrence 8/8 -> 1/8, attribution
+    # regressed too. Root cause was extraction_refusal at 50% of the
+    # extraction slice teaching an over-refusal shortcut, with only one
+    # contrastive example anywhere for the model to learn the alternative
+    # from. These are the exact thresholds given for v3.
+    assert len(contrastive) >= 75, f"REGRESSION: only {len(contrastive)} contrastive samples, need >=75"
+    assert non_none > 50, f"REGRESSION: only {non_none} non-'none' recurring tasks, need >50"
+    assert with_date > 150, f"REGRESSION: only {with_date} dated tasks, need >150"
+    refusal_share = empty / len(extraction)
+    assert refusal_share <= 0.15 + 0.02, f"REGRESSION: refusal is {refusal_share:.1%} of extraction, target ceiling 15%"
+    dated_positive_samples = sum(1 for s in extraction if s["tasks"] and any(t.get("date_phrase") for t in s["tasks"]))
+    dated_sample_share = dated_positive_samples / positive
+    assert dated_sample_share >= 0.60, f"REGRESSION: only {dated_sample_share:.1%} of positive samples carry a date, need >=60%"
+    recurring_positive_samples = sum(
+        1 for s in extraction if s["tasks"] and any(t.get("recurrence") != "none" for t in s["tasks"])
+    )
+    recurring_sample_share = recurring_positive_samples / positive
+    assert recurring_sample_share >= 0.20, f"REGRESSION: only {recurring_sample_share:.1%} of positive samples are recurring, need >=20%"
+
     print()
-    print("All v1-regression guards passed.")
+    print(f"  positive samples with a date     : {dated_positive_samples}/{positive}  ({dated_sample_share:.1%}, target >=60%)")
+    print(f"  positive samples with recurrence : {recurring_positive_samples}/{positive}  ({recurring_sample_share:.1%}, target >=20%)")
+    print()
+    print("All v1- and v2-regression guards passed.")
 
 
 def main() -> None:
