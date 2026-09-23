@@ -9,6 +9,7 @@ import {
   setExtractionPromptMode,
   normalizeExtracted,
   parseExtractionOutput,
+  preFilterZeroTaskNotes,
   TODO_EXTRACTION_GRAMMAR,
   type ExtractedToDo,
 } from "../../services/ai/extractionLogic";
@@ -101,6 +102,15 @@ async function runCase(evalCase: EvalCase, modelPath: string): Promise<CaseScore
   if (evalCase.kind === "rag") {
     return runRagCase(evalCase, modelPath);
   }
+
+  // Mirrors extractToDosFromText()'s own pre-filter short-circuit (Hybrid
+  // Architecture) — any divergence here would mean the harness is scoring a
+  // pipeline the app doesn't actually run, exactly the failure mode this
+  // harness exists to avoid (see runCase's own module doc comment).
+  if (preFilterZeroTaskNotes(evalCase.note)) {
+    return scoreCase(evalCase, [], "[]", 0, 0);
+  }
+
   const detectedPhrases = detectDatePhrases(evalCase.note, evalCase.today);
   const prompt = buildPrompt(evalCase.note, evalCase.today, detectedPhrases);
 

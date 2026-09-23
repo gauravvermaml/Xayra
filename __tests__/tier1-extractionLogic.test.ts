@@ -31,7 +31,12 @@ jest.mock("../services/ai/localWhisper", () => ({
   isTranscriptionInProgress: jest.fn(() => false),
 }));
 
-import { detectDatePhrases, normalizeExtracted, resolveDateAndTime } from "../services/ai/transformationEngine";
+import {
+  detectDatePhrases,
+  normalizeExtracted,
+  preFilterZeroTaskNotes,
+  resolveDateAndTime,
+} from "../services/ai/transformationEngine";
 import { formatNoteContext, sanitizeLLMResponse, truncateForContext } from "../services/ai/ragFormatting";
 
 const TODAY = "2026-09-20"; // Sunday
@@ -363,5 +368,101 @@ describe("note context formatting", () => {
 
   it("leaves a short note untouched", () => {
     expect(truncateForContext("Buy milk")).toBe("Buy milk");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hybrid Architecture (v8) — deterministic zero-task pre-filter
+// ---------------------------------------------------------------------------
+// See preFilterZeroTaskNotes's own doc comment in extractionLogic.ts for why
+// this exists: three real fine-tuning attempts (v5-v7) failed to teach
+// third-party/refusal reliably, and the model's own on-device failures were
+// near-verbatim reproductions of the fabrication strings used as ORPO
+// negative examples. This function replaces that with a deterministic
+// decision for the same subset of notes.
+//
+// The critical property is ZERO false positives — a false positive here
+// silently drops a real task with no LLM fallback, worse than the model
+// guessing wrong. The corpus-wide test below is what actually enforces that,
+// checked against every case in the frozen 103-case eval corpus, not just
+// the hand-picked examples above it.
+
+describe("preFilterZeroTaskNotes", () => {
+  it.each([
+    "The plumber is coming Wednesday to look at the boiler.",
+    "My sister is moving house at the end of the month.",
+    "The cleaner comes every second Friday.",
+    "A courier is delivering the parcel tomorrow afternoon.",
+    "The neighbours are having their driveway resurfaced.",
+    "The council is collecting green waste next week.",
+    "My colleague is presenting at the conference in March.",
+    "The gas company is reading the meter on Friday.",
+    "The builder is coming Tuesday to look at the roof.",
+  ])("fires on a third-party note: %s", (note) => {
+    expect(preFilterZeroTaskNotes(note)).toBe(true);
+  });
+
+  it.each([
+    "The weather was lovely today and the garden looks great after the rain.",
+    "Had a really good chat with Dad about the old house.",
+    "The new album is excellent, especially the third track.",
+    "Feeling much better today than yesterday.",
+    "That podcast episode on sleep was surprisingly good.",
+    "Traffic was much lighter than usual this morning.",
+    "The new bakery bread is better than the supermarket one.",
+    "The old bike is holding up better than expected.",
+  ])("fires on a pure-observation note: %s", (note) => {
+    expect(preFilterZeroTaskNotes(note)).toBe(true);
+  });
+
+  it.each([
+    "The electrician is coming Tuesday to check the wiring. Buy lightbulbs tomorrow.",
+    "My cousin is moving to Berlin next month. Cancel the newspaper subscription.",
+    "Eli recommended the book The Overstory. His brother Elias is moving to Perth in January.",
+    "Sarah starts her new job on Monday. I should send her a card.",
+  ])("does NOT fire on a contrastive note (real task after a distractor clause): %s", (note) => {
+    expect(preFilterZeroTaskNotes(note)).toBe(false);
+  });
+
+  it.each([
+    "Remind me to call the dentist tomorrow.",
+    "Renew the parking permit by Friday.",
+    "Book the flights and renew the travel insurance.",
+    "so yeah remind me to renew the libary subscription tomorrow",
+    "Pay the storage fee on the 5th of every month.",
+  ])("does NOT fire on a genuine task note: %s", (note) => {
+    expect(preFilterZeroTaskNotes(note)).toBe(false);
+  });
+
+  it("does not fire on an empty or whitespace-only note", () => {
+    expect(preFilterZeroTaskNotes("")).toBe(false);
+    expect(preFilterZeroTaskNotes("   ")).toBe(false);
+  });
+
+  it("has zero false positives against every non-empty-task case in the frozen 103-case eval corpus", () => {
+    const fs = require("fs") as typeof import("fs");
+    const path = require("path") as typeof import("path");
+    const corpusDir = path.join(__dirname, "..", "scripts", "eval");
+    const files = ["corpus.jsonl", "corpus-heldout.jsonl"].map((f) => path.join(corpusDir, f));
+
+    const rows: Array<{ id: string; note?: string; expect?: { tasks?: unknown[] } }> = [];
+    for (const file of files) {
+      if (!fs.existsSync(file)) continue;
+      const lines = fs
+        .readFileSync(file, "utf8")
+        .split(/\r?\n/)
+        .filter((line) => line.trim() && !line.startsWith("//"));
+      for (const line of lines) {
+        rows.push(JSON.parse(line));
+      }
+    }
+    // Guard against a future refactor silently pointing this at the wrong
+    // files and passing vacuously with zero rows checked.
+    expect(rows.length).toBeGreaterThan(50);
+
+    const falsePositives = rows.filter(
+      (r) => typeof r.note === "string" && r.expect?.tasks && r.expect.tasks.length > 0 && preFilterZeroTaskNotes(r.note)
+    );
+    expect(falsePositives.map((r) => r.id)).toEqual([]);
   });
 });

@@ -7,6 +7,7 @@ import {
   extractionPrefix,
   normalizeExtracted,
   parseExtractionOutput,
+  preFilterZeroTaskNotes,
   TODO_EXTRACTION_GRAMMAR,
   todayIso,
   type ExtractedToDo,
@@ -17,6 +18,7 @@ import {
 export {
   detectDatePhrases,
   normalizeExtracted,
+  preFilterZeroTaskNotes,
   resolveDateAndTime,
   TODO_EXTRACTION_GRAMMAR,
   type ExtractedToDo,
@@ -113,6 +115,18 @@ async function waitForTranscriptionIdleIfNeeded(): Promise<void> {
 export async function extractToDosFromText(rawText: string): Promise<ExtractedToDo[]> {
   const trimmed = rawText.trim();
   if (!trimmed) {
+    return [];
+  }
+
+  // Hybrid Architecture: a deterministic pre-filter catches the specific
+  // failure mode three real fine-tuning attempts (v5-v7) could not fix
+  // reliably — see preFilterZeroTaskNotes's own doc comment in
+  // extractionLogic.ts for the full rationale and the safety verification
+  // this was checked against. Short-circuits BEFORE the thermal/
+  // transcription waits below — there is no reason to defer for a warm
+  // device just to return an empty array either way.
+  if (preFilterZeroTaskNotes(trimmed)) {
+    console.log("[transformationEngine] Pre-filter matched a zero-task note — skipping the LLM call.");
     return [];
   }
 

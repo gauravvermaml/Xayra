@@ -78,3 +78,6 @@ models/
 
 # Concatenation of corpus.jsonl + corpus-heldout.jsonl, rebuilt on demand
 scripts/eval/corpus-full.jsonl
+
+# Python bytecode cache from running scripts/dataset/generate_sft.py
+__pycache__/

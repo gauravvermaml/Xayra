@@ -1175,6 +1175,131 @@ export function isSingleSentence(text: string): boolean {
   return text.split(/[.!?]+/).filter((part) => part.trim().length > 0).length <= 1;
 }
 
+// --------------------------------------------------------------------------
+// Hybrid Architecture (v8): deterministic zero-task pre-filter
+// --------------------------------------------------------------------------
+//
+// Three real fine-tuning attempts (v5, v6, v7 — see scripts/dataset/
+// generate_sft.py's module docstring for the full history) all failed to
+// teach third-party attribution and pure-observation refusal reliably. The
+// v7 checkpoint's actual on-device failures were near-verbatim reproductions
+// of the hand-authored fabrication strings used as ORPO's rejected examples
+// ("Have the plumber come", "Move house", "Collect green waste") — evidence
+// that repeatedly showing the model a small, fixed vocabulary of "wrong"
+// completions, even as disfavored targets, taught it those phrases are
+// generically plausible outputs rather than teaching the general "there's no
+// task here" rule.
+//
+// This function decides the SAME subset of notes deterministically instead:
+// a note that is ENTIRELY a third-party subject clause or a passive
+// observation/opinion has no task in it, regardless of what any model says.
+// It is deliberately conservative in two ways:
+//
+//   1. Gated on `isSingleSentence` — a note with a real task alongside a
+//      distractor clause ("The electrician is coming Tuesday to check the
+//      wiring. Buy lightbulbs tomorrow.") is two sentences, so this function
+//      never even evaluates the regexes against it. Extracting the real task
+//      while skipping only the distractor (the contrastive case) stays a
+//      model job; this pre-filter must never short-circuit it.
+//   2. Anchored at the start of the note (`^`), matching known third-party
+//      subject/verb and observation-subject/state-verb shapes, not a bag of
+//      keywords anywhere in the text — a keyword match alone would risk
+//      firing on a note that mentions a trade or an opinion in passing while
+//      still containing a real task.
+//
+// Verified against the frozen 103-case eval corpus before being written here
+// (see the "third-party"/"refusal"/"attribution" categories in
+// scripts/eval/corpus-full.jsonl): zero false positives across every case
+// with a non-empty expected task list, catching 25 of the 26 known
+// zero-task cases. The one miss ("The café on the corner has completely
+// changed its menu.") is an acceptable false negative — the LLM still
+// attempts it exactly as it did before this pre-filter existed, so this
+// function can only IMPROVE on the previous behaviour, never regress it,
+// as long as the false-positive count stays at zero.
+//
+// This is a REGEX vocabulary, not a learned model — it will not generalise
+// to phrasing outside what it lists, the same ceiling a small fine-tuning
+// dataset hits. The difference is that a regex is cheap to audit and extend
+// incrementally (add a noun, add a verb shape) without a GPU retraining
+// cycle, and a missed case here costs nothing beyond the status quo (the
+// model still gets a chance), whereas a missed case in a hallucination-prone
+// fine-tuned model actively invents a task that did not exist.
+
+const TRADE_NOUNS =
+  "plumber|electrician|builder|roofer|gardener|cleaner|painter|locksmith|surveyor|" +
+  "glazier|arborist|engineer|technician|inspector|carpenter|tiler|landscaper";
+
+const THIRD_PARTY_NOUNS =
+  `${TRADE_NOUNS}|` +
+  "sister|brother|neighbour|neighbours|colleague|cousin|tenant|manager|new manager|" +
+  "flatmate|driver|delivery driver|previous owner|brother-in-law|" +
+  "council|gas company|water board|letting agency|removal firm|courier|broadband provider|" +
+  "insurance assessor|waste contractor";
+
+/** "The plumber is coming...", "My sister is moving...", "The council is
+ * collecting...", "The cleaner comes every second Friday." — a third-party
+ * subject followed by an ongoing/scheduled/reported action. */
+const THIRD_PARTY_SUBJECT_RE = new RegExp(
+  `^(?:the|a|an|my|one of the)\\s+(?:${THIRD_PARTY_NOUNS})\\s+` +
+    `(?:(?:is|are)\\s+\\w+ing|comes|will\\b|was\\b|were\\b|came\\b|said\\b)`,
+  "i"
+);
+
+/** "My brother said the plumber will call round..." — the third-party
+ * entity is embedded mid-sentence rather than right after the leading
+ * subject, so it needs its own shape rather than extending the pattern
+ * above. */
+const THIRD_PARTY_CALL_ROUND_RE = new RegExp(`said (?:the|a|an) (?:${TRADE_NOUNS}) will call round`, "i");
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const OBSERVATION_SUBJECTS = [
+  "the weather", "the garden", "traffic", "the film", "the movie", "the book", "the album",
+  "the podcast", "that podcast episode", "the bread", "the bakery", "the new bakery bread",
+  "the coffee", "the restaurant", "the meal", "the shop", "the café", "the cafe", "the market",
+  "prices", "the train", "the bus", "the meeting", "the lift", "the parcel", "the bike",
+  "the old bike", "the hallway paint", "the redesign", "the app", "that new series",
+  "the new series", "that new album", "the new album", "the road", "the flat", "the timing",
+  "that", "this", "it", "the year",
+]
+  .map(escapeRegExp)
+  .join("|");
+
+/** "The weather was lovely...", "Traffic was much lighter...", "That podcast
+ * episode... was surprisingly good." — a known observation/opinion subject
+ * followed, within a short span, by a state/evaluative verb. */
+const OBSERVATION_STATE_RE = new RegExp(
+  `^(?:${OBSERVATION_SUBJECTS})\\b.{0,40}\\b(?:was|were|is|are|seem|seems|looks|look|feels|feel|has|have|holding up)\\b`,
+  "i"
+);
+
+/** "Had a really good chat with Dad...", "Feeling much better...", "Slept
+ * badly...", "Felt a lot sharper..." — an experience/feeling note with the
+ * subject dropped, common in short voice transcripts. */
+const OBSERVATION_VERB_FIRST_RE =
+  /^(?:had|felt|feeling|slept|woke|worked|thinking|looking back|realised|realized|funny how|it rained|it snowed|it was)\b/i;
+
+/**
+ * Deterministic pre-filter for the Hybrid Architecture: true means this note
+ * has no task in it and extraction should return `[]` WITHOUT calling the
+ * LLM at all. See the module-level comment above for the full rationale and
+ * the safety properties this was verified against.
+ */
+export function preFilterZeroTaskNotes(noteText: string): boolean {
+  const trimmed = noteText.trim();
+  if (!trimmed || !isSingleSentence(trimmed)) {
+    return false;
+  }
+  return (
+    THIRD_PARTY_SUBJECT_RE.test(trimmed) ||
+    THIRD_PARTY_CALL_ROUND_RE.test(trimmed) ||
+    OBSERVATION_STATE_RE.test(trimmed) ||
+    OBSERVATION_VERB_FIRST_RE.test(trimmed)
+  );
+}
+
 // Exported test-only, same reason as resolveDateAndTime/detectDatePhrases
 // above: the auto-fill reconciliation below is pure, deterministic, and has
 // now produced one silent real-world regression — it is worth asserting

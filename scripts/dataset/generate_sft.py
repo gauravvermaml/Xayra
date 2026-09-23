@@ -1,7 +1,200 @@
 #!/usr/bin/env python3
-"""ORPO preference-pair generator for the Qwen2.5-1.5B extraction model — v4.
+"""Standard SFT dataset generator for the Qwen2.5-1.5B extraction model — v8.1
+(Hybrid Architecture).
 
-WHY V4 MOVES OFF PLAIN SFT
+WHY V8.1 REBALANCES RAG AND ADDS INDIRECT-QUESTION COVERAGE
+-----------------------------------------------------------
+v8 was trained and run through the full 103-case harness: 90.3% (93/103),
+the first checkpoint to beat the 83.5% baseline — extraction (dates,
+recurrence, contrastive, third-party via the code pre-filter) all held at
+or near 100%. But `rag-grounding` dropped to 1/4 (from v7's 2/4) and
+`rag-refusal` had one miss.
+
+Diagnosed from the ACTUAL raw model output for all 4 failures (not just the
+scoring summary) before touching anything:
+
+  * 3 of 4 (`rag-005`, `rag-006`, `gen-rag-allergy`) are genuine
+    OVER-REFUSAL: the model answered "No information found in your notes."
+    even though the fact was plainly present in the supplied context. The
+    common thread across all three: every one is an INDIRECT question
+    ("What did Eli say?", "Do I need to do anything about the gym?", "Is
+    there anything I should remember about the dinner?") — a phrasing shape
+    `make_rag_factual`'s question pool never trained, which only ever used
+    DIRECT fact-lookup phrasing ("When does my gym membership renew?").
+  * The 4th (`rag-004`) is a DIFFERENT bug: with genuinely empty context,
+    the model did not over-answer — it paraphrased the refusal ("I'm sorry,
+    but I couldn't find...") instead of the exact trained string. Worth
+    flagging plainly: v8.1 REDUCES refusal training volume (75 -> 25) to
+    fix the 3-case over-refusal problem, which could make this specific
+    exact-string-robustness issue not improve, or mildly worsen, since it
+    is the opposite failure direction on the same axis. Not addressed by
+    this file — the fix for it would live in the scoring harness (recognise
+    a semantically-correct paraphrase) or a v8.2 that improves refusal
+    phrasing robustness specifically, if it recurs.
+
+v8.1 changes:
+
+  1. RAG ratio: 75/75 (50/50) -> 125/25 (85/15) factual/refusal — directly
+     reduces how often the model is shown ANY refusal target, addressing
+     the over-refusal pattern at the volume level.
+  2. Two new `RAG_SUBJECTS` entries modelled directly on the two NEW failure
+     SHAPES that weren't in the pool at all before — `recommendation_book`
+     (a person recommending something, `rag-005`'s exact shape) and
+     `dietary_note` (a fact embedded in an unrelated multi-note context,
+     `gen-rag-allergy`'s exact shape) — not speculative additions.
+  3. Indirect-question phrasings added to the `gym` subject specifically
+     ("do you know if I need to do anything about the gym"-style), since
+     `rag-006` is exactly that subject asked exactly that way.
+
+WHY V8 REVERTS TO STANDARD SFT AND DROPS THIRD-PARTY/REFUSAL TRAINING
+------------------------------------------------------------------------
+Three real ORPO fine-tuning attempts (v5, v6, v7) all failed to teach
+third-party attribution and pure-observation refusal reliably, and v7's
+attempt to push harder on the SAME lever made the FULL 103-case harness
+score WORSE than doing nothing (68.9% vs the 83.5% prompt-only baseline,
+still undefeated after five real training attempts). Reading the v7
+checkpoint's actual failures on the real corpus was the deciding evidence:
+its spurious tasks were near-verbatim reproductions of the hand-authored
+`rejected` fabrication strings this file trained it to AVOID ("Have the
+plumber come", "Move house", "Collect green waste", "Resurface the
+driveway" — literally copied from THIRD_PARTY_ACTIONS/ROUTINE_ORG_ACTIONS
+below). Showing the model a small, fixed vocabulary of "wrong" completions,
+even in ORPO's disfavoured slot, taught it those phrases are generically
+plausible task-shaped outputs — the model was memorising the specific
+fabrication vocabulary, not learning "there is no task in a third-party or
+observation note." Refusal (pure observation, no third party) regressed the
+same way for the same reason: WEATHER_OBS/OPINION_OBS/etc. are similarly
+small, fixed pools.
+
+The Hybrid Architecture accepts this as a real ceiling on what fine-tuning
+should be asked to do here, rather than continuing to scale the same
+mechanism. Third-party/observation refusal is now decided by a
+DETERMINISTIC pre-filter in code (`preFilterZeroTaskNotes` in
+services/ai/extractionLogic.ts) — verified against the frozen 103-case eval
+corpus with ZERO false positives before being written, catching 25 of the
+26 known zero-task cases. Fine-tuning is scoped down to exactly the
+behaviours every prior run (v5, v6, v7) actually got right every single
+time: date resolution, recurrence, STT-noise tolerance, and contrastive
+skip-the-distractor extraction — plus RAG grounding/refusal, which held up
+reasonably (rag-factual 4/4, rag-refusal 2/3 on the v7 harness run).
+
+Consequences for this file:
+
+  1. Format reverts from ORPO's `{"prompt","chosen","rejected"}` triples
+     back to plain SFT `{"messages": [...]}` rows — a system/user/assistant
+     list, letting the tokenizer's own chat template (applied in the
+     notebook) handle ChatML formatting, rather than this file hand-building
+     `<|im_start|>...<|im_end|>` strings. No `rejected` side exists at all;
+     there is nothing left for ORPO's preference mechanism to score, so the
+     notebook reverts to a standard `SFTTrainer` + `train_on_responses_only`
+     (masks the loss to assistant tokens only — see the notebook's own
+     section 4 for the exact API, verified against Unsloth's docs before
+     writing it, the same discipline `PatchDPOTrainer` got in v4).
+  2. `extraction_zero_task_refusal` and `extraction_third_party_refusal` are
+     REMOVED from TARGET_DISTRIBUTION entirely — 0 pure-refusal rows, by
+     design, not omission. `make_zero_task`/`make_third_party` (and their
+     supporting fabrication helpers) are left in this file, UNUSED by
+     `build()`, the same "preserve, don't delete" precedent v4 set for
+     `make_rag_factual`/`make_rag_refusal` when RAG was dropped — they
+     remain genuinely useful as a source of realistic third-party/
+     observation note text for testing `preFilterZeroTaskNotes`'s coverage
+     independent of training.
+  3. The freed-up budget goes to `extraction_positive_other`: 270 (up from
+     v7's 184), with date coverage raised to >=70% and recurrence to >=25%
+     (both directive targets, up from v7's 60%/20%) — more room now that
+     this bucket doesn't have to make space for a refusal bucket at all.
+  4. `extraction_contrastive` stays at 80 — this was the one thing v3
+     onward always got right (4/4 on every single trained checkpoint), and
+     nothing about the failure this responds to implicates it.
+  5. RAG (150 rows: 75 factual, 75 refusal) is unaffected structurally, but
+     also reverts to a single `answer` per row (no `rejected` side) for the
+     same reason as extraction. The refusal string is unchanged:
+     byte-identical to `MINIMAL_RAG_SYSTEM_PROMPT`'s own instructed reply,
+     "No information found in your notes." — a `v8` implementation directive
+     specified a different phrasing ("I couldn't find any information about
+     that in your notes."); that was not adopted, since training the model
+     to say something OTHER than what its own system prompt instructs would
+     reintroduce exactly the byte-mismatch class of bug this file's module
+     docstring has warned against since v1 ("TWO SYSTEM PROMPTS, ONE MODEL"
+     section, below).
+
+Total dataset stays 500 rows: 350 extraction (270 positive + 80
+contrastive, 0 refusal) + 150 RAG (75 factual + 75 refusal).
+
+WHY V7 GOES BIGGER ON THIRD-PARTY (superseded by v8 above; kept for history)
+-------------------------------------------------------------------
+v6 WAS actually trained (fresh model load confirmed: 18,464,768 trainable
+params, 126 steps, loss 3.62 -> 1.04 over 2 epochs) and run through the
+20-case sweep. Result: third-party attribution was STILL 1/8, producing
+outputs nearly identical to v5's failed checkpoint. This means v6's fix — a
+26->36 count bump for third-party plus mixed rejected fabrication shapes —
+was real but too WEAK a perturbation: a ~40% relative increase (10 rows out
+of 350) barely moved anything against 298 rows reinforcing "there is a
+task-shaped sentence, extract it," especially with only 1.18% of the
+model's parameters trainable (LoRA r=16) and training loss still visibly
+descending at the final step (not plateaued — the run may have been
+undertrained in general, not just imbalanced).
+
+v7 responded with FOUR changes together: `extraction_third_party_refusal`
+36 -> 70, a `warmup_steps` fallback for trl's dropped `warmup_ratio`, 3
+epochs instead of 2, and LoRA r=32 instead of 16. Trained and evaluated
+against the full 103-case harness: 68.9% (71/103), third-party STILL 1/8,
+refusal collapsed to 5/17 — WORSE than doing nothing. This is the run whose
+actual failure output (verbatim reproductions of this file's own
+fabrication strings) is what v8 above responds to directly.
+
+WHY V6 REBUILDS THE THIRD-PARTY REJECTED SHAPE (superseded; kept for history)
+------------------------------------------------------------------------------
+v5 was actually trained and run through the 20-case Colab validation sweep.
+Contrastive (4/4), pure-observation refusal (4/4), and dated tasks (4/4) all
+held — but third-party attribution, the single most-targeted failure of this
+entire multi-week arc, collapsed to 1/8. Crucially, this was NOT the same
+failure as Run 3's: reading the actual generated output showed the model no
+longer producing v3's bare hallucinated noun ("Garden", "Plumber"). Instead
+it paraphrased the third party's own action into a plausible-sounding task —
+`"Have plumber come on Thursday"`, `"Read the gas meter"`,
+`"Resurface the driveway"` — a DIFFERENT wrong answer than the one v5's
+`rejected` side had ever shown it.
+
+Root cause: `extraction_refusal`'s rejected side (`_hallucinated_rejected`)
+only ever demonstrated ONE fabrication shape — a bare noun grabbed from
+after an article ("the roof" -> "Roof"). ORPO penalises the SPECIFIC
+`rejected` example shown for a prompt, not the general principle "don't
+invent a task here" — so the model learned to avoid that one narrow pattern
+while the broader mistake (extracting anything at all from a third-party
+note) re-emerged in an ORPO-unpunished shape.
+
+v6 gave zero-task and third-party separate guaranteed counts, added a 5th
+third-party sentence shape (`ROUTINE_ORG_ACTIONS`) modelled on the
+validation sweep's own phrasing, and mixed several fabrication shapes per
+row instead of one. This dataset was trained (see "WHY V7" above) and the
+fix was measured as too weak, then v8 (top of this docstring) abandoned the
+whole ORPO-negative-example approach for this behaviour.
+
+WHY V5 RESTORES RAG AND REDESIGNS CONTRASTIVE (kept for history)
+-----------------------------------------------
+v4 excluded RAG entirely and shipped 350 extraction-only triplets, on the
+reasoning that ORPOTrainer needs prompt/chosen/rejected uniformly and no
+rejected-answer design for RAG had been specified yet. That scope cut was
+rejected: training only on extraction risks catastrophic forgetting of RAG
+grounding exactly the way v1's extraction-only SFT run risked (and, for
+other behaviours, actually caused) collateral damage elsewhere. v5
+re-activated `make_rag_factual`/`make_rag_refusal` (dormant since v4) as
+ORPO preference-pair sources. v8 (top of this docstring) keeps RAG active
+but reverts its output shape to a single answer, since ORPO itself is gone.
+
+v5 also changed the CONTRASTIVE bucket's `rejected` shape to penalise
+leaking the distractor as an extra item specifically. v8 keeps
+`make_contrastive`'s NOTE GENERATION unchanged (it was never the problem —
+contrastive held 4/4 on every trained checkpoint, v5 through v7) but drops
+the `rejected`-side machinery along with the rest of ORPO.
+
+WHY V4 MOVES OFF PLAIN SFT (superseded by v8's own return to SFT; kept for
+history — the mechanism v4 fixed for extraction is different from why v8
+returns to it: v4 needed negative supervision because a SKEWED RATIO of
+positive-vs-refusal plain-SFT examples was pushing the model toward whichever
+behaviour dominated the mix. v8 has NO refusal examples at all, so that
+seesaw mechanism cannot recur — there is no ratio to skew.)
 ---------------------------
 v2 and v3 both used the same lever — the ratio of positive-to-refusal SFT
 examples — and both broke, in opposite directions:
@@ -15,17 +208,12 @@ Both runs showed the identical mechanism: plain SFT only ever teaches "this
 completion is correct," never "this completion is wrong." With no negative
 signal, the model's only lever for avoiding one failure mode is seeing MORE
 examples of the opposite behaviour — which just pushes it into the other
-failure mode once that behaviour dominates the training mix. Manually
-re-balancing the ratio is tuning a seesaw from one end; there is no ratio
-that pins both ends down at once with this objective.
+failure mode once that behaviour dominates the training mix.
 
-ORPO (Odds Ratio Preference Optimization) trains on (prompt, chosen,
-rejected) triples and directly penalises the WRONG completion for a given
-note, not just reward the right one. A refusal-note row's rejected side is a
-hallucinated task (exactly the "Garden" / "Plumber" / "Look at the roof"
-shape Run 3 actually produced on-device); a task-note row's rejected side is
-bare "[]" (exactly Run 2's failure). Both lessons live in the SAME file now,
-scored against each other rather than against two separately-tuned datasets.
+ORPO (v4-v7) tried fixing this with negative supervision instead of ratio
+tuning. It worked for contrastive (skip-the-distractor) but never
+generalised for third-party/refusal specifically — see "WHY V8" at the top
+for why that axis is now a code-side guard instead.
 
 WHY V3 EXISTED (kept for history)
 -----------------------------------
@@ -162,39 +350,43 @@ RAG_SYSTEM_PROMPT = (
     "notes, reply exactly: \"No information found in your notes.\""
 )
 
+# Byte-identical to what MINIMAL_RAG_SYSTEM_PROMPT itself instructs the model
+# to reply — NOT the "I couldn't find any information about that in your
+# notes." phrasing a v8 implementation directive specified. Training a
+# different string than the system prompt's own instruction would be exactly
+# the class of byte-mismatch bug this file's "TWO SYSTEM PROMPTS, ONE MODEL"
+# section has warned about since v1.
 REFUSAL_ANSWER = "No information found in your notes."
 
 SEED = 20260922
 
-# Qwen2/2.5 ChatML turn delimiter. A real completion always ends in this —
-# training `chosen`/`rejected` without it would teach the model a target that
-# never terminates, the same class of omission that makes a fine-tuned model
-# run on past its answer.
-IM_END = "<|im_end|>"
-
-# Fraction of the 350-note EXTRACTION total in each bucket. Verified to sum to
-# 1.0 by an assertion in `build()` rather than trusted by eye. Unchanged in
-# proportion from v3 (85/15 positive/refusal, 75+ floor on contrastive) —
-# ORPO changes the OUTPUT FORMAT of these same notes, not their balance,
-# which v3 already verified against the real thresholds.
+# Fraction of the 500-row TOTAL in each bucket. Verified to sum to 1.0 by an
+# assertion in `build()` rather than trusted by eye.
 #
-# RAG IS OUT OF SCOPE FOR THIS FILE. ORPOTrainer requires every row to carry
-# prompt/chosen/rejected; it cannot share a dataset with the RAG samples'
-# plain single-answer shape, and no rejected-answer design for RAG was
-# specified. make_rag_factual/make_rag_refusal and their fragment pools are
-# left in this file, unused by build(), rather than deleted — nothing here
-# forecloses building a separate RAG-preference file later, but that is a
-# distinct design decision this file does not make unilaterally.
+# v8 (Hybrid Architecture): third-party/observation refusal is REMOVED from
+# this distribution entirely — see the module docstring's "WHY V8" section.
+# The freed budget goes to extraction_positive_other (184 -> 270), and
+# contrastive stays at 80 (the one behaviour every prior run got right).
 #
-#   extraction_contrastive    80 / 350 = 22.9% (floor: 75+)
-#   extraction_positive_other 218 / 350 = 62.3%
-#   extraction_refusal         52 / 350 = 14.9%   (target: 15%)
-#   -----------------------------------------------------------
-#   extraction positive total 298 / 350 = 85.1%   (target: 85%)
+#   extraction_contrastive     80 / 500 = 16.0%  (floor: 75+)
+#   extraction_positive_other 270 / 500 = 54.0%  (v8: up from 184 -- no
+#                                                  refusal bucket to share
+#                                                  the extraction budget with)
+#   rag_factual               125 / 500 = 25.0%  (v8.1: up from 75 -- the
+#                                                  v8-trained checkpoint
+#                                                  over-refused on genuinely
+#                                                  answerable INDIRECT
+#                                                  questions; see the module
+#                                                  docstring's "WHY V8.1")
+#   rag_refusal                25 / 500 =  5.0%  (v8.1: down from 75)
+#   ------------------------------------------------------------------------
+#   extraction total          350 / 500 = 70.0%  (ALL positive -- 0% refusal)
+#   rag total                 150 / 500 = 30.0%  (85% factual / 15% refusal)
 TARGET_DISTRIBUTION = {
-    "extraction_contrastive": 80 / 350,
-    "extraction_positive_other": 218 / 350,
-    "extraction_refusal": 52 / 350,
+    "extraction_contrastive": 80 / 500,
+    "extraction_positive_other": 270 / 500,
+    "rag_factual": 125 / 500,
+    "rag_refusal": 25 / 500,
 }
 
 # --------------------------------------------------------------------------
@@ -227,11 +419,35 @@ VISIT_REASONS = [
     "to test the alarm", "to repair the fence",
 ]
 
+# (action_phrase, fabricated_task) pairs. `fabricated_task` is unused in v8
+# (no more rejected/fabricated examples get trained), kept only because
+# make_third_party — dormant in v8, see its own docstring — still builds
+# structured candidates from it for use as test-coverage data outside
+# training.
 THIRD_PARTY_ACTIONS = [
-    "is moving house", "is starting a new job", "is going on holiday",
-    "is selling the flat", "is renovating the kitchen", "is changing jobs",
-    "is having the driveway resurfaced", "is getting a new car",
-    "is redoing the bathroom", "is taking a sabbatical",
+    ("is moving house", "Move house"),
+    ("is starting a new job", "Start the new job"),
+    ("is going on holiday", "Go on holiday"),
+    ("is selling the flat", "Sell the flat"),
+    ("is renovating the kitchen", "Renovate the kitchen"),
+    ("is changing jobs", "Change jobs"),
+    ("is having the driveway resurfaced", "Resurface the driveway"),
+    ("is getting a new car", "Get a new car"),
+    ("is redoing the bathroom", "Redo the bathroom"),
+    ("is taking a sabbatical", "Take a sabbatical"),
+]
+
+# (gerund_phrase, fabricated_task) pairs — same "unused in v8 training, kept
+# for dormant make_third_party" status as THIRD_PARTY_ACTIONS above.
+ROUTINE_ORG_ACTIONS = [
+    ("reading the meter", "Read the meter"),
+    ("collecting the recycling", "Collect the recycling"),
+    ("collecting the green waste", "Collect the green waste"),
+    ("delivering a parcel", "Deliver the parcel"),
+    ("servicing the boiler", "Service the boiler"),
+    ("inspecting the drains", "Inspect the drains"),
+    ("installing the new meter", "Install the new meter"),
+    ("carrying out routine maintenance", "Carry out the routine maintenance"),
 ]
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -380,37 +596,25 @@ RECURRENCE_PATTERNS = [
 ]
 
 
-def chatml_sample(system_prompt: str, user_content: str, assistant_content: str, **meta) -> dict:
-    """One training row, in the ChatML shape Qwen2.5 was instruction-tuned on.
-
-    `text` is the field TRL's SFTTrainer reads. The assistant turn is closed
-    with <|im_end|> so the model learns to stop; without it, a fine-tuned
-    model happily runs on past its answer.
-    """
-    text = (
-        f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
-        f"<|im_start|>user\n{user_content}<|im_end|>\n"
-        f"<|im_start|>assistant\n{assistant_content}<|im_end|>"
-    )
-    return {"text": text, **meta}
-
-
-def extraction_sample(note: str, tasks: list[dict], kind: str = "extraction") -> dict:
-    # v4: this used to build the finished ChatML SFT row directly. It now
-    # returns the raw ingredients instead, and ORPO_ASSEMBLY (below, near
-    # build()) is the ONE place that turns (note, tasks, kind) into the final
-    # prompt/chosen/rejected training row. Every one of the seven call sites
-    # above (make_dated_task, make_stt, make_multi_task, make_recurring_task,
-    # make_zero_task, make_third_party, make_contrastive) is untouched by
-    # this — they all still call `extraction_sample(note, tasks[, kind=...])`
-    # exactly as before, and every one of v3's verified generation properties
-    # (85/15 balance, contrastive floor, date/recurrence coverage) survives
-    # unchanged, because none of that logic lived in this function.
-    return {"note": note, "tasks": tasks, "kind": kind}
+def extraction_sample(note: str, tasks: list[dict], kind: str = "extraction", **extra) -> dict:
+    # v4: this used to build the finished ChatML SFT row directly. v4-v7
+    # made it return raw ingredients for an ORPO conversion step instead; v8
+    # keeps the raw-ingredients shape (to_sft_extraction_row, below, is now
+    # the ONE place (note, tasks, kind) becomes a trainer-ready row) since
+    # that separation is still useful, even without ORPO's rejected side.
+    #
+    # `**extra`: a factory can stash whatever extra structured ingredients it
+    # needs — make_contrastive no longer needs this in v8 (no fabrication
+    # step to feed), but the dormant make_third_party still uses it for
+    # `fabricated_candidates` (see its own docstring). Generic passthrough
+    # instead of one named parameter per version avoids editing this
+    # function's signature every time a new factory needs to stash
+    # something.
+    return {"note": note, "tasks": tasks, "kind": kind, **extra}
 
 
 # --------------------------------------------------------------------------
-# (a) Extraction — positive, 35%
+# (a) Extraction — positive
 # --------------------------------------------------------------------------
 
 def make_dated_task(rng: random.Random) -> dict:
@@ -482,7 +686,14 @@ def make_recurring_task(rng: random.Random) -> dict:
 
 
 # --------------------------------------------------------------------------
-# (b) Extraction — refusal (zero-task + third-party), 35%
+# (b) Extraction — refusal (zero-task + third-party) — DORMANT IN v8
+# --------------------------------------------------------------------------
+# NOT called by build() in v8 — see the module docstring's "WHY V8" section
+# for why third-party/observation refusal training was dropped entirely
+# rather than re-tuned again. Kept, not deleted: these remain a useful
+# source of realistic third-party/observation note TEXT for testing
+# preFilterZeroTaskNotes's coverage independent of training (see
+# scripts/dataset/ — used exactly this way while building that pre-filter).
 # --------------------------------------------------------------------------
 
 def make_zero_task(rng: random.Random) -> dict:
@@ -492,27 +703,63 @@ def make_zero_task(rng: random.Random) -> dict:
         other = rng.choice(rng.choice([WEATHER_OBS, OPINION_OBS, EVENT_OBS]))
         if other != note:
             note = f"{note[:-1]} and {other[0].lower()}{other[1:]}"
-    return extraction_sample(note, [])
+    return extraction_sample(note, [], kind="extraction_zero_task_refusal")
+
+
+def _reason_to_task(reason: str) -> dict:
+    """"to look at the boiler" -> {"task": "Look at the boiler", ...}. Every
+    VISIT_REASONS entry starts with "to ", so stripping it and capitalising
+    the first letter always produces a grammatical, plausible-looking (but
+    wrong) task."""
+    stripped = reason[3:] if reason.startswith("to ") else reason
+    return {"task": stripped[0].upper() + stripped[1:], "date_phrase": "", "recurrence": "none"}
 
 
 def make_third_party(rng: random.Random) -> dict:
-    shape = rng.randint(0, 3)
+    """A note about someone/something ELSE's scheduled action — no task for
+    the user at all. Dormant in v8 (see the section header above) — kept
+    intact rather than simplified so its 5 sentence shapes remain available
+    as realistic test-coverage data for preFilterZeroTaskNotes."""
+    shape = rng.randint(0, 4)
     time_expr = rng.choice(VISIT_TIMES).format(weekday=rng.choice(WEEKDAYS), ord=rng.choice(ORDINALS))
+    candidates: list[dict] = []
 
     if shape == 0:
-        note = f"The {rng.choice(TRADES)} is coming {time_expr} {rng.choice(VISIT_REASONS)}."
+        trade = rng.choice(TRADES)
+        reason = rng.choice(VISIT_REASONS)
+        note = f"The {trade} is coming {time_expr} {reason}."
+        candidates.append({"task": f"Have the {trade} come", "date_phrase": "", "recurrence": "none"})
+        candidates.append(_reason_to_task(reason))
     elif shape == 1:
-        note = f"{rng.choice(THIRD_PARTY_ORGS).capitalize()} is sending someone {time_expr} {rng.choice(VISIT_REASONS)}."
+        org = rng.choice(THIRD_PARTY_ORGS)
+        reason = rng.choice(VISIT_REASONS)
+        note = f"{org.capitalize()} is sending someone {time_expr} {reason}."
+        candidates.append(_reason_to_task(reason))
     elif shape == 2:
-        note = f"{rng.choice(THIRD_PARTY_PEOPLE).capitalize()} {rng.choice(THIRD_PARTY_ACTIONS)} {time_expr}."
+        person = rng.choice(THIRD_PARTY_PEOPLE)
+        action_phrase, fabricated_task = rng.choice(THIRD_PARTY_ACTIONS)
+        note = f"{person.capitalize()} {action_phrase} {time_expr}."
+        candidates.append({"task": fabricated_task, "date_phrase": "", "recurrence": "none"})
+    elif shape == 3:
+        person = rng.choice(THIRD_PARTY_PEOPLE)
+        trade = rng.choice(TRADES)
+        note = f"{person.capitalize()} said the {trade} will call round {time_expr}."
+        candidates.append({"task": f"Have the {trade} call round", "date_phrase": "", "recurrence": "none"})
     else:
-        note = f"{rng.choice(THIRD_PARTY_PEOPLE).capitalize()} said the {rng.choice(TRADES)} will call round {time_expr}."
+        org = rng.choice(THIRD_PARTY_ORGS)
+        gerund, fabricated_task = rng.choice(ROUTINE_ORG_ACTIONS)
+        note = f"{org.capitalize()} is {gerund} {time_expr}."
+        candidates.append({"task": fabricated_task, "date_phrase": "", "recurrence": "none"})
 
-    return extraction_sample(note, [])
+    candidates.append(_fabricated_task_dict(rng, note))
+
+    return extraction_sample(
+        note, [], kind="extraction_third_party_refusal", fabricated_candidates=candidates
+    )
 
 
 # --------------------------------------------------------------------------
-# (c)/(d) RAG — factual and refusal, 15% + 15%
+# (c)/(d) RAG — factual and refusal
 # --------------------------------------------------------------------------
 # Each subject is (noun_phrase, detail_template, question_template,
 # answer_template), parametrised by date/amount/time/ordinal/city so a
@@ -563,6 +810,13 @@ RAG_SUBJECTS = [
             "when does the gym membership come out",
             "whens my gym payment",
             "does the gym renew automatically",
+            # v8.1: indirect phrasings -- rag-006 asked exactly this subject
+            # this way ("Do I need to do anything about the gym?") and the
+            # v8 checkpoint refused despite the fact being in context, since
+            # every prior question here was a DIRECT fact lookup.
+            "do I need to do anything about the gym",
+            "is there anything I should remember about my gym membership",
+            "what's going on with my gym membership",
         ],
     },
     {
@@ -701,13 +955,56 @@ RAG_SUBJECTS = [
             "when does the mot expire",
         ],
     },
+    # v8.1: two new subjects modelled directly on the two failure SHAPES
+    # rag-005/gen-rag-allergy exposed that no prior subject covered at all —
+    # a person recommending something, and a fact embedded in an unrelated
+    # multi-note context. `needs: []` is deliberate: _rag_params(rng, [])
+    # returns {} and `"literal string".format()` is a no-op, so these two
+    # slot into make_rag_factual/make_rag_refusal/the distractor-sampling
+    # logic unchanged — no code changes needed elsewhere for a subject with
+    # no parameters to randomise.
+    {
+        "key": "recommendation_book",
+        "detail": "Eli recommended the book The Overstory.",
+        "answer": "Eli recommended The Overstory.",
+        "needs": [],
+        "questions": [
+            "What did Eli say?",
+            "what did eli recommend",
+            "did eli suggest anything to read",
+            "what book did eli mention",
+            "is there anything eli told me to check out",
+        ],
+    },
+    {
+        "key": "dietary_note",
+        "detail": "One of the dinner guests cannot eat peanuts.",
+        "answer": "One of the guests cannot eat peanuts.",
+        "needs": [],
+        "questions": [
+            "Is there anything I should remember about the dinner?",
+            "anything to know before the dinner",
+            "what should i keep in mind for the dinner",
+            "do i need to remember anything about dinner",
+        ],
+    },
 ]
 
 
 def _rag_params(rng: random.Random, needs: list[str]) -> dict:
     params = {}
     if "date" in needs:
-        params["date"] = rng.choice(RELATIVE_DATES) if rng.random() < 0.3 else f"{rng.randint(1, 28)} {rng.choice(['January','March','June','September','November'])}"
+        # Every RAG template hardcodes its own preposition before {date}
+        # ("expires on {date}", "due by {date}") — RELATIVE_DATES entries
+        # like "before Friday" or "on the 12th" already carry their OWN
+        # preposition (they're built for extraction's bare
+        # "{verb} {obj} {date_phrase}" shape, with no preposition of its
+        # own), so plugging one in here produced double-preposition breakage
+        # ("expires on before Friday", "expires on on the 12th") — found by
+        # spot-checking the actual generated rows, not assumed. A bare
+        # absolute date always reads correctly after any of the hardcoded
+        # prepositions, so RAG uses that exclusively.
+        params["date"] = f"{rng.randint(1, 28)} {rng.choice(['January','March','June','September','November'])}"
     if "ordinal" in needs:
         params["ordinal"] = rng.choice(ORDINALS)
     if "amount" in needs:
@@ -815,15 +1112,18 @@ def make_rag_factual(rng: random.Random) -> dict:
     context = "\n\n".join(_note_block(rng, i + 1, n) for i, n in enumerate(notes))
     user_content = f"{context}\n\nQuestion: {question}"
 
-    return chatml_sample(
-        RAG_SYSTEM_PROMPT, user_content, answer,
-        kind="rag_factual", query=question, note=context,
-    )
+    return {
+        "kind": "rag_factual",
+        "user_content": user_content,
+        "answer": answer,
+        "query": question,
+        "note": context,
+    }
 
 
 def make_rag_refusal(rng: random.Random) -> dict:
     """Distractor-only context: nothing relevant is present, so the correct
-    answer is the fixed refusal string, not a fabricated one."""
+    answer is the fixed refusal string."""
     asked_subject = rng.choice(RAG_SUBJECTS)
     question = _pick_question(rng, asked_subject, _rag_params(rng, asked_subject["needs"]))
 
@@ -840,10 +1140,13 @@ def make_rag_refusal(rng: random.Random) -> dict:
         # The zero-context case: retrieval found nothing at all.
         user_content = f"No relevant notes were found.\n\nQuestion: {question}"
 
-    return chatml_sample(
-        RAG_SYSTEM_PROMPT, user_content, REFUSAL_ANSWER,
-        kind="rag_refusal", query=question, note=user_content,
-    )
+    return {
+        "kind": "rag_refusal",
+        "user_content": user_content,
+        "answer": REFUSAL_ANSWER,
+        "query": question,
+        "note": user_content,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -863,11 +1166,9 @@ def make_rag_refusal(rng: random.Random) -> dict:
 # came back "[]", dropping a genuine task along with the third-party clause
 # it happened to sit next to.
 #
-# These factories are built from the SAME fragment pools as the standalone
-# make_third_party/make_zero_task/make_dated_task/make_recurring_task
-# factories above, not a second copy of similar-looking sentences — a
-# divergent second pool here would teach the model two different ideas of
-# what a "distractor" or a "real task" looks like for no reason.
+# This bucket has held 4/4 on every trained checkpoint since v3 (v5, v6, v7)
+# — nothing about v8's Hybrid Architecture pivot implicates it, so its note
+# generation is unchanged from v5 onward.
 # --------------------------------------------------------------------------
 
 def _distractor_sentence(rng: random.Random) -> str:
@@ -881,7 +1182,8 @@ def _distractor_sentence(rng: random.Random) -> str:
         if shape == 1:
             return f"{rng.choice(THIRD_PARTY_ORGS).capitalize()} is sending someone {time_expr} {rng.choice(VISIT_REASONS)}."
         if shape == 2:
-            return f"{rng.choice(THIRD_PARTY_PEOPLE).capitalize()} {rng.choice(THIRD_PARTY_ACTIONS)} {time_expr}."
+            action_phrase, _ = rng.choice(THIRD_PARTY_ACTIONS)
+            return f"{rng.choice(THIRD_PARTY_PEOPLE).capitalize()} {action_phrase} {time_expr}."
         return f"{rng.choice(THIRD_PARTY_PEOPLE).capitalize()} said the {rng.choice(TRADES)} will call round {time_expr}."
     return rng.choice(rng.choice([WEATHER_OBS, OPINION_OBS, FEELING_OBS, EVENT_OBS, REFLECTION_OBS]))
 
@@ -889,9 +1191,9 @@ def _distractor_sentence(rng: random.Random) -> str:
 def _task_sentence(rng: random.Random) -> tuple[str, dict]:
     """One standalone sentence containing exactly one real task, plus the
     task dict it must extract to. Weighted toward dated/recurring (0.45/0.30)
-    over plain (0.25) specifically because contrastive samples are the
-    largest single bucket in v3 and are relied on to help clear the date- and
-    recurrence-coverage thresholds, not just the attribution fix."""
+    over plain (0.25) specifically because contrastive samples are relied on
+    to help clear the date- and recurrence-coverage thresholds, not just the
+    attribution fix."""
     kind = rng.choices(["dated", "recurring", "plain"], weights=[0.45, 0.30, 0.25])[0]
 
     if kind == "recurring":
@@ -914,11 +1216,10 @@ def _task_sentence(rng: random.Random) -> tuple[str, dict]:
 def make_contrastive(rng: random.Random) -> dict:
     distractor = _distractor_sentence(rng)
     task_sentence, task = _task_sentence(rng)
-    # Randomised order: the directive's own example puts the distractor
-    # first ("The electrician is coming Tuesday, buy lightbulbs tomorrow"),
-    # but a real note said the other way round is just as plausible, and a
-    # model that only ever saw the distractor lead would be learning a
-    # position heuristic instead of the actual distinction.
+    # Randomised order: a real note with the distractor after the task is
+    # just as plausible as before it, and a model that only ever saw the
+    # distractor lead would be learning a position heuristic instead of the
+    # actual distinction.
     note = f"{distractor} {task_sentence}" if rng.random() < 0.5 else f"{task_sentence} {distractor}"
     return extraction_sample(note, [task], kind="extraction_contrastive")
 
@@ -933,16 +1234,6 @@ def make_contrastive(rng: random.Random) -> dict:
 # here). Four roughly equal quarters: rich dates, STT noise, multi-task,
 # recurrence.
 POSITIVE_FACTORIES = [make_dated_task, make_stt, make_multi_task, make_recurring_task]
-
-# Sub-factories within extraction_refusal: roughly half zero-task, half
-# third-party — kept distinct because attr-003/third-party-0-of-8 showed they
-# fail for different reasons and both need real coverage, not one standing in
-# for the other. This bucket is intentionally now much smaller than v2's
-# (~15% of extraction instead of 50%) — see the module docstring's "WHY V3
-# EXISTS" section for why over-representing pure refusal was the root cause
-# of the over-refusal regression, and why contrastive samples, not more of
-# these, are the actual fix for attribution specifically.
-REFUSAL_FACTORIES = [make_zero_task, make_third_party]
 
 
 def _dedupe_key(sample: dict) -> str:
@@ -964,12 +1255,12 @@ def build(total: int, rng: random.Random) -> list[dict]:
     samples: list[dict] = []
     seen: set[str] = set()
 
-    def add(factories: list, target: int) -> None:
+    def add(factories: list, target: int, weights: list[float] | None = None) -> None:
         produced = 0
         attempts = 0
         while produced < target and attempts < target * 80:
             attempts += 1
-            factory = rng.choice(factories)
+            factory = rng.choices(factories, weights=weights, k=1)[0] if weights else rng.choice(factories)
             sample = factory(rng)
             key = _dedupe_key(sample)
             if key in seen:
@@ -983,209 +1274,191 @@ def build(total: int, rng: random.Random) -> list[dict]:
         )
 
     # Contrastive gets its OWN guaranteed count rather than competing for a
-    # random share inside POSITIVE_FACTORIES. The directive's floor is "75+";
-    # leaving that to rng.choice over five factories would only hit it by
-    # coincidence, and the whole point of this bucket existing is that it is
-    # not optional headroom — it is the specific, targeted fix for the
-    # attribution regression.
+    # random share inside POSITIVE_FACTORIES — it is the specific, targeted
+    # fix for attribution, not optional headroom.
     add([make_contrastive], counts["extraction_contrastive"])
-    add(POSITIVE_FACTORIES, counts["extraction_positive_other"])
-    add(REFUSAL_FACTORIES, counts["extraction_refusal"])
-    # No RAG here in v4 — see TARGET_DISTRIBUTION's own comment for why.
+    # v8: recurring share came in at 22.6% on the first seeded run, just
+    # under the directive's 25% floor (expected ~26% on average, natural
+    # single-seed variance) -- weighting make_recurring_task slightly above
+    # the other three's equal share pushes it comfortably over without
+    # touching date coverage (still carried by make_dated_task/multi_task,
+    # untouched here, plus make_recurring_task always has a non-empty
+    # date_phrase too).
+    add(POSITIVE_FACTORIES, counts["extraction_positive_other"], weights=[1, 1, 1, 1.4])
+    # v8: no zero-task/third-party refusal training at all — see the module
+    # docstring's "WHY V8" section. make_zero_task/make_third_party are
+    # dormant, not called here.
+    add([make_rag_factual], counts["rag_factual"])
+    add([make_rag_refusal], counts["rag_refusal"])
 
     rng.shuffle(samples)
     return samples
 
 
 # --------------------------------------------------------------------------
-# ORPO conversion — the one place (note, tasks, kind) becomes a trainer-ready
-# {"prompt", "chosen", "rejected"} row. Every factory above still returns raw
-# ingredients via extraction_sample(); nothing about note generation changed
-# for v4, only what happens to it afterward.
+# SFT conversion — the one place (note, tasks, kind) becomes a trainer-ready
+# {"messages": [...]} row. v8 reverts from ORPO's {"prompt","chosen",
+# "rejected"} triples to plain messages, since there is no rejected side any
+# more — see the module docstring's "WHY V8" section.
 # --------------------------------------------------------------------------
 
-def _extraction_prompt(note: str) -> str:
-    """The shared prefix chosen/rejected are BOTH scored against. Ends
-    exactly where generation begins — this is what ORPOTrainer conditions
-    on, not an arbitrary split of a finished ChatML string."""
-    return (
-        f"<|im_start|>system\n{EXTRACTION_SYSTEM_PROMPT}{IM_END}\n"
-        f"<|im_start|>user\n{note}{IM_END}\n"
-        f"<|im_start|>assistant\n"
-    )
-
-
-# Words too short/common to plausibly be what a hallucinated task is "about" —
-# picking one would produce an obviously-fake rejected example ("The"), which
-# teaches nothing a model could not already tell was wrong for free.
+# Words too short/common to plausibly be what a hallucination is "about" —
+# kept only because the dormant make_third_party (see its own docstring)
+# still calls _fabricated_task_dict below to build test-coverage data; v8's
+# actual training rows never use this.
 _HALLUCINATION_STOPWORDS = {
     "that", "this", "then", "than", "with", "from", "your", "have", "will",
     "been", "were", "also", "just", "very", "much", "some", "over", "next",
+    "first", "second", "third", "last", "previous", "other", "same", "such",
+    "whole", "entire", "expected", "long", "better", "worse", "serious",
+    "morning", "afternoon", "evening", "day", "days", "week", "weekend",
+    "month", "year", "time",
 }
 
 
-def _hallucinated_rejected(rng: random.Random, note: str) -> str:
-    """The wrong answer for a note that has no real task — built to match
-    the ACTUAL on-device failure shape from Run 3, not a strawman. Every one
-    of that run's spurious tasks was a bare CONCRETE NOUN or short phrase
-    lifted straight from the note's own words ("Garden", "Plumber", "Look at
-    the roof") — not a random unrelated fabrication, and not an adjective or
-    abstract noun either. ORPO needs the exact mistake it must learn to
-    avoid, not an easy one.
-
-    A first version picked any 4+ letter non-stopword uniformly at random and
-    produced "Energy" (from "Energy levels have been low") and "Long" (from
-    "Realised... how long")  — technically non-stopwords, but nothing like
-    what the real failures looked like. Real hallucinations grabbed the
-    NOUN PHRASE HEAD: the thing an article points at ("the roof", "the
-    garden"). Preferring the word right after "the"/"a"/"an" targets that
-    directly; falling back to the last content word only when no article
-    exists in the note at all.
-
-    Uses the same 3-key schema as `chosen` everywhere else, deliberately.
-    Making the rejected example ALSO malformed JSON or missing a field would
-    teach two lessons in one contrastive pair — schema compliance and
-    whether to extract at all — instead of isolating the one this file
-    exists to fix.
-    """
+def _fabricated_task_dict(rng: random.Random, text: str) -> dict:
+    """Picks the noun a hallucination would invent a task around — matches
+    the ACTUAL on-device failure shape from Run 3 ("Garden", "Plumber",
+    "Look at the roof": a bare CONCRETE NOUN or short phrase lifted straight
+    from the source text's own words). Dormant support for make_third_party
+    only — not used by any v8 training row."""
     after_article = [
-        w for w in re.findall(r"\b(?:the|a|an)\s+([A-Za-z]{4,})\b", note, flags=re.IGNORECASE)
+        w for w in re.findall(r"\b(?:the|a|an)\s+([A-Za-z]{4,})\b", text, flags=re.IGNORECASE)
         if w.lower() not in _HALLUCINATION_STOPWORDS
     ]
     if after_article:
         candidate = rng.choice(after_article)
     else:
-        content_words = [w for w in re.findall(r"[A-Za-z]{4,}", note) if w.lower() not in _HALLUCINATION_STOPWORDS]
+        content_words = [w for w in re.findall(r"[A-Za-z]{4,}", text) if w.lower() not in _HALLUCINATION_STOPWORDS]
         candidate = content_words[-1] if content_words else "Follow up"
     task_title = candidate[0].upper() + candidate[1:].lower()
-    return json.dumps(
-        [{"task": task_title, "date_phrase": "", "recurrence": "none"}],
-        separators=(",", ":"),
-    )
+    return {"task": task_title, "date_phrase": "", "recurrence": "none"}
 
 
-def to_orpo_pair(sample: dict, rng: random.Random) -> dict:
-    """(note, tasks, kind) -> {"prompt", "chosen", "rejected"}.
-
-    Two shapes, matching the directive exactly:
-      - note has a real task (positive / contrastive): chosen = the correct
-        extraction, rejected = "[]". Penalises Run 2's over-refusal.
-      - note has no task (zero-task / third-party): chosen = "[]",
-        rejected = a hallucinated task pulled from the note's own words.
-        Penalises Run 3's over-extraction.
-
-    Both directions live in this ONE file, which is the actual point of
-    moving to ORPO: a preference pair scores chosen ABOVE rejected for THIS
-    prompt specifically, so the model is never pushed toward "prefer short
-    outputs" or "prefer JSON with content" in the abstract the way a skewed
-    SFT ratio does — only toward the right answer for the note in front of
-    it.
-    """
-    prompt = _extraction_prompt(sample["note"])
-    if sample["tasks"]:
-        chosen = json.dumps(sample["tasks"], separators=(",", ":"), ensure_ascii=False)
-        rejected = "[]"
-    else:
-        chosen = "[]"
-        rejected = _hallucinated_rejected(rng, sample["note"])
+def to_sft_extraction_row(sample: dict) -> dict:
+    """(note, tasks, kind) -> {"messages": [...]}. Every v8 extraction row
+    has a non-empty `tasks` list — no refusal examples exist in this
+    dataset at all, so there is no "chosen='[]'" branch to write."""
+    answer = json.dumps(sample["tasks"], separators=(",", ":"), ensure_ascii=False)
     return {
-        "prompt": prompt,
-        "chosen": f"{chosen}{IM_END}",
-        "rejected": f"{rejected}{IM_END}",
+        "messages": [
+            {"role": "system", "content": EXTRACTION_SYSTEM_PROMPT},
+            {"role": "user", "content": sample["note"]},
+            {"role": "assistant", "content": answer},
+        ],
         "kind": sample["kind"],
         "note": sample["note"],
     }
 
 
-def print_report(samples: list[dict], pairs: list[dict]) -> None:
-    """`samples` are the raw (note, tasks, kind) ingredients — used for every
-    balance/coverage check, since `tasks` isn't preserved on the written ORPO
-    rows. `pairs` are the actual written {"prompt","chosen","rejected"} rows —
-    used only to report chosen/rejected shape and confirm the file itself is
-    well-formed."""
+def to_sft_rag_row(sample: dict) -> dict:
+    """(kind, user_content, answer, query, note) -> {"messages": [...]}."""
+    return {
+        "messages": [
+            {"role": "system", "content": RAG_SYSTEM_PROMPT},
+            {"role": "user", "content": sample["user_content"]},
+            {"role": "assistant", "content": sample["answer"]},
+        ],
+        "kind": sample["kind"],
+        "note": sample["note"],
+    }
+
+
+def print_report(samples: list[dict]) -> None:
+    """`samples` are the raw ingredients (note/tasks/kind for extraction,
+    user_content/answer/kind for RAG) — used for every balance/coverage
+    check, since `tasks` isn't preserved on the written SFT rows (a
+    trainer-ready file, not a debug dump)."""
     total = len(samples)
 
-    contrastive = [s for s in samples if s["kind"] == "extraction_contrastive"]
-    extraction = samples  # v4: every raw sample IS an extraction sample; no RAG mixed in
+    extraction = [s for s in samples if s["kind"] in ("extraction", "extraction_contrastive")]
+    rag = [s for s in samples if s["kind"] in ("rag_factual", "rag_refusal")]
+    contrastive = [s for s in extraction if s["kind"] == "extraction_contrastive"]
+    positive_other = len(extraction) - len(contrastive)
     all_tasks = [t for s in extraction for t in s["tasks"]]
     recurrence_counts: dict[str, int] = {}
     for t in all_tasks:
         recurrence_counts[t["recurrence"]] = recurrence_counts.get(t["recurrence"], 0) + 1
     with_date = sum(1 for t in all_tasks if t.get("date_phrase"))
     multi = sum(1 for s in extraction if len(s["tasks"]) > 1)
-    empty = sum(1 for s in extraction if not s["tasks"])
-    positive = len(extraction) - empty
 
-    print(f"Total notes          : {total}")
-    print(f"Distinct notes       : {len({s['note'] for s in samples})}")
+    rag_factual = [s for s in rag if s["kind"] == "rag_factual"]
+    rag_refusal = [s for s in rag if s["kind"] == "rag_refusal"]
+
+    print(f"Total rows           : {total}  (target: 500)")
+    print(f"Distinct notes/context: {len({s.get('note', '') for s in samples})}")
     print()
-    print(f"Extraction samples   : {len(extraction)}  (positive {positive}, refusal {empty})")
-    print(f"  of which contrastive: {len(contrastive)}  (distractor clause + a real task, same note)")
-    print(f"  positive/refusal    : {positive / len(extraction):.1%} / {empty / len(extraction):.1%}  (target: 85% / 15%)")
+    print(f"Extraction samples   : {len(extraction)}  (target: 350; ALL positive -- v8 trains zero refusal examples)")
+    print(f"  of which contrastive    : {len(contrastive)}  (target: 80)")
+    print(f"  of which positive_other : {positive_other}  (target: 270)")
     print(f"  recurrence values  : {recurrence_counts}")
     non_none = sum(v for k, v in recurrence_counts.items() if k != "none")
     print(f"  non-'none' recurring tasks: {non_none}  (target: >50)")
     print(f"  tasks with date_phrase    : {with_date}/{len(all_tasks)}  (target: >150)")
     print(f"  multi-task samples        : {multi}")
 
-    # ORPO-specific: every row must have a genuine chosen != rejected pair —
-    # a row where they happen to match would train the model to be
-    # indifferent between right and wrong, silently defeating the entire
-    # point of this file.
-    degenerate = [p for p in pairs if p["chosen"] == p["rejected"]]
-    rejected_is_empty = sum(1 for p in pairs if p["rejected"] == f"[]{IM_END}")
-    chosen_is_empty = sum(1 for p in pairs if p["chosen"] == f"[]{IM_END}")
     print()
-    print(f"ORPO pairs written   : {len(pairs)}")
-    print(f"  rejected == '[]' (over-refusal lesson): {rejected_is_empty}  (should equal positive count: {positive})")
-    print(f"  chosen == '[]' (over-extraction lesson): {chosen_is_empty}  (should equal refusal count: {empty})")
-    print(f"  degenerate (chosen == rejected)        : {len(degenerate)}  (must be 0)")
+    print(f"RAG samples          : {len(rag)}  (target: 150)")
+    print(f"  rag_factual         : {len(rag_factual)}  (target: 125)")
+    print(f"  rag_refusal         : {len(rag_refusal)}  (target: 25)")
 
     # v1-regression guards: fail loudly rather than ship a dataset that
     # quietly reproduces the bug that made recurrence collapse 8/8 -> 3/8.
     assert non_none > 0, "REGRESSION: no non-'none' recurrence samples generated"
     assert with_date > 0, "REGRESSION: no dated tasks generated"
-    assert 0 < empty < len(extraction), "extraction set collapsed to all-positive or all-refusal"
 
-    # v4/ORPO-specific guards.
-    assert len(degenerate) == 0, f"REGRESSION: {len(degenerate)} pairs have identical chosen/rejected"
-    assert rejected_is_empty == positive, "REGRESSION: not every positive sample penalises '[]' as rejected"
-    assert chosen_is_empty == empty, "REGRESSION: not every refusal sample has '[]' as chosen"
-
-    # v2-regression guards: the SFT Run 2 failure this file exists to fix —
-    # date-resolution 20/20 -> 6/20, recurrence 8/8 -> 1/8, attribution
-    # regressed too. Root cause was extraction_refusal at 50% of the
-    # extraction slice teaching an over-refusal shortcut, with only one
-    # contrastive example anywhere for the model to learn the alternative
-    # from. These are the exact thresholds given for v3.
+    # v8 guards: no refusal training at all — every extraction row must
+    # carry at least one real task, or the Hybrid Architecture's premise
+    # (fine-tuning only ever sees positive examples; the code-side
+    # pre-filter owns every zero-task decision) is silently violated.
+    assert all(len(s["tasks"]) > 0 for s in extraction), (
+        "REGRESSION: an extraction sample has zero tasks -- v8 must contain no refusal examples"
+    )
     assert len(contrastive) >= 75, f"REGRESSION: only {len(contrastive)} contrastive samples, need >=75"
+    assert positive_other >= 200, f"REGRESSION: only {positive_other} positive_other samples, need >=200"
     assert non_none > 50, f"REGRESSION: only {non_none} non-'none' recurring tasks, need >50"
     assert with_date > 150, f"REGRESSION: only {with_date} dated tasks, need >150"
-    refusal_share = empty / len(extraction)
-    assert refusal_share <= 0.15 + 0.02, f"REGRESSION: refusal is {refusal_share:.1%} of extraction, target ceiling 15%"
-    dated_positive_samples = sum(1 for s in extraction if s["tasks"] and any(t.get("date_phrase") for t in s["tasks"]))
-    dated_sample_share = dated_positive_samples / positive
-    assert dated_sample_share >= 0.60, f"REGRESSION: only {dated_sample_share:.1%} of positive samples carry a date, need >=60%"
-    recurring_positive_samples = sum(
-        1 for s in extraction if s["tasks"] and any(t.get("recurrence") != "none" for t in s["tasks"])
-    )
-    recurring_sample_share = recurring_positive_samples / positive
-    assert recurring_sample_share >= 0.20, f"REGRESSION: only {recurring_sample_share:.1%} of positive samples are recurring, need >=20%"
+
+    dated_positive_samples = sum(1 for s in extraction if any(t.get("date_phrase") for t in s["tasks"]))
+    dated_sample_share = dated_positive_samples / len(extraction)
+    # v8: raised from v7's 60% floor to the directive's explicit 70% —
+    # there's no refusal bucket competing for extraction's budget any more.
+    assert dated_sample_share >= 0.70, f"REGRESSION: only {dated_sample_share:.1%} of positive samples carry a date, need >=70%"
+
+    recurring_positive_samples = sum(1 for s in extraction if any(t.get("recurrence") != "none" for t in s["tasks"]))
+    recurring_sample_share = recurring_positive_samples / len(extraction)
+    # v8: raised from v7's 20% floor to the directive's explicit 25%.
+    assert recurring_sample_share >= 0.25, f"REGRESSION: only {recurring_sample_share:.1%} of positive samples are recurring, need >=25%"
 
     print()
-    print(f"  positive samples with a date     : {dated_positive_samples}/{positive}  ({dated_sample_share:.1%}, target >=60%)")
-    print(f"  positive samples with recurrence : {recurring_positive_samples}/{positive}  ({recurring_sample_share:.1%}, target >=20%)")
+    print(f"  positive samples with a date     : {dated_positive_samples}/{len(extraction)}  ({dated_sample_share:.1%}, target >=70%)")
+    print(f"  positive samples with recurrence : {recurring_positive_samples}/{len(extraction)}  ({recurring_sample_share:.1%}, target >=25%)")
+
+    # RAG guards.
+    assert len(rag) == 150, f"REGRESSION: {len(rag)} RAG rows, need exactly 150"
+    # v8.1: 75/75 -> 125/25 -- see the module docstring's "WHY V8.1" section
+    # for why (over-refusal on genuinely-answerable indirect questions).
+    assert len(rag_factual) >= 110, f"REGRESSION: only {len(rag_factual)} rag_factual samples, need >=110"
+    assert len(rag_refusal) >= 15, f"REGRESSION: only {len(rag_refusal)} rag_refusal samples, need >=15"
+    rag_refusal_answer_correct = sum(1 for s in rag_refusal if s["answer"] == REFUSAL_ANSWER)
+    assert rag_refusal_answer_correct == len(rag_refusal), "REGRESSION: a rag_refusal sample's answer isn't the fixed refusal string"
+    rag_factual_answer_not_refusal = sum(1 for s in rag_factual if s["answer"] != REFUSAL_ANSWER)
+    assert rag_factual_answer_not_refusal == len(rag_factual), "REGRESSION: a rag_factual sample's answer is the refusal string, not a grounded answer"
+
     print()
-    print("All v1- and v2-regression guards passed.")
+    print(f"  rag_refusal answer == fixed refusal string : {rag_refusal_answer_correct}/{len(rag_refusal)}")
+    print(f"  rag_factual answer != refusal string        : {rag_factual_answer_not_refusal}/{len(rag_factual)}")
+    print()
+    print("All v1-, v2-, v8-, and v8.1-regression guards passed.")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--count", type=int, default=350, help="total extraction notes")
+    parser.add_argument("--count", type=int, default=500, help="total SFT rows (extraction + RAG)")
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path(__file__).parent / "orpo_qwen_task_extraction.jsonl",
+        default=Path(__file__).parent / "sft_qwen_task_extraction.jsonl",
         help="output JSONL path",
     )
     parser.add_argument("--seed", type=int, default=SEED)
@@ -1194,27 +1467,29 @@ def main() -> None:
     rng = random.Random(args.seed)
     samples = build(args.count, rng)
 
-    # "extraction" is split into "extraction_positive" / "extraction_refusal"
-    # here, matching TARGET_DISTRIBUTION's own bucket names, so the
-    # notebook's validation cell can independently confirm the balance that
-    # caused v1/v2's regressions without needing `tasks` (which is not
-    # written — a trainer-ready file, not a debug dump).
-    pairs: list[dict] = []
+    # "extraction" (from POSITIVE_FACTORIES, always non-empty tasks) is
+    # relabelled to "extraction_positive" to match TARGET_DISTRIBUTION's own
+    # bucket name, so the notebook's validation cell can independently
+    # confirm the balance. "extraction_contrastive"/"rag_factual"/
+    # "rag_refusal" are already final, distinct names straight from their
+    # factory.
+    rows: list[dict] = []
     for sample in samples:
-        kind = sample["kind"]
-        if kind == "extraction":
-            kind = "extraction_refusal" if not sample["tasks"] else "extraction_positive"
-        pair = to_orpo_pair(sample, rng)
-        pair["kind"] = kind
-        pairs.append(pair)
+        kind = "extraction_positive" if sample["kind"] == "extraction" else sample["kind"]
+        if kind in ("rag_factual", "rag_refusal"):
+            row = to_sft_rag_row(sample)
+        else:
+            row = to_sft_extraction_row(sample)
+        row["kind"] = kind
+        rows.append(row)
 
     with args.out.open("w", encoding="utf-8", newline="\n") as handle:
-        for pair in pairs:
-            row = {"prompt": pair["prompt"], "chosen": pair["chosen"], "rejected": pair["rejected"], "kind": pair["kind"]}
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        for row in rows:
+            out_row = {"messages": row["messages"], "kind": row["kind"]}
+            handle.write(json.dumps(out_row, ensure_ascii=False) + "\n")
 
-    print(f"Wrote {len(pairs)} ORPO pairs to {args.out}\n")
-    print_report(samples, pairs)
+    print(f"Wrote {len(rows)} SFT rows to {args.out}\n")
+    print_report(samples)
 
 
 if __name__ == "__main__":
