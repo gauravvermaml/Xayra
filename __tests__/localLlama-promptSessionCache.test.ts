@@ -29,7 +29,13 @@ jest.mock("../services/settings/preferences", () => ({
   readPreferences: jest.fn(() => Promise.resolve({ llamaThreadCount: null })),
 }));
 
-const MODEL_FILENAME = "qwen2.5-1.5b-instruct-q4_k_m.gguf";
+// Imported rather than duplicated so this can't silently drift out of sync
+// with the real production model filename the way a hardcoded copy did
+// during the Hybrid Architecture cutover (CHAT_MODEL.filename changed,
+// this constant didn't, and every "does the model file exist" mock below
+// silently started asserting against the wrong filename).
+const { CHAT_MODEL } = require("../services/ai/localLlama");
+const MODEL_FILENAME: string = CHAT_MODEL.filename;
 const SESSION_FILE = "llama-prompt-session-rag.bin";
 const META_FILE = "llama-prompt-session-rag.json";
 

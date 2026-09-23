@@ -105,22 +105,39 @@ export async function computeInferenceThreadCount(): Promise<number> {
  * other family's literal token text as ordinary characters and quality
  * degrades silently with no error thrown.
  */
+/**
+ * Hybrid Architecture cutover: swapped from the stock instruct checkpoint to
+ * `qwen-task-extractor-q4_k_m.gguf` — a same-family, same-architecture SFT
+ * fine-tune (dataset v8.1, scripts/dataset/generate_sft.py) trained against
+ * the minimal prompts in extractionLogic.ts/ragPrompt.ts. Combined with
+ * preFilterZeroTaskNotes (extractionLogic.ts) deciding third-party/
+ * observation refusal deterministically in code, this scores 94.2% on the
+ * frozen 103-case harness, vs. 83.5% for the stock model + full prompt.
+ *
+ * REQUIRES the GGUF to actually be uploaded to R2 before this ships — see
+ * the R2 upload command in the PR/commit that made this change. Until that
+ * upload happens, MODEL_CDN_BASE_URL/qwen-task-extractor-q4_k_m.gguf 404s
+ * and no device can download this model at all (fresh installs and anyone
+ * who doesn't already have it cached would be stuck).
+ */
 export const CHAT_MODEL = {
-  filename: "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-  label: "Qwen2.5-1.5B",
+  filename: "qwen-task-extractor-q4_k_m.gguf",
+  label: "Qwen2.5-1.5B (fine-tuned)",
 } as const;
 
 /**
- * Filenames the app shipped before the single-model cutover. These are never
- * loaded — they exist only so `modelDownloadManager.ts` can delete them off
- * devices that upgraded from a build which had already downloaded one, which
- * would otherwise leave 0.8–2.0 GB of permanently orphaned dead weight in the
+ * Filenames the app shipped before the single-model cutover, and before the
+ * Hybrid Architecture fine-tune swap. These are never loaded — they exist
+ * only so `modelDownloadManager.ts` can delete them off devices that
+ * upgraded from a build which had already downloaded one, which would
+ * otherwise leave 0.8–2.0 GB of permanently orphaned dead weight in the
  * document directory that nothing ever reclaims.
  */
 export const RETIRED_CHAT_MODEL_FILENAMES = [
   "Llama-3.2-3B-Instruct-UD-Q4_K_XL.gguf",
   "Llama-3.2-1B-Instruct-UD-Q4_K_XL.gguf",
   "Qwen2.5-3B-Instruct-Q4_K_M.gguf",
+  "qwen2.5-1.5b-instruct-q4_k_m.gguf",
 ] as const;
 
 /** Missing-model errors are matched against this exact prefix by

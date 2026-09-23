@@ -59,10 +59,11 @@ export const SYSTEM_PROMPT =
  * "full" is the seven-LAW prompt above, the one the stock Qwen2.5-1.5B needs.
  * "minimal" is a one-sentence prompt for a model fine-tuned to hold grounding
  * and refusal behaviour in its weights instead of being told the rules on
- * every call — mirrors `ExtractionPromptMode` in extractionLogic.ts exactly,
- * including the same default-to-"full" safety reasoning: flipping the
- * shipped app to this before a fine-tuned RAG model exists would hand the
- * stock model a prompt stripped of the LAWS it currently depends on.
+ * every call — mirrors `ExtractionPromptMode` in extractionLogic.ts exactly.
+ *
+ * Defaults to "minimal" as of the Hybrid Architecture cutover — see
+ * ExtractionPromptMode's own doc comment in extractionLogic.ts for the full
+ * reasoning and the CHAT_MODEL/R2 dependency this default assumes is true.
  */
 export type RagPromptMode = "full" | "minimal";
 
@@ -78,7 +79,7 @@ export const MINIMAL_RAG_SYSTEM_PROMPT =
   "ONLY the note context provided below. If the answer is not in the " +
   "notes, reply exactly: \"No information found in your notes.\"";
 
-let ragPromptMode: RagPromptMode = "full";
+let ragPromptMode: RagPromptMode = "minimal";
 
 export function setRagPromptMode(mode: RagPromptMode): void {
   ragPromptMode = mode;

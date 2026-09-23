@@ -698,12 +698,20 @@ export function extractionPrefix(todayISO: string): ExtractionPromptPrefix {
  * fine-tuned model is trained against, where the behaviour lives in the
  * weights instead of being re-stated on every call.
  *
- * Defaults to "full" DELIBERATELY. Switching the shipped app to the minimal
- * prompt before a fine-tuned model is actually in place would hand the stock
- * model a prompt stripped of every rule and example it currently depends on —
- * the categories now scoring 100% (dates, STT, multi-task, recurrence) all
- * rely on those examples. This is a switch for evaluating a candidate model,
- * not a migration that can be flipped ahead of one.
+ * Defaults to "minimal" as of the Hybrid Architecture cutover (dataset
+ * v8.1, 94.2% on the frozen 103-case harness) — CHAT_MODEL in localLlama.ts
+ * now points at the fine-tuned `qwen-task-extractor-q4_k_m.gguf`, which was
+ * trained specifically against this prompt, not the stock model's ~2,000-
+ * token/16-few-shot-example one. Third-party/observation refusal is no
+ * longer this prompt's job at all — preFilterZeroTaskNotes (below) decides
+ * that deterministically before the model is ever called.
+ *
+ * IMPORTANT: this default is only correct once the fine-tuned GGUF is
+ * actually being served from MODEL_CDN_BASE_URL — see modelDownloadManager.ts's
+ * CHAT_MODEL_APPROX_BYTES and the R2 upload step it depends on. Reverting
+ * CHAT_MODEL to the stock filename without also reverting this default back
+ * to "full" would hand the stock model a prompt stripped of every rule and
+ * example it depends on.
  */
 export type ExtractionPromptMode = "full" | "minimal";
 
@@ -714,7 +722,7 @@ export const MINIMAL_EXTRACTION_SYSTEM_PROMPT =
   "tasks into the requested JSON schema. If no tasks exist for the user, " +
   "return [].";
 
-let extractionPromptMode: ExtractionPromptMode = "full";
+let extractionPromptMode: ExtractionPromptMode = "minimal";
 
 export function setExtractionPromptMode(mode: ExtractionPromptMode): void {
   extractionPromptMode = mode;

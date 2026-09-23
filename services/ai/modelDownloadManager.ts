@@ -53,9 +53,11 @@ const RAM_FLOOR_FOR_TRIALS_BYTES = 7 * 1024 * 1024 * 1024;
  */
 const WHISPER_APPROX_BYTES = 147_964_211;
 const EMBEDDING_APPROX_BYTES = 34_231_000;
-/** Measured against the live Worker with a real GET — see the comment above.
- * scripts/sync-model-to-r2.sh prints this number after every upload. */
-const CHAT_MODEL_APPROX_BYTES = 1_117_320_736;
+/** Measured locally from the exported GGUF (`ls -la
+ * models/qwen-task-extractor-q4_k_m.gguf`) — update this to whatever the R2
+ * upload step actually reports once that upload has run; a real GET against
+ * the live Worker is the authoritative number, same as the comment above. */
+const CHAT_MODEL_APPROX_BYTES = 986_048_160;
 
 const BYTES_PER_MB = 1024 * 1024;
 

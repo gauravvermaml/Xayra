@@ -48,6 +48,13 @@ function mockFileSystemWithOnlyThisFileExisting(existingFilename: string) {
   }));
 }
 
+// Read once, unmocked, before any test's jest.resetModules() -- CHAT_MODEL
+// is a plain static export with no fs dependency, so this is safe, and it
+// means these tests can't silently drift out of sync with the real
+// production filename the way a hardcoded copy did during the Hybrid
+// Architecture cutover.
+const { CHAT_MODEL } = require("../services/ai/localLlama");
+
 const LLAMA3_MARKERS = ["<|begin_of_text|>", "<|start_header_id|>", "<|end_header_id|>", "<|eot_id|>"];
 
 describe("RAG prompts are ChatML, for the one model this app ships", () => {
@@ -58,7 +65,7 @@ describe("RAG prompts are ChatML, for the one model this app ships", () => {
   });
 
   it("wraps the prompt in Qwen's ChatML turn markers", async () => {
-    mockFileSystemWithOnlyThisFileExisting("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+    mockFileSystemWithOnlyThisFileExisting(CHAT_MODEL.filename);
     const { generateLocalRAGAnswer } = require("../services/ai/localLlama");
 
     await generateLocalRAGAnswer("what's on my list", "some note context", () => {});
@@ -70,7 +77,7 @@ describe("RAG prompts are ChatML, for the one model this app ships", () => {
   });
 
   it("leaves no Llama-3 template markers anywhere in the prompt", async () => {
-    mockFileSystemWithOnlyThisFileExisting("qwen2.5-1.5b-instruct-q4_k_m.gguf");
+    mockFileSystemWithOnlyThisFileExisting(CHAT_MODEL.filename);
     const { generateLocalRAGAnswer } = require("../services/ai/localLlama");
 
     await generateLocalRAGAnswer("what's on my list", "some note context", () => {});
