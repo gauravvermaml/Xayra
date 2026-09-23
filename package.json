@@ -67,7 +67,8 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "test": "jest",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package",
+    "eval": "tsx scripts/eval/runEval.ts"
   },
   "private": true,
   "op-sqlite": {

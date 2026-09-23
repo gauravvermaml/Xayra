@@ -71,3 +71,13 @@ ui_dump.xml
 
 # Local wrangler dev-mode state/cache (r2 object put without --remote lands here)
 .wrangler/
+
+# Local GGUF models for the desktop eval harness (multi-GB, never committed)
+models/
+*.gguf
+
+# Concatenation of corpus.jsonl + corpus-heldout.jsonl, rebuilt on demand
+scripts/eval/corpus-full.jsonl
+
+# Python bytecode cache from running scripts/dataset/generate_sft.py
+__pycache__/

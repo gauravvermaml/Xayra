@@ -2,7 +2,30 @@
 
 *(The app was originally built and shipped internally as "Silent Confidant," then briefly "Remi," before the full rebrand to **Xayra** documented below. Historical sections further down in this file predate the rename and refer to the app by whichever name was current at the time — that's intentional, not an inconsistency to fix; each section is an accurate record of what was true when it was written.)*
 
-**Last updated:** Build 47 — permanent cutover to **Qwen2.5-1.5B-Instruct (Q4_K_M)** as the single production chat model, replacing the Llama 3.2 1B/3B tier ladder *and* the short-lived Qwen2.5-3B trial. Removes the adaptive model-tier machinery entirely, compresses the RAG system prompt from long prose to seven numbered "LAWS", adds an automated Hugging Face → Cloudflare R2 sync script, improves Handsfree wake-word recall with carrier-word corroboration, and adds a disk-persisted prompt-session cache that cuts the static-prefix prefill from **~14 s to 18 ms** while keeping the background memory release (1.98 GB → 0.51 GB) intact. Details immediately below; Build 46 (the Qwen 3B trial this supersedes) follows it.
+**Last updated:** Hybrid Extraction Architecture fine-tuning workstream — a deterministic code pre-filter (`preFilterZeroTaskNotes`) combined with a fine-tuned Qwen2.5-1.5B SFT checkpoint (dataset v8.1) reaches **94.2% (97/103)** on the frozen eval harness, beating the 83.5% prompt-only baseline for the first time across six real training attempts. **Not yet a shipped app build** — see its own section immediately below for what is and isn't deployed. Build 47 (the single-model cutover this fine-tuning targets) follows it.
+
+## Fine-tuning workstream — Hybrid Extraction Architecture (not yet shipped)
+
+**Status: eval-harness result, not a production build.** No versionCode bump, no EAS build, nothing submitted to Play Console for this section — it documents a validated `npm run eval` result against the frozen 103-case corpus, produced entirely on a desktop/Colab workflow. Resuming this work later should start from "is the fine-tuned model wired into the app yet?", not assume it is.
+
+**The problem:** a prompt-only baseline (83.5%, 86/103) had two failures three rounds of prompt engineering couldn't move — third-party attribution (0/8) and pure-observation refusal (the model inventing tasks from purely descriptive notes). Six real training attempts followed:
+
+| Attempt | Approach | Result |
+|---|---|---|
+| v1 | Plain SFT, extraction only | Fixed both targets but broke dates/recurrence/STT/RAG — worse overall (70.9%) |
+| v2 | Plain SFT, 50% refusal | Fixed third-party/refusal, broke dates/recurrence |
+| v3 | Plain SFT, 15% refusal + contrastive pairing | Fixed dates/recurrence, broke third-party/refusal again — same seesaw, opposite direction |
+| v5-v7 | ORPO (preference pairs), escalating third-party volume/capacity each round | v7 (LoRA r=32, 3 epochs, 70 third-party rows) scored 68.9% — WORSE than the baseline. Its actual failures were near-verbatim reproductions of its own `rejected` fabrication strings ("Have the plumber come", "Move house") — proof the model had memorised a small fixed vocabulary of wrong answers rather than learned the general rule |
+| **Hybrid + v8.1** | Deterministic code pre-filter for third-party/refusal + SFT (not ORPO) scoped to what every prior run got right | **94.2% (97/103)** |
+
+**The fix, in two parts:**
+
+1. **`preFilterZeroTaskNotes`** (`services/ai/extractionLogic.ts`) — a regex-based, deterministic pre-filter that short-circuits extraction to `[]` for third-party/observation notes, without calling the LLM at all. Verified against the frozen 103-case corpus with **zero false positives** before being written (gated on `isSingleSentence` so it can never fire on a contrastive note that also contains a real task). Wired into `transformationEngine.ts`'s real extraction path and `scripts/eval/runEval.ts`'s harness. Tested alone against the still-broken v7 checkpoint (zero retraining): **87.4%** — most of the total win is this guard, not the fine-tune.
+2. **Dataset v8.1** (`scripts/dataset/generate_sft.py`, standard SFT `messages` format, not ORPO) — 500 rows: 270 positive + 80 contrastive extraction (zero refusal examples — that's the pre-filter's job now), 125 RAG-factual + 25 RAG-refusal. Trained via `notebooks/qwen_sft_unsloth.ipynb` (Unsloth `SFTTrainer` + `train_on_responses_only`, lr=8e-5, 2 epochs, LoRA r=16) into `qwen-task-extractor-q4_k_m.gguf`.
+
+**What's actually deployed vs. not:** the pre-filter code is live in `transformationEngine.ts` regardless of which model runs (model-agnostic). The fine-tuned GGUF itself is **not** — `services/ai/localLlama.ts`'s `CHAT_MODEL` and `modelDownloadManager.ts` still point at the stock `qwen2.5-1.5b-instruct-q4_k_m.gguf`, and `setExtractionPromptMode`/`setRagPromptMode` still default to `"full"` (the ~2,478-token stock prompt) rather than the fine-tuned model's ~212-token minimal prompt. Shipping the fine-tuned model (R2 upload, download-manager wiring, flipping the prompt-mode default, a real device test pass) is a separate, not-yet-taken step.
+
+**Known residual gap:** `rag-grounding` still misses 2/4 on indirect multi-note questions ("Do I need to do anything about the gym?", asked against a gym-renewal note buried among distractors) — the v8.1 dataset additions aimed at this (new `gym` indirect phrasings, new `recommendation_book`/`dietary_note` RAG subjects) fixed 1 of 3 targeted cases (`rag-005`). Worth another pass if resuming RAG work specifically.
 
 ## Build 47 — Single-Model Cutover: Qwen2.5-1.5B-Instruct
 
