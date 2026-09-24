@@ -584,6 +584,20 @@ export async function listNotes(): Promise<Note[]> {
   }));
 }
 
+/**
+ * How many notes exist (same "not failed" filter as `listNotes`), without
+ * paying to load every note's own content — used by app/index.tsx's
+ * Archive quick-menu entry, which only needs the count, not the notes
+ * themselves.
+ */
+export async function countNotes(): Promise<number> {
+  const db = await getRawDatabase();
+
+  const result = await db.execute("SELECT COUNT(*) as count FROM notes WHERE status != 'failed'");
+
+  return (result.rows[0]?.count as number | undefined) ?? 0;
+}
+
 /** Fetches a single note by id, or `null` if it doesn't exist (e.g. deleted
  * out from under a stale reference like a chat citation). */
 export async function getNoteById(id: string): Promise<Note | null> {

@@ -13,7 +13,7 @@ import Animated, {
 
 import { colors } from "../constants/theme";
 
-export type RecorderCanvasState = "idle" | "recording" | "transcribing";
+export type RecorderCanvasState = "idle" | "listening" | "recording" | "transcribing";
 
 export type CentralRecorderCanvasProps = {
   state: RecorderCanvasState;
@@ -97,6 +97,14 @@ export function CentralRecorderCanvas({
 }: CentralRecorderCanvasProps) {
   const amplitudeShared = useSharedValue(0);
   const pulsePhase = useSharedValue(0);
+  // Handsfree "awake and listening" glow: a slow breathing opacity pulse on
+  // a soft accent-colored ring behind the button, distinct from the
+  // recording waveform (which only appears once actual speech is being
+  // captured — see the render below). Opacity, not shadowRadius/elevation,
+  // is what's animated: shadow properties don't interpolate reliably on
+  // Android, but opacity on a plain overlay view does on both platforms,
+  // the same reasoning buttonHighlight below already relies on.
+  const glowPhase = useSharedValue(0);
   // Build 39 "make it feel 3D, not a sticker": 0 at rest, 1 while a finger is
   // actually down. Snaps up fast (a real button shouldn't feel laggy to
   // depress) and springs back with real overshoot on release (the "comes
@@ -127,6 +135,21 @@ export function CentralRecorderCanvas({
     }
   }, [state, pulsePhase]);
 
+  useEffect(() => {
+    if (state === "listening") {
+      // `true` as the third arg makes withRepeat reverse each cycle
+      // (0->1->0->1...) instead of snapping back to 0, which is what makes
+      // this read as breathing rather than a sawtooth flash.
+      glowPhase.value = withRepeat(
+        withTiming(1, { duration: 1100, easing: Easing.inOut(Easing.sin) }),
+        -1,
+        true
+      );
+    } else {
+      glowPhase.value = withTiming(0, { duration: 200 });
+    }
+  }, [state, glowPhase]);
+
   // Build 39: was scale-only (the recording-amplitude pulse). Now also
   // shrinks slightly and nudges down on press, and — the actual "3D" part —
   // the highlight sheen (buttonHighlight below) dims as it depresses, as if
@@ -147,13 +170,28 @@ export function CentralRecorderCanvas({
     opacity: interpolate(pressedProgress.value, [0, 1], [1, 0.35]),
   }));
 
+  const glowAnimatedStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(glowPhase.value, [0, 1], [0.25, 0.65]),
+    transform: [{ scale: interpolate(glowPhase.value, [0, 1], [1, 1.08]) }],
+  }));
+
   return (
     <View style={styles.wrapper}>
-      {/* 3D elevated rim: a slightly larger, darker-edged disc sitting behind
-          the flat white button reads as a raised bezel without needing a
-          gradient library — the rim's own drop shadow plus a subtle inset
-          highlight ring is what sells the "tactile" depth. */}
-      <View style={styles.rim}>
+      {/* buttonStack is a fixed RIM_SIZE box purely so listeningGlow (below)
+          has a known-size positioning context to center an oversized halo
+          against — wrapper itself can't be that context, since it also
+          lays out the waveform row underneath via flex + gap. */}
+      <View style={styles.buttonStack}>
+        {/* Handsfree "awake and listening" glow: sits behind the rim, always
+            present but opacity-driven to invisible (glowPhase starts and
+            rests at 0) outside the "listening" state — see the useEffect
+            above for why this is opacity-only, not an animated shadow. */}
+        <Animated.View style={[styles.listeningGlow, glowAnimatedStyle]} pointerEvents="none" />
+        {/* 3D elevated rim: a slightly larger, darker-edged disc sitting behind
+            the flat white button reads as a raised bezel without needing a
+            gradient library — the rim's own drop shadow plus a subtle inset
+            highlight ring is what sells the "tactile" depth. */}
+        <View style={styles.rim}>
         <Animated.View style={buttonScaleStyle}>
           <Pressable
             onPress={onPress}
@@ -208,13 +246,16 @@ export function CentralRecorderCanvas({
             <Animated.View style={[styles.buttonHighlight, highlightAnimatedStyle]} pointerEvents="none" />
           </Pressable>
         </Animated.View>
+        </View>
       </View>
 
-      {/* States A (idle) and D (complete) are both just "not currently doing
-          anything" from this component's point of view — the waveform row
-          isn't rendered at all for either, not merely flattened, so the
-          canvas shows only the button when there's nothing live to show. */}
-      {state !== "idle" && (
+      {/* States A (idle), D (complete), and "listening" are all just "no live
+          audio being captured" from this component's point of view — the
+          waveform row (which implies "your voice is being captured right
+          now") isn't rendered for any of them; "listening"'s own feedback is
+          the glow above, not a flat/idle-looking bar row that would read as
+          a stalled recording. */}
+      {state !== "idle" && state !== "listening" && (
         <View style={styles.waveform} pointerEvents="none">
           {Array.from({ length: BAR_COUNT }).map((_, index) => (
             <WaveformBar key={index} index={index} state={state} amplitude={amplitudeShared} pulsePhase={pulsePhase} />
@@ -228,12 +269,32 @@ export function CentralRecorderCanvas({
 // 1.3x over the button's previous ~70dp core.
 const BUTTON_SIZE = 90;
 const RIM_SIZE = Math.round(BUTTON_SIZE * 1.2);
+// How far the "listening" glow halo extends past the rim's own edge.
+const GLOW_SIZE = Math.round(RIM_SIZE * 1.6);
 
 const styles = StyleSheet.create({
   wrapper: {
     alignItems: "center",
     justifyContent: "center",
     gap: 18,
+  },
+  // Fixed to exactly RIM_SIZE so listeningGlow's offsets below (computed
+  // from RIM_SIZE/GLOW_SIZE) center it correctly regardless of how this
+  // element itself ends up laid out by the flex column around it.
+  buttonStack: {
+    width: RIM_SIZE,
+    height: RIM_SIZE,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  listeningGlow: {
+    position: "absolute",
+    top: -(GLOW_SIZE - RIM_SIZE) / 2,
+    left: -(GLOW_SIZE - RIM_SIZE) / 2,
+    width: GLOW_SIZE,
+    height: GLOW_SIZE,
+    borderRadius: GLOW_SIZE / 2,
+    backgroundColor: colors.accent,
   },
   rim: {
     width: RIM_SIZE,

@@ -8,6 +8,7 @@ import AudioRecord from "@fugood/react-native-audio-pcm-stream";
 import { setMicInUse } from "./audioInputState";
 import { pausePlayback } from "./player";
 import { stopSpeech } from "./tts";
+import { preloadWakeChime, releaseWakeChime } from "./wakeChime";
 import { BITS_PER_SAMPLE, CHANNELS, SAMPLE_RATE, computeRms, writePcmChunksAsWav } from "./wav";
 
 export type ActiveModeState = "idle" | "listening" | "processing" | "speaking";
@@ -565,6 +566,10 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
   }, []);
 
   const start = useCallback(async () => {
+    // Fire-and-forget, not awaited: loading a ~10KB local asset is fast, but
+    // there's no reason to make engaging Handsfree wait on it, and a chime
+    // that's still loading the first time is a cosmetic miss, not a bug.
+    preloadWakeChime();
     await managerRef.current?.start();
     setIsActive(true);
   }, []);
@@ -572,6 +577,7 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
   const stop = useCallback(async () => {
     await managerRef.current?.stop();
     setIsActive(false);
+    releaseWakeChime();
   }, []);
 
   const toggle = useCallback(async () => {

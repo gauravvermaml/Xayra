@@ -11,6 +11,7 @@ import { TodoItemRow } from "./TodoItemRow";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import type { Recurrence } from "../db/schema";
 import { useToDos } from "../hooks/useToDos";
+import { matchesKeywordSearch } from "../services/search/keywordMatch";
 import type { ToDo } from "../services/todos/todoManager";
 
 /** How long the checked-off row stays gone-but-not-yet-really-completed
@@ -160,13 +161,14 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
   // animation and the undo window independent of each other. The search
   // filter is applied in the same pass rather than a second `.filter()`
   // call, since both narrow the same base list down to what's shown.
-  const trimmedSearchQuery = searchQuery.trim().toLowerCase();
+  //
+  // matchesKeywordSearch (services/search/keywordMatch.ts) supports a
+  // "+"-separated AND query ("soccer+eli" — every term must appear
+  // somewhere in the text) alongside the plain single-keyword substring
+  // match this used to do inline.
   const visibleTodos = useMemo(
-    () =>
-      todos.filter(
-        (item) => item.id !== pendingId && (!trimmedSearchQuery || item.text.toLowerCase().includes(trimmedSearchQuery))
-      ),
-    [todos, pendingId, trimmedSearchQuery]
+    () => todos.filter((item) => item.id !== pendingId && matchesKeywordSearch(item.text, searchQuery)),
+    [todos, pendingId, searchQuery]
   );
 
   const renderItem = useCallback(
@@ -231,7 +233,7 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
           ItemSeparatorComponent={() => <View style={styles.itemGap} />}
           ListEmptyComponent={
             <Text style={styles.emptyText}>
-              {trimmedSearchQuery
+              {searchQuery.trim()
                 ? `No to-dos match "${searchQuery.trim()}".`
                 : "To-dos extracted from your notes — or added directly — will show up here."}
             </Text>

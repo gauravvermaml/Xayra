@@ -2,11 +2,11 @@
 
 *(The app was originally built and shipped internally as "Silent Confidant," then briefly "Remi," before the full rebrand to **Xayra** documented below. Historical sections further down in this file predate the rename and refer to the app by whichever name was current at the time — that's intentional, not an inconsistency to fix; each section is an accurate record of what was true when it was written.)*
 
-**Last updated:** Hybrid Extraction Architecture fine-tuning workstream — a deterministic code pre-filter (`preFilterZeroTaskNotes`) combined with a fine-tuned Qwen2.5-1.5B SFT checkpoint (dataset v8.1) reaches **94.2% (97/103)** on the frozen eval harness, beating the 83.5% prompt-only baseline for the first time across six real training attempts. **Not yet a shipped app build** — see its own section immediately below for what is and isn't deployed. Build 47 (the single-model cutover this fine-tuning targets) follows it.
+**Last updated:** Build 48 — see its own section below (Handsfree wake-word chime/glow feedback, keyword search extended to Archive, Archive UI polish) and the Hybrid Extraction Architecture section immediately below this line, whose fine-tuned model is now wired into the app (superseding this section's earlier "not yet shipped" framing) and shipping together with Build 48 in production 1.0.37.
 
-## Fine-tuning workstream — Hybrid Extraction Architecture (not yet shipped)
+## Fine-tuning workstream — Hybrid Extraction Architecture
 
-**Status: eval-harness result, not a production build.** No versionCode bump, no EAS build, nothing submitted to Play Console for this section — it documents a validated `npm run eval` result against the frozen 103-case corpus, produced entirely on a desktop/Colab workflow. Resuming this work later should start from "is the fine-tuned model wired into the app yet?", not assume it is.
+**Status: wired into the app and shipping in production 1.0.37 (Build 48).** The pre-filter has been live since it was written (model-agnostic, ran regardless of which model was active); the fine-tuned GGUF itself, and the prompt-mode default flip, were wired in via commit `47cc7a7` (`services/ai/localLlama.ts`'s `CHAT_MODEL` now points at `qwen-task-extractor-q4_k_m.gguf`, `extractionPromptMode`/`ragPromptMode` now default to `"minimal"`) and verified on-device via adb/logcat: retired-model cleanup fired, the new GGUF registered with and completed through Android's native DownloadManager at the correct byte count, cold model load succeeded, minimal-mode prompts were confirmed active (71/80-token cache sizes, not just assumed), the pre-filter fired correctly against live notes, and an existing anchoring guard caught a real model hallucination during testing. This section's numbers below (94.2%, the six-attempt table) describe the offline eval-harness result that justified shipping it, not a claim about on-device accuracy specifically — no on-device accuracy re-score against the 103-case corpus has been run, only functional/pipeline verification.
 
 **The problem:** a prompt-only baseline (83.5%, 86/103) had two failures three rounds of prompt engineering couldn't move — third-party attribution (0/8) and pure-observation refusal (the model inventing tasks from purely descriptive notes). Six real training attempts followed:
 
@@ -23,9 +23,38 @@
 1. **`preFilterZeroTaskNotes`** (`services/ai/extractionLogic.ts`) — a regex-based, deterministic pre-filter that short-circuits extraction to `[]` for third-party/observation notes, without calling the LLM at all. Verified against the frozen 103-case corpus with **zero false positives** before being written (gated on `isSingleSentence` so it can never fire on a contrastive note that also contains a real task). Wired into `transformationEngine.ts`'s real extraction path and `scripts/eval/runEval.ts`'s harness. Tested alone against the still-broken v7 checkpoint (zero retraining): **87.4%** — most of the total win is this guard, not the fine-tune.
 2. **Dataset v8.1** (`scripts/dataset/generate_sft.py`, standard SFT `messages` format, not ORPO) — 500 rows: 270 positive + 80 contrastive extraction (zero refusal examples — that's the pre-filter's job now), 125 RAG-factual + 25 RAG-refusal. Trained via `notebooks/qwen_sft_unsloth.ipynb` (Unsloth `SFTTrainer` + `train_on_responses_only`, lr=8e-5, 2 epochs, LoRA r=16) into `qwen-task-extractor-q4_k_m.gguf`.
 
-**What's actually deployed vs. not:** the pre-filter code is live in `transformationEngine.ts` regardless of which model runs (model-agnostic). The fine-tuned GGUF itself is **not** — `services/ai/localLlama.ts`'s `CHAT_MODEL` and `modelDownloadManager.ts` still point at the stock `qwen2.5-1.5b-instruct-q4_k_m.gguf`, and `setExtractionPromptMode`/`setRagPromptMode` still default to `"full"` (the ~2,478-token stock prompt) rather than the fine-tuned model's ~212-token minimal prompt. Shipping the fine-tuned model (R2 upload, download-manager wiring, flipping the prompt-mode default, a real device test pass) is a separate, not-yet-taken step.
+**What's actually deployed:** both halves now. The pre-filter has been live in `transformationEngine.ts` since it was written (model-agnostic, fires regardless of which model runs). The fine-tuned GGUF is uploaded to the `xayra-models` R2 bucket, `services/ai/localLlama.ts`'s `CHAT_MODEL` points at it, `modelDownloadManager.ts` is wired to fetch it, and `extractionPromptMode`/`ragPromptMode` both default to `"minimal"` (the fine-tuned model's ~212-token prompt, not the ~2,478-token stock-model prompt). All of it is verified on-device (see the status line above) and shipping in production 1.0.37.
 
 **Known residual gap:** `rag-grounding` still misses 2/4 on indirect multi-note questions ("Do I need to do anything about the gym?", asked against a gym-renewal note buried among distractors) — the v8.1 dataset additions aimed at this (new `gym` indirect phrasings, new `recommendation_book`/`dietary_note` RAG subjects) fixed 1 of 3 targeted cases (`rag-005`). Worth another pass if resuming RAG work specifically.
+
+## Build 48 — Handsfree Wake-Word Feedback, Note Search, Archive Polish
+
+Ships together with the Hybrid Extraction Architecture fine-tuned model (previous section) in production 1.0.37 — the first build carrying that model.
+
+### 1. Handsfree wake-word feedback (chime + logo glow)
+
+A real feasibility investigation into a true "listens live" acoustic wake-word engine (two-stage partial transcription, Picovoice Porcupine, openWakeWord, and a proposed Android-native-hotword hook) was carried out and **closed without a change**: Porcupine needs a paid commercial license (contradicts CLAUDE.md's zero-cloud-API-dependency rule for the core loop), openWakeWord has no pre-trained "Hey Xayra" model and would need a from-scratch mic-capture→spectrogram→ONNX pipeline, and Android's native hotword APIs (`CAPTURE_AUDIO_HOTWORD`) have been `signature|system`-protection-level and unreachable by any Play Store app since Android 12 — confirmed a hard platform wall, not a workaround-able gap. Decision: keep the existing transcript-based detection (`containsWakeWord()` in `services/audio/activeMode.ts`, fires only after the full utterance is VAD-segmented and Whisper-transcribed) and add feedback at the moment it fires, rather than pretending it's live.
+
+- **`services/audio/wakeChime.ts`** (new) — a two-tone chime, deliberately its own `AudioPlayer` instance separate from `services/audio/player.ts`'s shared note-playback singleton, so it can never interfere with note/TTS playback state. The `.wav` asset is synthesized locally by `scripts/generate-wake-chime.js` (hand-written WAV header + PCM sine tones) rather than sourced, avoiding licensing questions. Preloaded when Handsfree mode starts, released when it stops.
+- **`components/CentralRecorderCanvas.tsx`** — new `"listening"` canvas state driving a breathing accent-colored glow halo around the record button (Reanimated `withRepeat`/`withTiming`). Required wrapping the button in a new sized `buttonStack` container so the oversized glow overlay has a positioning context to center against — the original flat layout couldn't host it.
+- `app/index.tsx` plays the chime immediately when a Handsfree wake-word match fires.
+
+### 2. Keyword search (notes)
+
+**`services/search/keywordMatch.ts`** (new) — `matchesKeywordSearch(text, query)`, the same substring/`+`-AND matching `TodosOverlay.tsx` already used for to-dos, now shared and extended to notes:
+
+- **`app/archive.tsx`** gained a real search bar (was missing entirely — confirmed via user report there was no way to search recorded notes). Wired through `NotesSheetContent`'s previously-dormant `isSearchActive` prop, which existed only to swap empty-state copy and had never had a real search feeding it before.
+- **`components/TodosOverlay.tsx`** — its existing inline `.includes()` filter replaced with the shared `matchesKeywordSearch`, so to-do and note search now behave identically (case-insensitive, `+`-separated AND terms, e.g. `"soccer+eli"`).
+- **`services/notes/noteManager.ts`** gained `countNotes()`, a lightweight `SELECT COUNT(*)` query (not `listNotes().length`) — used by the home-screen quick-menu label below, which only needs a count, not every note's content in memory.
+
+### 3. Archive screen polish
+
+- **Bottom nav-bar inset fix**: `app/archive.tsx` was missing the fixed, solid-colored strip `app/index.tsx` paints behind the Android nav bar (a separate mechanism from the scroll-content bottom padding both screens already had) — added using Archive's own background color (`colors.background`, `#0F172A`), not index.tsx's distinct jet-black canvas color.
+- **Home-screen quick-menu entry** now reads **"🗄️ Archived notes (N)"** — the count lives only on the menu entry (`app/index.tsx`), refreshed via `countNotes()` in the existing `useFocusEffect` alongside the embedding/extraction recovery passes, silently on failure like those. The Archive screen's own header title stays plain **"Archive"** — an earlier attempt put the count there instead, corrected per explicit user feedback that the count belongs only on the menu entry.
+
+### Verification
+
+`npx tsc --noEmit` clean; 21 suites / 164 tests green (up from 18/65 — includes 13 new `keywordMatch` tests). Chime/glow and the quick-menu count were confirmed live on the Redmi Note 8 Pro; the search bar and Archive nav-bar strip were confirmed live on the same device across this and the preceding session.
 
 ## Build 47 — Single-Model Cutover: Qwen2.5-1.5B-Instruct
 

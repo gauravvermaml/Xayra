@@ -38,8 +38,10 @@ import {
 } from "../services/notifications/todoNotifications";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakTextAndWait } from "../services/audio/tts";
+import { playWakeChime } from "../services/audio/wakeChime";
 import { isAudioTooShort } from "../services/audio/wav";
 import {
+  countNotes,
   createTextNote,
   createVoiceNote,
   EmptyRecordingError,
@@ -133,6 +135,10 @@ export default function HomeScreen() {
   // after feedback that a full-width sheet read as an unrelated system
   // tray rather than a menu belonging to that specific icon.
   const [isQuickMenuOpen, setIsQuickMenuOpen] = useState(false);
+  // For the "Archived notes (N)" quick-menu label below — a count only,
+  // via countNotes() (noteManager.ts), not a full listNotes() load this
+  // screen has no other use for.
+  const [notesCount, setNotesCount] = useState(0);
   // Measured at the moment the "•••" icon is actually tapped (not derived
   // from any static layout value) — the icon lives inside an
   // Animated.View whose position is driven by Reanimated on the UI thread
@@ -344,6 +350,12 @@ export default function HomeScreen() {
     useCallback(() => {
       void retryPendingEmbeddings();
       void retryPendingExtractions();
+      // Quick-menu "Archived notes (N)" label — count only, silent on
+      // failure like the recovery passes above (not worth surfacing an
+      // error for a label refresh).
+      void countNotes()
+        .then(setNotesCount)
+        .catch(() => {});
     }, [])
   );
 
@@ -565,6 +577,15 @@ export default function HomeScreen() {
         console.log(`[Handsfree] Rejected — no wake word match in transcript: "${transcript}"`);
         showToast(`Ignored — say "${WAKE_PHRASE_DISPLAY}" to be heard`);
         return;
+      }
+
+      // Wake word confirmed. See wakeChime.ts's own doc comment for why this
+      // fires HERE (right after the transcript-based check passes) rather
+      // than at the start of listening — this app's wake-word detection is
+      // retrospective, not a live acoustic trigger, so there is no earlier
+      // moment that actually knows the wake word was said.
+      if (options?.isHandsfree) {
+        playWakeChime();
       }
 
       // Build 25 ATOMIC VOICE LOCK (cont.): both checks happen BEFORE any
@@ -851,7 +872,9 @@ export default function HomeScreen() {
     ? "recording"
     : processingState === "processing"
       ? "transcribing"
-      : "idle";
+      : activeMode.isActive && activeMode.state === "listening"
+        ? "listening"
+        : "idle";
 
   // Prefers the real, granular pipeline stage (see pipelineStage.ts) —
   // "Hearing you out", "Reading through your notes", etc. — falling back to
@@ -1179,7 +1202,7 @@ export default function HomeScreen() {
                 handleOpenArchive();
               }}
             >
-              <Text style={styles.quickMenuRowText}>🗄️ Archive</Text>
+              <Text style={styles.quickMenuRowText}>🗄️ Archived notes ({notesCount})</Text>
             </Pressable>
             <Pressable
               style={({ pressed }) => [styles.quickMenuRow, pressed && styles.quickMenuRowPressed]}

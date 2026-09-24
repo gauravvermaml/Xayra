@@ -1,12 +1,14 @@
-import { useCallback, useRef, useState } from "react";
-import { Alert, Pressable, StyleSheet, Text, View } from "react-native";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { Alert, Pressable, StyleSheet, Text, TextInput, View } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
+import { Feather } from "@expo/vector-icons";
 
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { NotesSheetContent, type DisplayNote } from "../components/NotesSheetContent";
-import { colors, spacing, typography } from "../constants/theme";
+import { colors, radius, spacing, typography } from "../constants/theme";
 import { deleteNote, listNotes, retryPendingEmbeddings, type Note } from "../services/notes/noteManager";
+import { matchesKeywordSearch } from "../services/search/keywordMatch";
 import { getSyncStatus, restoreFromDrive, signInWithGoogle, type SyncStatus } from "../services/sync/driveSync";
 
 /**
@@ -31,6 +33,7 @@ export default function ArchiveScreen() {
   const insets = useSafeAreaInsets();
 
   const [notes, setNotes] = useState<Note[]>([]);
+  const [searchQuery, setSearchQuery] = useState("");
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>({ isConnected: false });
@@ -116,13 +119,25 @@ export default function ArchiveScreen() {
     ]);
   }, []);
 
-  const displayedNotes: DisplayNote[] = notes.map((note) => ({
-    id: note.id,
-    content: note.content,
-    audioUri: note.audioUri,
-    transcriptionModel: note.transcriptionModel,
-    createdAt: note.createdAt,
-  }));
+  // matchesKeywordSearch (services/search/keywordMatch.ts) — same "+"-AND
+  // matching the to-do search bar uses, applied here for the first time to
+  // notes. isSearchActive is now real (used to be hardcoded false, since no
+  // search existed) — see NotesSheetContent's own empty-state copy that
+  // depends on it.
+  const trimmedSearchQuery = searchQuery.trim();
+  const displayedNotes: DisplayNote[] = useMemo(
+    () =>
+      notes
+        .filter((note) => matchesKeywordSearch(note.content, searchQuery))
+        .map((note) => ({
+          id: note.id,
+          content: note.content,
+          audioUri: note.audioUri,
+          transcriptionModel: note.transcriptionModel,
+          createdAt: note.createdAt,
+        })),
+    [notes, searchQuery]
+  );
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
@@ -138,11 +153,29 @@ export default function ArchiveScreen() {
         <Text style={styles.subtitle}>Every thought you've ever recorded, exactly as captured.</Text>
       </View>
 
+      <View style={styles.searchBar}>
+        <Feather name="search" size={16} color={colors.textMuted} />
+        <TextInput
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+          placeholder='Search — try "soccer+eli" to match both'
+          placeholderTextColor={colors.textMuted}
+          style={styles.searchInput}
+          returnKeyType="search"
+          autoCorrect={false}
+        />
+        {searchQuery.length > 0 && (
+          <Pressable onPress={() => setSearchQuery("")} hitSlop={8}>
+            <Feather name="x" size={16} color={colors.textMuted} />
+          </Pressable>
+        )}
+      </View>
+
       {error && <Text style={styles.errorText}>{error}</Text>}
 
       <NotesSheetContent
         notes={displayedNotes}
-        isSearchActive={false}
+        isSearchActive={trimmedSearchQuery.length > 0}
         onSelectNote={handleSelectNote}
         onDeleteNote={handleDeleteNote}
         isRestoring={isRestoring}
@@ -150,6 +183,15 @@ export default function ArchiveScreen() {
         bottomInset={insets.bottom}
         usePlainList
       />
+
+      {/* Solid, app-background-colored strip pinned behind the Android nav
+          bar — matches app/index.tsx's own navBarInset treatment (this
+          screen's equivalent of it was missing entirely before). Without
+          it, the scrollable list's own bottom padding (NotesSheetContent's
+          bottomInset+80) still keeps the last card clear of the nav bar,
+          but nothing painted the nav-bar strip itself in this screen's own
+          background color, unlike every other screen. */}
+      <View pointerEvents="none" style={[styles.navBarInset, { height: insets.bottom }]} />
 
       <NoteDetailModal
         noteId={selectedNoteId}
@@ -201,5 +243,37 @@ const styles = StyleSheet.create({
     fontSize: 13,
     paddingHorizontal: spacing.xl,
     marginBottom: spacing.sm,
+  },
+  searchBar: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+    marginHorizontal: spacing.xl,
+    marginBottom: spacing.md,
+    paddingHorizontal: spacing.base,
+    height: 40,
+    borderRadius: radius.pill,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  searchInput: {
+    flex: 1,
+    color: colors.textPrimary,
+    ...typography.body,
+    fontSize: 15,
+    padding: 0,
+  },
+  // Matches app/index.tsx's own navBarInset treatment — a solid strip in
+  // this screen's background color pinned behind the Android nav bar, so
+  // the system bar area reads as part of the screen rather than a gap/seam
+  // at the very bottom. See its call site's own comment for why this was
+  // missing here specifically.
+  navBarInset: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: colors.background,
   },
 });
