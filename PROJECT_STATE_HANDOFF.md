@@ -31,6 +31,15 @@
 
 Ships together with the Hybrid Extraction Architecture fine-tuned model (previous section) in production 1.0.37 — the first build carrying that model.
 
+### Production build — 1.0.37 / versionCode 44
+
+Cut via `eas build --platform android --profile production` (`eas.json`'s `autoIncrement` bumped `versionCode` 43→44 automatically).
+
+- Build log: https://expo.dev/accounts/gauravsinghverma/projects/silent-confidant/builds/f8209b33-a8ae-4f5d-adf9-d231135eafe9
+- Artifact (.aab): https://expo.dev/artifacts/eas/jC6GBLLAMDkPF4evUm0BKNsfFwjozqbhxxR-hYeCHOg.aab
+
+Needs manual upload to Play Console Internal Testing — not submitted automatically. Carries the fine-tuned Hybrid Architecture model (previous section) plus all of Build 48 below — first production build since 1.0.35/versionCode 42.
+
 ### 1. Handsfree wake-word feedback (chime + logo glow)
 
 A real feasibility investigation into a true "listens live" acoustic wake-word engine (two-stage partial transcription, Picovoice Porcupine, openWakeWord, and a proposed Android-native-hotword hook) was carried out and **closed without a change**: Porcupine needs a paid commercial license (contradicts CLAUDE.md's zero-cloud-API-dependency rule for the core loop), openWakeWord has no pre-trained "Hey Xayra" model and would need a from-scratch mic-capture→spectrogram→ONNX pipeline, and Android's native hotword APIs (`CAPTURE_AUDIO_HOTWORD`) have been `signature|system`-protection-level and unreachable by any Play Store app since Android 12 — confirmed a hard platform wall, not a workaround-able gap. Decision: keep the existing transcript-based detection (`containsWakeWord()` in `services/audio/activeMode.ts`, fires only after the full utterance is VAD-segmented and Whisper-transcribed) and add feedback at the moment it fires, rather than pretending it's live.
