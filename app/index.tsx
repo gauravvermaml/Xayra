@@ -19,6 +19,7 @@ import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
 import { cancelActiveLlamaCompletion } from "../services/ai/localLlama";
+import { cancelActiveTranscription } from "../services/ai/localWhisper";
 import {
   PIPELINE_STAGE_LABELS,
   setPipelineStage,
@@ -764,9 +765,6 @@ export default function HomeScreen() {
   // Declared here, after `activeMode` exists, specifically so it can guard
   // against the single-native-session collision described above.
   const handleRecordPress = useCallback(async () => {
-    if (recorder.isTransitioning || activeMode.isActive) {
-      return;
-    }
     // Build 39 "stop, don't execute this": a tap while something's already
     // processing (not recording, not idle) means cancel, not "start a new
     // recording" — the canvas is deliberately no longer disabled during
@@ -776,9 +774,53 @@ export default function HomeScreen() {
     // `cancelActiveLlamaCompletion()` additionally cuts an already-running
     // RAG answer off immediately rather than letting it keep generating for
     // several more seconds before the cancellation is even noticed.
+    //
+    // Build 48 fix, live user report: this check MUST run before the
+    // Handsfree guard below, not after it. It used to sit after, so a tap
+    // during Handsfree's own "transcribing"/"speaking" processing window
+    // (ActiveModeManager already stopped capturing that utterance's audio
+    // by this point — ownership of the native session is not at stake)
+    // hit the `activeMode.isActive` early-return and did nothing at all,
+    // silently. The user's tap looked like it was ignored, the in-flight
+    // transcription/RAG call kept running with no way to stop it, and it
+    // read as the app being stuck — the fix here just moved this branch
+    // above the collision guard, which only needs to block a tap from
+    // STARTING a second recording (the `else` branch further down), not
+    // from cancelling one that's already in flight.
     if (processingState === "processing") {
       cancelRequestedRef.current = true;
+      // Build 48 fix #3, same live report: cancelling used to only be able
+      // to cut short an already-RUNNING Llama answer — a tap landing while
+      // Whisper was still transcribing set the ref correctly, but nothing
+      // stopped transcribeAudioLocal() itself, so the actual "Cancelled"
+      // feedback couldn't fire until Whisper finished on its own (several
+      // real seconds), which is what "takes a few seconds to cancel" was.
+      // whisper.rn's transcribe() has always returned a real abort handle;
+      // localWhisper.ts just never captured it before now. Both cancels are
+      // safe no-ops when they don't apply (no completion/transcription
+      // actually in flight at the moment of the tap).
+      cancelActiveTranscription();
       cancelActiveLlamaCompletion();
+      return;
+    }
+    // Build 48 fix #2, same live report: a tap while Handsfree is still
+    // actively CAPTURING an utterance (VAD hasn't yet detected trailing
+    // silence, so processingState above is still "idle") used to be a
+    // silent no-op too — the user had to wait out VAD silence-detection
+    // before the branch above could even see anything to cancel, which is
+    // what made a genuine cancel intent look like it needed several taps.
+    // `cancelCurrentUtterance()` discards the in-progress capture directly
+    // (see its own doc comment) and reports whether there was anything to
+    // discard — a tap while Handsfree is just idly listening (no speech
+    // detected yet) correctly stays a no-op, since nothing here would be
+    // "cancelling" anything real.
+    if (activeMode.isActive) {
+      if (activeMode.cancelCurrentUtterance()) {
+        showToast("Cancelled");
+      }
+      return;
+    }
+    if (recorder.isTransitioning) {
       return;
     }
     setError(null);
@@ -820,7 +862,7 @@ export default function HomeScreen() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Recording failed.");
     }
-  }, [recorder, activeMode.isActive, finishUtterance, processingState]);
+  }, [recorder, activeMode.isActive, activeMode.cancelCurrentUtterance, finishUtterance, processingState]);
 
   // 10-minute no-speech safety timeout (Requirement 5) — armed the moment
   // Handsfree engages, and re-armed on every utterance ActiveModeManager

@@ -425,6 +425,36 @@ export class ActiveModeManager {
     }
   }
 
+  /**
+   * Build 48 fix, live user report: a tap on the record button while
+   * Handsfree is actively CAPTURING an utterance — speech detected, VAD
+   * still waiting for trailing silence — used to have no effect at all.
+   * The only cancel path that existed (app/index.tsx's `cancelRequestedRef`)
+   * only takes effect once `finalizeUtterance()` has already handed the
+   * utterance off for transcription, so a tap mid-sentence just sat there:
+   * the user had to wait out however long silence-detection takes, then
+   * Whisper, then potentially a RAG answer, before a cancel tap landing on
+   * an already-"processing" state could finally do anything — reported as
+   * needing several taps and feeling stuck.
+   *
+   * This discards whatever's been captured so far and re-arms listening
+   * immediately, via the exact same `armListening()` a normal
+   * finalize-and-continue cycle already uses — as if this utterance never
+   * happened, no transcription or LLM call ever runs for it. Returns
+   * `false` (a deliberate no-op) if nothing is actually being captured yet
+   * (still calibrating / no speech detected above the noise floor) — there
+   * is genuinely nothing to cancel in that case, and the caller falls back
+   * to whatever it already does when a tap has no in-flight utterance to
+   * act on.
+   */
+  cancelCurrentUtterance(): boolean {
+    if (this.stopped || !this.capturing || !this.hasDetectedSpeech) {
+      return false;
+    }
+    this.armListening();
+    return true;
+  }
+
   /** Starts (or restarts, after an utterance) a listen cycle. Purely
    * JS-side state now — see `capturing`'s doc comment for why this no
    * longer touches `AudioRecord` at all; the native session is opened once,
@@ -518,6 +548,8 @@ export type UseActiveMode = {
   state: ActiveModeState;
   toggle: () => Promise<void>;
   stop: () => Promise<void>;
+  /** See ActiveModeManager.cancelCurrentUtterance's own doc comment. */
+  cancelCurrentUtterance: () => boolean;
 };
 
 /**
@@ -588,5 +620,9 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
     }
   }, [isActive, start, stop]);
 
-  return { isActive, state, toggle, stop };
+  const cancelCurrentUtterance = useCallback(() => {
+    return managerRef.current?.cancelCurrentUtterance() ?? false;
+  }, []);
+
+  return { isActive, state, toggle, stop, cancelCurrentUtterance };
 }

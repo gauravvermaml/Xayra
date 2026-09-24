@@ -2,7 +2,7 @@
 
 *(The app was originally built and shipped internally as "Silent Confidant," then briefly "Remi," before the full rebrand to **Xayra** documented below. Historical sections further down in this file predate the rename and refer to the app by whichever name was current at the time — that's intentional, not an inconsistency to fix; each section is an accurate record of what was true when it was written.)*
 
-**Last updated:** Build 48 — see its own section below (Handsfree wake-word chime/glow feedback, keyword search extended to Archive, Archive UI polish) and the Hybrid Extraction Architecture section immediately below this line, whose fine-tuned model is now wired into the app (superseding this section's earlier "not yet shipped" framing) and shipping together with Build 48 in production 1.0.37.
+**Last updated:** Build 49 (not yet built — see its own section below: a three-part Handsfree cancel-tap latency fix chain found via live user testing of Build 48, plus dynamic/round splash-screen sizing). Build 48 (Handsfree wake-word chime/glow feedback, keyword search extended to Archive, Archive UI polish) and the Hybrid Extraction Architecture section immediately below this line (fine-tuned model wired into the app) already shipped together in production 1.0.37.
 
 ## Fine-tuning workstream — Hybrid Extraction Architecture
 
@@ -64,6 +64,27 @@ A real feasibility investigation into a true "listens live" acoustic wake-word e
 ### Verification
 
 `npx tsc --noEmit` clean; 21 suites / 164 tests green (up from 18/65 — includes 13 new `keywordMatch` tests). Chime/glow and the quick-menu count were confirmed live on the Redmi Note 8 Pro; the search bar and Archive nav-bar strip were confirmed live on the same device across this and the preceding session.
+
+## Build 49 — Handsfree Cancel-Tap Latency Chain, Dynamic/Round Splash (not yet built)
+
+Live user testing of Build 48 on the Pixel 9 surfaced a real bug the code review before that build missed. Committed on `main`, not yet pushed or built into a new production `.aab` — the user is bundling this with more changes over the next few days before the next EAS build.
+
+### 1. Handsfree cancel-tap latency — three independent gaps, found one at a time
+
+The user's report ("tapped to cancel, it got stuck and I had to force-close") led to three rounds of fix-then-retest, each surfacing the next real gap once the previous one was closed — the kind of layered bug this codebase's `stopCompletion()` history (Builds 41/43/45) has already seen more than once.
+
+1. **The tap was fully disabled during Handsfree.** `app/index.tsx`'s `handleRecordPress` had `if (recorder.isTransitioning || activeMode.isActive) { return; }` BEFORE the Build 39 "tap to cancel mid-processing" branch — so any tap while Handsfree was engaged, including while it was actively transcribing/answering, hit that early return and did nothing at all, silently. Fixed by moving the `processingState === "processing"` cancel check above it; the collision the guard exists to prevent (a second native `AudioRecord` session) only applies to *starting* a new recording, never to cancelling one already in flight.
+2. **A tap during active VAD capture (still speaking, silence not yet detected) had no effect either**, since nothing was "processing" yet for the fix above to catch — the user would have to wait out `SILENCE_HOLD_MS` (1.5s) before there was anything to cancel. Fixed with a new `ActiveModeManager.cancelCurrentUtterance()` (`services/audio/activeMode.ts`), exposed through `useActiveMode()`: discards the in-progress capture and re-arms listening immediately via the same `armListening()` a normal cycle already uses, skipping transcription/RAG entirely for that utterance. Returns `false` (deliberate no-op) if nothing is actually being captured, so an idle tap can't poison the next real utterance.
+3. **Cancelling during Whisper transcription still took several real seconds.** A doc comment on the original cancel handler claimed "transcription itself has no interrupt API (whisper.cpp runs to completion once started)" — **this was wrong.** `whisper.rn`'s `context.transcribe()` has always returned a real `{ stop, promise }` pair, `stop()` backed by a native `abort_callback` whisper.cpp checks between decode steps (confirmed by reading `RNWhisperJSI.cpp`/`rn-whisper.cpp` directly, not assumed) — `services/ai/localWhisper.ts`'s `transcribeAudioLocal()` just destructured `{ promise }` and threw the `stop` handle away. Fixed by capturing it into a module-level `activeTranscriptionStop` and exporting `cancelActiveTranscription()`, called alongside `cancelActiveLlamaCompletion()` from the same cancel-tap handler. **Lesson: an old comment asserting a hard technical limitation is a claim from whenever it was written, not a fact to build on — this one was stale (or wrong from the start) and cost a full round of "still not fixed" before being checked against the actual dependency source.**
+
+All three land in `app/index.tsx`, `services/audio/activeMode.ts`, `services/ai/localWhisper.ts`. Verified via `npx tsc --noEmit` (clean) and `npm test` (164/164) after each of the three rounds; live-confirmed on the Redmi after the third fix that cancellation now cuts in well under a second regardless of which phase (VAD capture, transcription, or generation) the tap lands in.
+
+### 2. Splash screen: dynamic sizing + round logo
+
+Two more live user requests against `components/AppSplashScreen.tsx` (the JS overlay screen from Build 40, not the native OS splash — see that build's own section for why the native one is capped at a small icon):
+
+- **Sizing was flat hardcoded dp/sp** (same absolute size on a small phone and a tablet). Replaced with `useWindowDimensions()`-derived percentages, each clamped to a min/max. Three presets (Modest/Compact/Minimal) were presented to the user with concrete computed sizes at reference screen widths; **"Compact" was chosen**: logo width 24% of screen width (clamped 100–150dp), title 7.5% (26–34sp), subtitle 2.8% (10–13sp) — roughly a 100dp logo / 29sp title / 11sp subtitle on a ~390dp phone.
+- **Logo made circular**, matching `CentralRecorderCanvas`'s own record-button treatment exactly: a square `overflow: "hidden"` frame with `borderRadius` = half its side, an accent-colored fill behind the image as a fallback, `resizeMode: "cover"` so `icon.png` fills the circle edge-to-edge rather than floating uncropped inside it.
 
 ## Build 47 — Single-Model Cutover: Qwen2.5-1.5B-Instruct
 

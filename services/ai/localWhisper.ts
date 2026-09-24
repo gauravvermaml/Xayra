@@ -65,6 +65,27 @@ export function isTranscriptionInProgress(): boolean {
 }
 
 /**
+ * Build 48 fix, live user report: app/index.tsx's "stop, don't execute
+ * this" cancel-tap handler used to have no way to interrupt an in-flight
+ * Whisper transcription — a comment on that handler claimed "transcription
+ * itself has no interrupt API (whisper.cpp runs to completion once
+ * started)", which turned out to be wrong (or stale — whisper.rn's
+ * `context.transcribe()` has returned a real `stop()` handle, backed by a
+ * native `abort_callback` whisper.cpp checks between decode steps, this
+ * whole time; `transcribeAudioLocal` below just never captured it). Without
+ * it, a cancel tap landing during transcription set the cancellation flag
+ * correctly, but the flag was only ever CHECKED after `transcribeAudioLocal`
+ * naturally finished — several real seconds later for anything but a very
+ * short utterance — which is exactly the "takes a few seconds to actually
+ * cancel" gap that was reported.
+ */
+let activeTranscriptionStop: (() => Promise<void>) | null = null;
+
+export function cancelActiveTranscription(): void {
+  activeTranscriptionStop?.().catch(() => {});
+}
+
+/**
  * Not bundled into the app (tens/hundreds of MB) — downloaded automatically
  * in the background shortly after first launch (see
  * services/ai/modelDownloadManager.ts) rather than through any user-facing
@@ -218,11 +239,19 @@ export async function transcribeAudioLocal(fileUri: string): Promise<LocalTransc
   activeTranscriptionCount += 1;
   try {
     const { context, modelId } = await getWhisperContext();
-    const { promise } = context.transcribe(fileUri, { language: "en", prompt: INITIAL_PROMPT });
-    const { result } = await promise;
-    logDuration("Whisper STT transcription", start);
+    const { stop, promise } = context.transcribe(fileUri, { language: "en", prompt: INITIAL_PROMPT });
+    activeTranscriptionStop = stop;
+    const { result, isAborted } = await promise;
+    logDuration(isAborted ? "Whisper STT transcription (aborted)" : "Whisper STT transcription", start);
+    // A cancel tap that lands here is already recorded via
+    // app/index.tsx's `cancelRequestedRef` (set before this ever resolves)
+    // — that's what actually decides not to act on this result. Returning
+    // the aborted/partial text rather than throwing keeps this function's
+    // contract simple (always a transcript, never a special "cancelled"
+    // error type to thread through every caller).
     return { transcript: stripNonSpeechMarkers(result), modelId };
   } finally {
+    activeTranscriptionStop = null;
     activeTranscriptionCount -= 1;
   }
 }
