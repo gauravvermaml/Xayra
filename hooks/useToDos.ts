@@ -6,6 +6,7 @@ import {
   completeToDo as completeToDoRecord,
   deleteToDo as deleteToDoRecord,
   getPendingToDos,
+  listAllToDos,
   subscribeToToDosChanged,
   updateToDo as updateToDoRecord,
   type AddToDoInput,
@@ -15,6 +16,17 @@ import {
 
 export type UseToDosResult = {
   todos: ToDo[];
+  /** Every to-do regardless of completion status — for the calendar grid
+   * views (Day/Work Week/Week/Month) ONLY. Per explicit product decision, a
+   * to-do's calendar entry behaves like a Google Calendar event: it keeps
+   * showing, indefinitely, once checked off, styled no differently than a
+   * pending one. `todos` above stays pending-only for everything else
+   * (Schedule view, the pending-count badge) — completing a recurring to-do
+   * should still make the just-finished occurrence disappear from Schedule
+   * and the freshly-spawned next occurrence take its place there, unchanged
+   * from today's behavior. Reuses `listAllToDos()` (already existed for
+   * driveSync's delta backup), not a new query. */
+  allTodos: ToDo[];
   pendingCount: number;
   refreshToDos: () => Promise<void>;
   addToDo: (input: AddToDoInput) => Promise<void>;
@@ -60,10 +72,12 @@ export type UseToDosResult = {
  */
 export function useToDos(): UseToDosResult {
   const [todos, setTodos] = useState<ToDo[]>([]);
+  const [allTodos, setAllTodos] = useState<ToDo[]>([]);
 
   const refreshToDos = useCallback(async () => {
-    const pending = await getPendingToDos();
+    const [pending, all] = await Promise.all([getPendingToDos(), listAllToDos()]);
     setTodos(pending);
+    setAllTodos(all);
   }, []);
 
   useEffect(() => {
@@ -116,6 +130,7 @@ export function useToDos(): UseToDosResult {
 
   return {
     todos,
+    allTodos,
     pendingCount: todos.length,
     refreshToDos,
     addToDo,

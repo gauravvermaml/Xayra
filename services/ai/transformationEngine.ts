@@ -3,6 +3,8 @@ import { getThermalStatus, ThermalStatus } from "expo-device-cpu";
 
 import {
   buildPrompt,
+  computeDefaultReminderDateTime,
+  containsExtractionTrigger,
   detectDatePhrases,
   extractionPrefix,
   normalizeExtracted,
@@ -16,6 +18,8 @@ import {
 // Re-exported so existing importers (tests, callers) keep their paths while
 // the implementations live in the native-free module.
 export {
+  computeDefaultReminderDateTime,
+  containsExtractionTrigger,
   detectDatePhrases,
   normalizeExtracted,
   preFilterZeroTaskNotes,
@@ -111,10 +115,27 @@ async function waitForTranscriptionIdleIfNeeded(): Promise<void> {
  * throws: a model that isn't downloaded yet, a malformed completion, or any
  * other failure resolves to an empty array rather than blocking whatever
  * caller is trying to save the underlying note.
+ *
+ * EXPLICIT-INTENT GATING: extraction now only ever runs on a note that
+ * contains one of the trigger phrases containsExtractionTrigger checks for
+ * ("remind me", "make a note") — see that function's own doc comment for
+ * why. A note with no trigger phrase is treated as pure journal content and
+ * returns `[]` immediately, without ever calling the LLM. This replaced the
+ * previous "run extraction on every note, then rely on deterministic guards
+ * to reject bad results" design, which could not distinguish a narrated plan
+ * ("we should see them around 12:30") from an actual request in the same
+ * words — no guard downstream of the LLM call can fix that, because the
+ * words themselves are genuinely ambiguous; only the speaker declaring
+ * intent up front resolves it.
  */
 export async function extractToDosFromText(rawText: string): Promise<ExtractedToDo[]> {
   const trimmed = rawText.trim();
   if (!trimmed) {
+    return [];
+  }
+
+  if (!containsExtractionTrigger(trimmed)) {
+    console.log("[transformationEngine] No reminder trigger phrase found — treating as a journal entry, skipping extraction.");
     return [];
   }
 
@@ -130,6 +151,12 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
     return [];
   }
 
+  // Captured once, up front — before the thermal/transcription waits below,
+  // which can each run tens of seconds — so a note spoken right at 12:59pm
+  // isn't pushed into the "after 1pm" default just because it happened to
+  // queue behind a warm device or an in-flight transcription. See
+  // computeDefaultReminderDateTime's own comment for what this feeds.
+  const now = new Date();
   const todayISO = todayIso();
   // Runs before the LLM call, entirely on the JS thread — see
   // detectDatePhrases's own doc comment. This is a plain synchronous regex/
@@ -193,7 +220,11 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
       // Extracted's return value only exposes the already-resolved
       // actionDate, which collapses both cases to the same "today" result.
       console.log("[transformationEngine] Raw extracted items (pre-date-resolution):", parsed);
-      return normalizeExtracted(parsed, todayISO, trimmed, detectedPhrases);
+      // `true`: containsExtractionTrigger already confirmed above that this
+      // note was explicitly flagged for extraction — see normalizeExtracted's
+      // own doc comment on this parameter for why that changes the
+      // cross-sentence auto-fill's safety calculus.
+      return normalizeExtracted(parsed, todayISO, trimmed, detectedPhrases, true, now);
     } catch (parseErr) {
       // Logged separately from the outer catch (which also covers
       // getContext()/completion failures) specifically so a parse failure

@@ -61,17 +61,55 @@ export const NOTE_EMBEDDINGS_TABLE_SQL = `
 export const RECURRENCE_OPTIONS = ["none", "daily", "weekly", "monthly"] as const;
 export type Recurrence = (typeof RECURRENCE_OPTIONS)[number];
 
-/** Phase 2 Step 4: a to-do with no explicitly spoken/typed reminder time
- * fires its local notification at 5 AM on `actionDate` — an early, out-of-
- * the-way default that's still guaranteed to land before a normal day
- * starts, rather than an arbitrary daytime hour that might already have
- * passed by the time the to-do is saved. Exported as a single named
- * constant (not a literal duplicated at every call site) so
- * services/ai/transformationEngine.ts, services/todos/todoManager.ts, and
- * components/TodoItemRow.tsx's "only show a time badge when it's NOT the
- * default" check can never drift out of sync with the column's own default
- * below. */
+/** Historical SQL-level fallback ONLY — this table's own column default
+ * (see `notificationTime` below and db/client.ts's matching raw-SQL
+ * migration default) and the safety-net read in services/todos/todoManager.ts
+ * for a legacy row whose `notification_time` is somehow null. NOT the
+ * default a new to-do actually gets today — see `computeDefaultReminderDateTime`
+ * below for that (both the voice-extraction pipeline and the manual add-to-do
+ * form call it, never this constant, when they need to invent a reminder
+ * time from nothing). Kept only so those old-row-fallback reads have a
+ * defined value; changing it would not change what any NEW to-do defaults
+ * to. */
 export const DEFAULT_NOTIFICATION_TIME = "05:00";
+
+/** The hour (24h) a defaulted reminder lands on when nothing else was ever
+ * specified — see `computeDefaultReminderDateTime` just below. Explicit
+ * product decision, not a bug fix: this app deliberately never asks the
+ * user a clarifying "what time did you mean?" question — it always creates
+ * SOMETHING so a vague reminder still shows up to be ticked off — but 5 AM
+ * (`DEFAULT_NOTIFICATION_TIME` above) is a time almost nobody is awake to
+ * see, where 1 PM is a normal, useful fallback. Lives here, not in
+ * services/ai/extractionLogic.ts, specifically so the manual add-to-do form
+ * (components/AddTodoBottomSheet.tsx) can use the exact same default
+ * without importing anything from the AI/Llama module graph. */
+export const DEFAULT_REMINDER_HOUR = 13;
+export const DEFAULT_REMINDER_TIME = "13:00";
+
+function formatIsoDateLocal(date: Date): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * The actionDate/notificationTime pair to fall back to when a to-do is
+ * being created with NO date or time information at all. Time-of-day
+ * aware, not just date aware: a reminder created before 1 PM defaults to
+ * 1 PM THAT day; one created at or after 1 PM defaults to 1 PM the NEXT
+ * day — otherwise a to-do created at, say, 3 PM would default to "today at
+ * 1 PM," a reminder time already in the past the instant it's created
+ * (which either fires immediately, or never, depending on the scheduler —
+ * either way not a real reminder).
+ */
+export function computeDefaultReminderDateTime(now: Date): { actionDate: string; notificationTime: string } {
+  const target = new Date(now);
+  if (now.getHours() >= DEFAULT_REMINDER_HOUR) {
+    target.setDate(target.getDate() + 1);
+  }
+  return { actionDate: formatIsoDateLocal(target), notificationTime: DEFAULT_REMINDER_TIME };
+}
 
 /**
  * A single actionable to-do, either entered directly or extracted from a

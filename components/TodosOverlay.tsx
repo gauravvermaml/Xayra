@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Alert, FlatList, StyleSheet, Text, TextInput, View } from "react-native";
+import { Alert, StyleSheet, Text, TextInput, View } from "react-native";
 import { TouchableOpacity } from "react-native-gesture-handler";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 
 import { AddTodoBottomSheet } from "./AddTodoBottomSheet";
+import { CalendarBody } from "./calendar/CalendarBody";
+import { CalendarViewSelector } from "./calendar/CalendarViewSelector";
+import { TaskPreviewSheet } from "./calendar/TaskPreviewSheet";
 import { NoteDetailModal } from "./NoteDetailModal";
-import { TodoItemRow } from "./TodoItemRow";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import type { Recurrence } from "../db/schema";
+import { useCalendarViewStore } from "../hooks/useCalendarViewStore";
 import { useToDos } from "../hooks/useToDos";
 import { matchesKeywordSearch } from "../services/search/keywordMatch";
 import type { ToDo } from "../services/todos/todoManager";
@@ -52,7 +55,17 @@ export type TodosOverlayProps = {
  */
 export function TodosOverlay({ onClose }: TodosOverlayProps) {
   const insets = useSafeAreaInsets();
-  const { todos, pendingCount, addToDo, updateToDo, completeToDo, deleteToDo } = useToDos();
+  const { todos, allTodos, pendingCount, addToDo, updateToDo, completeToDo, deleteToDo } = useToDos();
+  const {
+    layoutMode,
+    setLayoutMode,
+    selectedDate,
+    setSelectedDate,
+    activeRange,
+    goToToday,
+    goToPrevious,
+    goToNext,
+  } = useCalendarViewStore();
 
   const [isAddVisible, setIsAddVisible] = useState(false);
   // Phase 2 Step 4 follow-up: the same AddTodoBottomSheet doubles as the
@@ -62,6 +75,12 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
   // a brand-new one (`isAddVisible` covers that case instead).
   const [editingTodo, setEditingTodo] = useState<ToDo | null>(null);
   const [viewingNoteId, setViewingNoteId] = useState<string | null>(null);
+  // Week/Work Week's own two-step tap: tapping a reminder chip in the grid
+  // opens this single-task preview card first (see TaskPreviewSheet.tsx's
+  // own doc comment for why those two views specifically need it), rather
+  // than jumping straight into the full multi-field edit sheet the way
+  // Day/Month already do.
+  const [previewTodo, setPreviewTodo] = useState<ToDo | null>(null);
   // Plain client-side keyword filter — this app's to-do count is small
   // enough (extracted from notes + manually added) that a full search
   // index would be overkill; a simple case-insensitive substring match
@@ -136,6 +155,45 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
     setEditingTodo(item);
   }, []);
 
+  const handlePreviewTask = useCallback((item: ToDo) => {
+    setPreviewTodo(item);
+  }, []);
+
+  // Tapping the preview card itself — closes the preview and opens the real
+  // edit sheet, completing Week/Work Week's two-step (see
+  // TaskPreviewSheet.tsx's own doc comment). The check/delete actions below
+  // close the preview too, rather than leaving it open over a task that's
+  // about to disappear or change state out from under it.
+  const handleOpenFromPreview = useCallback(
+    (item: ToDo) => {
+      setPreviewTodo(null);
+      handleEditDetails(item);
+    },
+    [handleEditDetails]
+  );
+
+  const handleCheckFromPreview = useCallback(
+    (item: ToDo) => {
+      setPreviewTodo(null);
+      handleCheck(item);
+    },
+    [handleCheck]
+  );
+
+  const handleDeleteFromPreview = useCallback(
+    (item: ToDo) => {
+      setPreviewTodo(null);
+      handleLongPressDelete(item);
+    },
+    [handleLongPressDelete]
+  );
+
+  // The four grid layouts all receive the SAME `onOpenTask` from
+  // CalendarBody — Week/Work Week route through the preview card instead of
+  // straight to the edit sheet; Day and Month keep today's direct-to-edit
+  // behavior (Month already has its own two-step via the day panel below).
+  const handleGridOpenTask = layoutMode === "week" || layoutMode === "work_week" ? handlePreviewTask : handleEditDetails;
+
   // One handler for both the Add and Edit sheets, since they're the same
   // component in two modes (see `editingTodo`'s own doc comment) — branches
   // on whether an existing to-do is being edited to decide addToDo vs
@@ -171,17 +229,15 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
     [todos, pendingId, searchQuery]
   );
 
-  const renderItem = useCallback(
-    ({ item }: { item: ToDo }) => (
-      <TodoItemRow
-        item={item}
-        onCheck={handleCheck}
-        onLongPressDelete={handleLongPressDelete}
-        onOpenSourceNote={setViewingNoteId}
-        onEditDetails={handleEditDetails}
-      />
-    ),
-    [handleCheck, handleLongPressDelete, handleEditDetails]
+  // Same undo-window/search narrowing as `visibleTodos` above, sourced from
+  // `allTodos` (pending + completed) instead — feeds the calendar GRID
+  // views only (see CalendarBody's `calendarTodos` prop). Computed even
+  // while `isSearching`, though CalendarBody never actually renders it in
+  // that state (search always forces ScheduleLayout, which reads `todos`) —
+  // harmless, and simpler than conditioning this on isSearching too.
+  const visibleAllTodos = useMemo(
+    () => allTodos.filter((item) => item.id !== pendingId && matchesKeywordSearch(item.text, searchQuery)),
+    [allTodos, pendingId, searchQuery]
   );
 
   return (
@@ -207,6 +263,16 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
           </TouchableOpacity>
         </View>
 
+        {/* Calendar View System — spec placement: the layout-mode dropdown
+            sits directly below the header and immediately above the search
+            input; the sticky date navigator + active grid layout
+            (CalendarBody) sit below the search bar instead, since neither
+            is contiguous with the selector. See CalendarBody.tsx's own doc
+            comment for why it's split this way. */}
+        <View style={styles.selectorRow}>
+          <CalendarViewSelector mode={layoutMode} onChange={setLayoutMode} />
+        </View>
+
         <View style={styles.searchBar}>
           <Feather name="search" size={16} color={colors.textMuted} />
           <TextInput
@@ -225,19 +291,34 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
           )}
         </View>
 
-        <FlatList
-          data={visibleTodos}
-          keyExtractor={(item) => item.id}
-          renderItem={renderItem}
-          contentContainerStyle={styles.listContent}
-          ItemSeparatorComponent={() => <View style={styles.itemGap} />}
-          ListEmptyComponent={
-            <Text style={styles.emptyText}>
-              {searchQuery.trim()
-                ? `No to-dos match "${searchQuery.trim()}".`
-                : "To-dos extracted from your notes — or added directly — will show up here."}
-            </Text>
-          }
+        <CalendarBody
+          mode={layoutMode}
+          selectedDate={selectedDate}
+          onSelectDate={setSelectedDate}
+          activeRange={activeRange}
+          onPrevious={goToPrevious}
+          onNext={goToNext}
+          onToday={goToToday}
+          todos={visibleTodos}
+          calendarTodos={visibleAllTodos}
+          isSearching={searchQuery.trim().length > 0}
+          // Search results always render as Schedule-style cards (see
+          // CalendarBody's own doc comment) regardless of which grid mode is
+          // selected, so they open straight to edit — the preview-card step
+          // only applies to Week/Work Week's own inline grid chips.
+          onOpenTask={searchQuery.trim().length > 0 ? handleEditDetails : handleGridOpenTask}
+          onCheckTask={handleCheck}
+          onOpenSourceNote={setViewingNoteId}
+          onLongPressDelete={handleLongPressDelete}
+        />
+
+        <TaskPreviewSheet
+          item={previewTodo}
+          onClose={() => setPreviewTodo(null)}
+          onOpenTask={handleOpenFromPreview}
+          onCheckTask={handleCheckFromPreview}
+          onOpenSourceNote={setViewingNoteId}
+          onLongPressDelete={handleDeleteFromPreview}
         />
 
         {pendingId && (
@@ -330,19 +411,9 @@ const styles = StyleSheet.create({
     fontSize: 15,
     padding: 0,
   },
-  listContent: {
-    paddingBottom: 120,
-    paddingHorizontal: 16,
-  },
-  itemGap: {
-    height: spacing.sm,
-  },
-  emptyText: {
-    color: colors.textMuted,
-    ...typography.body,
-    textAlign: "center",
-    marginTop: spacing.xxl,
-    paddingHorizontal: spacing.xl,
+  selectorRow: {
+    paddingHorizontal: spacing.base,
+    marginBottom: spacing.md,
   },
   snackbar: {
     position: "absolute",

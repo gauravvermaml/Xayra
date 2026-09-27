@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   buildPrompt,
+  containsExtractionTrigger,
   detectDatePhrases,
   setExtractionPromptMode,
   normalizeExtracted,
@@ -60,10 +61,25 @@ async function loadCorpus(path: string): Promise<EvalCase[]> {
  * real result (schema non-compliance), not a harness error, so it is caught
  * and reported as `null` rather than aborting the run.
  */
+/** A fixed, reproducible stand-in for "now" — 9 AM on the case's own
+ * `today` — so the before/after-1pm default-reminder-time branch (see
+ * computeDefaultReminderDateTime in extractionLogic.ts) scores identically
+ * regardless of what wall-clock time this harness happens to run at. 9 AM
+ * is deliberately before the 1pm cutoff, matching what every existing
+ * corpus expectation around a defaulted date/time was already written
+ * against.
+ */
+function evalCaseNow(evalCase: EvalCase): Date {
+  const [year, month, day] = evalCase.today.split("-").map(Number);
+  return new Date(year, month - 1, day, 9, 0);
+}
+
 function parseAndReconcile(rawOutput: string, evalCase: EvalCase, detectedPhrases: string[]): ExtractedToDo[] | null {
   try {
     const parsed = parseExtractionOutput(rawOutput);
-    return normalizeExtracted(parsed, evalCase.today, evalCase.note, detectedPhrases);
+    // `true`: runCase only reaches this point after containsExtractionTrigger
+    // has already passed, mirroring extractToDosFromText's own call.
+    return normalizeExtracted(parsed, evalCase.today, evalCase.note, detectedPhrases, true, evalCaseNow(evalCase));
   } catch {
     return null;
   }
@@ -101,6 +117,14 @@ async function runRagCase(evalCase: EvalCase, modelPath: string): Promise<CaseSc
 async function runCase(evalCase: EvalCase, modelPath: string): Promise<CaseScore> {
   if (evalCase.kind === "rag") {
     return runRagCase(evalCase, modelPath);
+  }
+
+  // Mirrors extractToDosFromText()'s own explicit-intent gate — a corpus
+  // case with no "remind me"/"make a note" trigger phrase now correctly
+  // extracts nothing in the real app, so the harness must score that as the
+  // expected `[]` too, not run it through the model anyway.
+  if (!containsExtractionTrigger(evalCase.note)) {
+    return scoreCase(evalCase, [], "[]", 0, 0);
   }
 
   // Mirrors extractToDosFromText()'s own pre-filter short-circuit (Hybrid

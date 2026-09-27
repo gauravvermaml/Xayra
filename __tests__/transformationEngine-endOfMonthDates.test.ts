@@ -36,6 +36,9 @@ import { detectDatePhrases, resolveDateAndTime } from "../services/ai/transforma
 // A Saturday, deliberately mid-month so "end of September" is still ahead of
 // it while "7 days before today" would land in the past.
 const TODAY = "2026-09-19";
+// Before the 1pm default-reminder-time cutoff (see computeDefaultReminderDateTime
+// in extractionLogic.ts) — keeps the past-date-backstop test below deterministic.
+const BEFORE_CUTOFF = new Date(2026, 8, 19, 9, 0);
 
 describe('"end of <month>" phrasing', () => {
   it("resolves the original failing note to 7 days before 30 September, not before today", () => {
@@ -107,7 +110,7 @@ describe("candidate phrases offered to the model", () => {
 describe("past-date backstop", () => {
   it("never returns an action date before today, even for an explicitly backward phrase", () => {
     // "3 days ago" is a note ABOUT the past, not a task to action in it.
-    const { actionDate } = resolveDateAndTime("3 days ago", TODAY, "none");
+    const { actionDate } = resolveDateAndTime("3 days ago", TODAY, "none", BEFORE_CUTOFF);
     expect(actionDate).toBe(TODAY);
   });
 

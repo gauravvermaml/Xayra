@@ -31,6 +31,10 @@ jest.mock("../services/ai/localWhisper", () => ({
 import { normalizeExtracted } from "../services/ai/transformationEngine";
 
 const TODAY = "2026-09-20";
+// Before the 1pm default-reminder-time cutoff (see computeDefaultReminderDateTime
+// in extractionLogic.ts) — keeps the "falls back to today" assertions below
+// deterministic regardless of when this suite actually runs.
+const BEFORE_CUTOFF = new Date(2026, 8, 20, 9, 0);
 
 describe("empty-date auto-fill", () => {
   it("does not borrow a date from a different sentence", () => {
@@ -38,7 +42,9 @@ describe("empty-date auto-fill", () => {
       [{ task: "Read The Overstory", date_phrase: "", recurrence: "none" }],
       TODAY,
       "Eli recommended the book The Overstory. His brother Elias is moving to Perth in January.",
-      ["January"]
+      ["January"],
+      false,
+      BEFORE_CUTOFF
     );
 
     expect(result).toHaveLength(1);
@@ -69,5 +75,24 @@ describe("empty-date auto-fill", () => {
     );
 
     expect(result[0].actionDate).toBe("2026-09-21");
+  });
+
+  it("DOES borrow across a sentence boundary once allowMultiSentenceAutoFill is set", () => {
+    // Same fixture as the first test above, opposite conclusion — this pins
+    // the OTHER direction the `allowMultiSentenceAutoFill` parameter adds.
+    // extractToDosFromText now only calls normalizeExtracted with this flag
+    // true after containsExtractionTrigger has already confirmed the note
+    // was explicitly flagged for a reminder, which is what makes trusting
+    // the lone date candidate safe here where it wasn't before.
+    const result = normalizeExtracted(
+      [{ task: "Read The Overstory", date_phrase: "", recurrence: "none" }],
+      TODAY,
+      "Eli recommended the book The Overstory. His brother Elias is moving to Perth in January.",
+      ["January"],
+      true
+    );
+
+    expect(result).toHaveLength(1);
+    expect(result[0].actionDate).not.toBe(TODAY);
   });
 });

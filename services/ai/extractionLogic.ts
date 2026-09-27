@@ -1,6 +1,6 @@
 import * as chrono from "chrono-node";
 
-import { DEFAULT_NOTIFICATION_TIME, RECURRENCE_OPTIONS, type Recurrence } from "../../db/schema";
+import { computeDefaultReminderDateTime, RECURRENCE_OPTIONS, type Recurrence } from "../../db/schema";
 import { SHARED_XAYRA_PREAMBLE } from "./promptPreamble";
 
 /**
@@ -40,8 +40,8 @@ export type ExtractedToDo = {
   toDate: string | null;
   /** Phase 2 Step 4: 24-hour "HH:MM" local reminder time, extracted from an
    * explicitly spoken/typed clock time in the SAME phrase ("at 3:30 PM") —
-   * see resolveDateAndTime's doc comment. Defaults to
-   * DEFAULT_NOTIFICATION_TIME (05:00) when no time was mentioned. */
+   * see resolveDateAndTime's doc comment. Defaults to 1 PM (see
+   * computeDefaultReminderDateTime) when no time was mentioned. */
   notificationTime: string;
   recurrence: Recurrence;
   /** Multiplier on `recurrence`'s unit — see db/schema.ts's doc comment on
@@ -234,7 +234,11 @@ export function detectDatePhrases(rawText: string, todayISO: string): string[] {
   //
   // The rewritten text is not verbatim from the note, which is fine: a
   // date_phrase is only ever fed back into date resolution, never shown.
-  const results = chrono.parse(expandEndOfMonthPhrases(rawText, referenceDate), referenceDate, { forwardDate: true });
+  const expanded = expandWeekdayPlusDayOfMonthPhrases(
+    expandEndOfMonthPhrases(rawText, referenceDate),
+    referenceDate
+  );
+  const results = chrono.parse(expanded, referenceDate, { forwardDate: true });
 
   const seen = new Set<string>();
   const phrases: string[] = [];
@@ -424,21 +428,90 @@ export function expandEndOfMonthPhrases(text: string, today: Date): string {
   });
 }
 
+const WEEKDAY_NAMES = "monday|tuesday|wednesday|thursday|friday|saturday|sunday";
+
+/** "Tuesday the 22nd", "on Friday the 3rd" — chrono-node has no rule for a
+ * weekday name paired with an explicit day-of-month: it matches only the
+ * weekday as a bare "next occurrence of this weekday" reference and
+ * silently drops "the 22nd" entirely, never surfacing it as a separate
+ * result either. Confirmed directly against chrono 2.x with a reference of
+ * 2026-09-27: `chrono.parse("Tuesday the 22nd at 6:40 am")` returns two
+ * disconnected results — "Tuesday" (resolved to the next Tuesday, ignoring
+ * "22nd" completely) and "at 6:40 am" (a bare time anchored to TODAY, since
+ * nothing else in the string is recognised as attaching to it). Reproduced
+ * from a real on-device note ("Mum's flight lands Tuesday the 22nd at 6:40
+ * am") — the explicit day-of-month, the one detail someone would actually
+ * remember correctly off a boarding pass, was silently discarded.
+ *
+ * The day-of-month is treated as authoritative and the weekday name is
+ * discarded outright, same precedence BARE_DAY_OF_MONTH_PATTERN's fallback
+ * above already gives a bare day-of-month over other signals — a specific
+ * date number is a far more reliable memory than a weekday label, and this
+ * app has no way to tell (nor should it try to adjudicate) whether the two
+ * genuinely agree on the real calendar. `nextDayOfMonth` is reused rather
+ * than duplicated — same "next occurrence of this day, strictly after
+ * today" rule the bare-day-of-month fallback already applies. */
+const WEEKDAY_PLUS_DAY_PATTERN = new RegExp(
+  `\\b(?:on\\s+)?(?:${WEEKDAY_NAMES})\\s+(?:the\\s+)?(\\d{1,2})(?:st|nd|rd|th)?\\b(?!\\s*(?:am|pm|:))`,
+  "gi"
+);
+
+/**
+ * Rewrites "<Weekday> the <Nth>" into an explicit "D Month YYYY" date before
+ * chrono-node ever sees it — same technique and same reason as
+ * expandEndOfMonthPhrases above (chrono silently mishandles the raw
+ * phrasing; an explicit date lets it parse the rest of the sentence, e.g. an
+ * attached clock time, correctly). Confirmed directly: rewriting "Tuesday
+ * the 22nd at 6:40 am" to "22 October 2026 at 6:40 am" collapses chrono's
+ * two disconnected results into one, with the time correctly attached
+ * (`isCertain('hour')` true) — exactly the shape resolveDateAndTime and
+ * detectDatePhrases need to treat this as a single date/time candidate.
+ */
+export function expandWeekdayPlusDayOfMonthPhrases(text: string, today: Date): string {
+  return text.replace(WEEKDAY_PLUS_DAY_PATTERN, (match, dayToken: string) => {
+    const day = Number(dayToken);
+    if (day < 1 || day > 31) {
+      return match;
+    }
+    const resolved = nextDayOfMonth(today, day);
+    return `${day} ${MONTH_LABELS[resolved.getMonth()]} ${resolved.getFullYear()}`;
+  });
+}
+
+// Re-exported (not defined here) so the manual add-to-do form
+// (components/AddTodoBottomSheet.tsx) can use the exact same default without
+// importing anything from this file's AI/Llama module graph — see
+// db/schema.ts's own doc comment on this function for the full rationale.
+export { computeDefaultReminderDateTime } from "../../db/schema";
+
 // Exported for the same test-only reason as
 // WARMUP_TRANSCRIPTION_RECHECK_DELAYS_MS in localLlama.ts: date arithmetic is
 // the part of extraction most worth asserting directly, and reaching it
 // through extractToDosFromText() would mean mocking a whole LLM completion to
 // test pure date math.
-export function resolveDateAndTime(datePhrase: string, todayISO: string, recurrence: Recurrence): ResolvedDateInfo {
+export function resolveDateAndTime(
+  datePhrase: string,
+  todayISO: string,
+  recurrence: Recurrence,
+  // Wall-clock moment used ONLY to decide the defaulted reminder time (see
+  // computeDefaultReminderDateTime) — distinct from todayISO/`today` below,
+  // which is the calendar reference date chrono resolves phrases against.
+  // Defaults to the real current time for production callers; tests pass an
+  // explicit Date so the before/after-1pm branch is deterministic rather
+  // than depending on when the test suite happens to run.
+  now: Date = new Date()
+): ResolvedDateInfo {
   const trimmed = datePhrase.trim();
+  const defaultDateTime = computeDefaultReminderDateTime(now);
   if (!trimmed) {
-    return { actionDate: todayISO, toDate: null, notificationTime: DEFAULT_NOTIFICATION_TIME };
+    return { actionDate: defaultDateTime.actionDate, toDate: null, notificationTime: defaultDateTime.notificationTime };
   }
 
   const today = parseIsoDateLocal(todayISO);
 
   const bareDayMatch = trimmed.match(BARE_DAY_OF_MONTH_PATTERN);
-  const results = chrono.parse(expandEndOfMonthPhrases(trimmed, today), today, { forwardDate: true });
+  const expanded = expandWeekdayPlusDayOfMonthPhrases(expandEndOfMonthPhrases(trimmed, today), today);
+  const results = chrono.parse(expanded, today, { forwardDate: true });
   const result = results[0];
 
   // Only treat this as a bare day-of-month if chrono itself finds no
@@ -448,23 +521,32 @@ export function resolveDateAndTime(datePhrase: string, todayISO: string, recurre
   if (!result && bareDayMatch) {
     const day = Number(bareDayMatch[1]);
     if (day >= 1 && day <= 31) {
+      // actionDate is nextDayOfMonth's own result here, never defaulted —
+      // it's always a real, already-future date (see that function's own
+      // comment), so the before/after-1pm push doesn't apply; only the
+      // reminder TIME needs a fallback.
       return {
         actionDate: formatIsoDate(nextDayOfMonth(today, day)),
         toDate: null,
-        notificationTime: DEFAULT_NOTIFICATION_TIME,
+        notificationTime: defaultDateTime.notificationTime,
       };
     }
   }
 
   if (!result) {
-    return { actionDate: todayISO, toDate: null, notificationTime: DEFAULT_NOTIFICATION_TIME };
+    return { actionDate: defaultDateTime.actionDate, toDate: null, notificationTime: defaultDateTime.notificationTime };
   }
 
   const timeComponent = result.end?.isCertain("hour") ? result.end : result.start;
-  const notificationTime = timeComponent.isCertain("hour") ? formatHHMM(timeComponent.date()) : DEFAULT_NOTIFICATION_TIME;
+  const hasExplicitTime = timeComponent.isCertain("hour");
+  const notificationTime = hasExplicitTime ? formatHHMM(timeComponent.date()) : defaultDateTime.notificationTime;
+  // Only fall through to the (possibly next-day) default action date when
+  // there was no explicit time to protect either — a phrase that DID state
+  // a real clock time keeps today's date here, same as before this change.
+  const noTimeFallbackActionDate = hasExplicitTime ? todayISO : defaultDateTime.actionDate;
 
   if (recurrence !== "none" && NUMERIC_RECURRENCE_INTERVAL_PATTERN.test(trimmed.toLowerCase())) {
-    return { actionDate: todayISO, toDate: null, notificationTime };
+    return { actionDate: noTimeFallbackActionDate, toDate: null, notificationTime };
   }
 
   // A to-do whose action date is already in the past is never useful — it
@@ -482,7 +564,7 @@ export function resolveDateAndTime(datePhrase: string, todayISO: string, recurre
   // as an unparseable phrase already does above.
   const startDate = formatIsoDate(result.start.date());
   if (startDate < todayISO) {
-    return { actionDate: todayISO, toDate: null, notificationTime };
+    return { actionDate: noTimeFallbackActionDate, toDate: null, notificationTime };
   }
 
   return {
@@ -1290,10 +1372,47 @@ const OBSERVATION_VERB_FIRST_RE =
   /^(?:had|felt|feeling|slept|woke|worked|thinking|looking back|realised|realized|funny how|it rained|it snowed|it was)\b/i;
 
 /**
+ * Explicit-intent gate: true only when the note actually asks for a
+ * reminder/to-do, via one of a small set of trigger phrases the user
+ * declares on purpose ("remind me...", "make a note..."). This is checked
+ * BEFORE anything else in extractToDosFromText — a note with no trigger
+ * phrase never reaches the LLM at all, regardless of how task-like its
+ * content might otherwise read.
+ *
+ * This replaces "infer from content whether this is a task" with "the user
+ * told us." The problem that motivated it: a voice note narrating an
+ * afternoon's plans in flowing prose ("we should see them around 12 or
+ * 12:30... then come back home for tea and perhaps dinner") is lexically
+ * indistinguishable from genuine task language — the words "around 12:30"
+ * and "come back home for tea" read exactly like a schedule whether they're
+ * a plan being described or a request being made. No amount of prompt or
+ * fine-tuning work can resolve that ambiguity from the text alone, because
+ * the ambiguity isn't in the text — it's in what the speaker meant by it.
+ * Only the speaker can disambiguate that, which is what this phrase is for.
+ *
+ * Deliberately a plain, literal phrase match — not fuzzy/edit-distance
+ * tolerant like `wordsAreRelated` elsewhere in this file. "Remind me" and
+ * "make a note" are common, short, everyday phrases; broadening the match
+ * risks false-triggering on incidental prose ("that reminds me of..."). If
+ * on-device testing surfaces real Whisper mis-transcriptions of the trigger
+ * itself, add tolerance then, against a confirmed failure, the same
+ * discipline every other guard in this file already follows.
+ */
+export function containsExtractionTrigger(noteText: string): boolean {
+  return /\bremind me\b|\bmake a note\b/i.test(noteText);
+}
+
+/**
  * Deterministic pre-filter for the Hybrid Architecture: true means this note
  * has no task in it and extraction should return `[]` WITHOUT calling the
  * LLM at all. See the module-level comment above for the full rationale and
  * the safety properties this was verified against.
+ *
+ * Runs AFTER containsExtractionTrigger's gate, as a second line of defense
+ * for the (rarer) case where a trigger phrase is present but attributed to
+ * someone else entirely ("she said 'remind me to call you back' when we last
+ * spoke") — the third-party/observation checks below still apply even to a
+ * triggered note.
  */
 export function preFilterZeroTaskNotes(noteText: string): boolean {
   const trimmed = noteText.trim();
@@ -1426,7 +1545,22 @@ export function normalizeExtracted(
   raw: unknown,
   todayISO: string,
   rawNoteText: string,
-  detectedPhrases: string[]
+  detectedPhrases: string[],
+  // Widens the single-candidate auto-fill below (see its own comment) to
+  // multi-sentence notes. Defaults to false so every existing caller/test
+  // keeps today's exact behavior; extractToDosFromText passes true, because
+  // by the time it calls this, containsExtractionTrigger has already
+  // confirmed the note's ONE surviving task is the one the user explicitly
+  // asked to be reminded about — the cross-sentence ambiguity the
+  // single-sentence restriction guards against (a lone date candidate
+  // belonging to some OTHER, unrelated clause) is far less likely once the
+  // note was only ever extracted because of a deliberate trigger phrase.
+  allowMultiSentenceAutoFill = false,
+  // Threaded straight through to resolveDateAndTime's own `now` param — see
+  // its doc comment. Kept as a parameter (not read fresh here via `new
+  // Date()`) so a single call to extractToDosFromText resolves every task's
+  // default consistently from one moment, and so tests stay deterministic.
+  now: Date = new Date()
 ): ExtractedToDo[] {
   if (!Array.isArray(raw)) {
     return [];
@@ -1493,7 +1627,7 @@ export function normalizeExtracted(
       validEntries.length === 1 &&
       detectedPhrases.length === 1 &&
       recurrence === "none" &&
-      isSingleSentence(rawNoteText)
+      (isSingleSentence(rawNoteText) || allowMultiSentenceAutoFill)
     ) {
       // The one case that's genuinely safe to auto-fill: a single-task,
       // NON-recurring note where chrono found exactly one date candidate
@@ -1531,7 +1665,15 @@ export function normalizeExtracted(
       // Requiring a single sentence keeps the original motivating fix
       // ("Book a movie ticket this Friday.") working while refusing to
       // guess across sentence boundaries. A multi-sentence note simply
-      // falls back to the no-date default, which is the safe direction.
+      // falls back to the no-date default, which is the safe direction —
+      // UNLESS `allowMultiSentenceAutoFill` is set (see that parameter's own
+      // comment): once extraction only ever runs on a note the user
+      // explicitly flagged with a trigger phrase, this exact cross-sentence
+      // shape stops being a coincidence to guard against and becomes the
+      // expected common case ("Mum's flight lands Tuesday the 22nd at
+      // 6:40am. Remind me to arrange the airport pickup." — the one task and
+      // the one date candidate are different sentences ON PURPOSE, not by
+      // accident).
       datePhrase = detectedPhrases[0];
     }
     // Multi-task, multi-candidate notes are deliberately left alone here —
@@ -1549,7 +1691,7 @@ export function normalizeExtracted(
     // examples remain the right tool for (same as recurrence
     // classification), not something a heuristic here can safely guess.
 
-    const { actionDate, toDate, notificationTime } = resolveDateAndTime(datePhrase, todayISO, recurrence);
+    const { actionDate, toDate, notificationTime } = resolveDateAndTime(datePhrase, todayISO, recurrence, now);
     const recurrenceInterval = resolveRecurrenceInterval(datePhrase, recurrence);
 
     results.push({ task, actionDate, toDate, notificationTime, recurrence, recurrenceInterval });

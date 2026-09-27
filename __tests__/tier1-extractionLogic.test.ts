@@ -32,6 +32,8 @@ jest.mock("../services/ai/localWhisper", () => ({
 }));
 
 import {
+  computeDefaultReminderDateTime,
+  containsExtractionTrigger,
   detectDatePhrases,
   normalizeExtracted,
   preFilterZeroTaskNotes,
@@ -40,6 +42,12 @@ import {
 import { formatNoteContext, sanitizeLLMResponse, truncateForContext } from "../services/ai/ragFormatting";
 
 const TODAY = "2026-09-20"; // Sunday
+// Used wherever a test exercises the "no date/time info at all" default
+// (see computeDefaultReminderDateTime) — BEFORE_CUTOFF keeps the default on
+// TODAY, matching every pre-existing assertion; AFTER_CUTOFF is for the new
+// tests that pin the next-day push.
+const BEFORE_CUTOFF = new Date(2026, 8, 20, 9, 0);
+const AFTER_CUTOFF = new Date(2026, 8, 20, 15, 0);
 
 /** The shape the model returns, before reconciliation. */
 function modelSaid(task: string, date_phrase = "", recurrence = "none") {
@@ -65,12 +73,12 @@ describe("date resolution - relative phrases", () => {
     expect(resolveDateAndTime("March 3rd", TODAY, "none").actionDate).toBe("2027-03-03");
   });
 
-  it("falls back to today when the phrase is empty", () => {
-    expect(resolveDateAndTime("", TODAY, "none").actionDate).toBe(TODAY);
+  it("falls back to today when the phrase is empty (before the 1pm cutoff)", () => {
+    expect(resolveDateAndTime("", TODAY, "none", BEFORE_CUTOFF).actionDate).toBe(TODAY);
   });
 
-  it("falls back to today when the phrase is unparseable", () => {
-    expect(resolveDateAndTime("sometime whenever", TODAY, "none").actionDate).toBe(TODAY);
+  it("falls back to today when the phrase is unparseable (before the 1pm cutoff)", () => {
+    expect(resolveDateAndTime("sometime whenever", TODAY, "none", BEFORE_CUTOFF).actionDate).toBe(TODAY);
   });
 });
 
@@ -90,7 +98,86 @@ describe("date resolution - ranges and clock times", () => {
   });
 
   it("uses the default reminder time when no clock time is stated", () => {
-    expect(resolveDateAndTime("tomorrow", TODAY, "none").notificationTime).toBe("05:00");
+    expect(resolveDateAndTime("tomorrow", TODAY, "none", BEFORE_CUTOFF).notificationTime).toBe("13:00");
+  });
+});
+
+describe("computeDefaultReminderDateTime", () => {
+  it("stays on the same day just before the cutoff", () => {
+    const result = computeDefaultReminderDateTime(new Date(2026, 8, 20, 12, 59));
+    expect(result).toEqual({ actionDate: "2026-09-20", notificationTime: "13:00" });
+  });
+
+  it("rolls to the next day exactly at the cutoff", () => {
+    const result = computeDefaultReminderDateTime(new Date(2026, 8, 20, 13, 0));
+    expect(result).toEqual({ actionDate: "2026-09-21", notificationTime: "13:00" });
+  });
+});
+
+describe("default reminder date/time - 1pm cutoff", () => {
+  it("defaults to 1pm the SAME day when created before 1pm", () => {
+    const result = resolveDateAndTime("", TODAY, "none", BEFORE_CUTOFF);
+    expect(result.actionDate).toBe(TODAY);
+    expect(result.notificationTime).toBe("13:00");
+  });
+
+  it("defaults to 1pm the NEXT day when created at or after 1pm", () => {
+    const result = resolveDateAndTime("", TODAY, "none", AFTER_CUTOFF);
+    expect(result.actionDate).toBe("2026-09-21");
+    expect(result.notificationTime).toBe("13:00");
+  });
+
+  it("pushes to the next day exactly AT the cutoff hour, not just after it", () => {
+    const atCutoff = new Date(2026, 8, 20, 13, 0);
+    expect(resolveDateAndTime("", TODAY, "none", atCutoff).actionDate).toBe("2026-09-21");
+  });
+
+  it("rolls across a month boundary correctly", () => {
+    const lateOnLastDay = new Date(2026, 8, 30, 15, 0); // Sep 30, 3pm
+    expect(resolveDateAndTime("", "2026-09-30", "none", lateOnLastDay).actionDate).toBe("2026-10-01");
+  });
+
+  it("does not push a phrase that carries its own explicit time", () => {
+    // "6pm" is a real, explicit time — the cutoff logic only applies when
+    // there is nothing to go on at all.
+    const result = resolveDateAndTime("at 6pm", TODAY, "none", AFTER_CUTOFF);
+    expect(result.actionDate).toBe(TODAY);
+    expect(result.notificationTime).toBe("18:00");
+  });
+
+  it("does not push the bare day-of-month fallback, which is already a future date", () => {
+    const result = resolveDateAndTime("25th", TODAY, "none", AFTER_CUTOFF);
+    expect(result.actionDate).toBe("2026-09-25");
+    expect(result.notificationTime).toBe("13:00");
+  });
+});
+
+describe("date resolution - weekday plus explicit day-of-month", () => {
+  it("prioritizes the explicit day-of-month over the weekday name", () => {
+    // Real on-device miss: chrono has no rule combining a weekday with a
+    // day-of-month, so it used to match only "Tuesday" (the next Tuesday)
+    // and silently drop "22nd" entirely.
+    const { actionDate, notificationTime } = resolveDateAndTime("Tuesday the 22nd at 6:40 am", TODAY, "none");
+    expect(actionDate).toBe("2026-09-22");
+    expect(notificationTime).toBe("06:40");
+  });
+
+  it("rolls into next month once the day-of-month has passed", () => {
+    expect(resolveDateAndTime("Friday the 3rd", TODAY, "none").actionDate).toBe("2026-10-03");
+  });
+});
+
+describe("date-phrase detection - weekday plus explicit day-of-month", () => {
+  it("detects one combined candidate instead of two disconnected ones", () => {
+    // Before the fix, this produced ["Tuesday", "at 6:40 am"] — two
+    // fragments, which meant the single-candidate auto-fill in
+    // normalizeExtracted could never apply even after relaxing its
+    // multi-sentence restriction.
+    const phrases = detectDatePhrases(
+      "Mum's flight lands Tuesday the 22nd at 6:40 am, terminal 1. Remind me to arrange the airport pickup.",
+      TODAY
+    );
+    expect(phrases).toHaveLength(1);
   });
 });
 
@@ -108,7 +195,7 @@ describe("date resolution - recurrence interaction", () => {
   it("does not treat the N in 'every N days' as a one-off date", () => {
     // chrono reads "3 days" inside "every 3 days" as a relative date. For a
     // recurring task that is a cadence, not an action date.
-    expect(resolveDateAndTime("every 3 days", TODAY, "daily").actionDate).toBe(TODAY);
+    expect(resolveDateAndTime("every 3 days", TODAY, "daily", BEFORE_CUTOFF).actionDate).toBe(TODAY);
   });
 
   it("still resolves a real date on a recurring task without a numeric interval", () => {
@@ -118,7 +205,10 @@ describe("date resolution - recurrence interaction", () => {
 
 describe("date resolution - past-date backstop", () => {
   it.each([["3 days ago"], ["yesterday"], ["last week"]])("clamps a backward phrase (%s) to today", (phrase) => {
-    expect(resolveDateAndTime(phrase, TODAY, "none").actionDate >= TODAY).toBe(true);
+    // >= rather than exact equality: none of these phrases carry an
+    // explicit time, so the result could legitimately be pushed to
+    // tomorrow depending on `now` — either way it must never be in the past.
+    expect(resolveDateAndTime(phrase, TODAY, "none", BEFORE_CUTOFF).actionDate >= TODAY).toBe(true);
   });
 });
 
@@ -186,7 +276,9 @@ describe("reconciliation - hallucinated date phrases", () => {
       modelSaid("Call the plumber", "next Tuesday"),
       TODAY,
       "Call the plumber about the leak.",
-      []
+      [],
+      false,
+      BEFORE_CUTOFF
     );
     expect(result[0].actionDate).toBe(TODAY);
   });
@@ -245,7 +337,9 @@ describe("reconciliation - empty-date auto-fill", () => {
       modelSaid("Read The Overstory"),
       TODAY,
       "Eli recommended The Overstory. His brother Elias is moving to Perth in January.",
-      ["January"]
+      ["January"],
+      false,
+      BEFORE_CUTOFF
     );
     expect(result[0].actionDate).toBe(TODAY);
   });
@@ -258,7 +352,9 @@ describe("reconciliation - empty-date auto-fill", () => {
       ],
       TODAY,
       "Buy milk and call the bank tomorrow",
-      ["tomorrow"]
+      ["tomorrow"],
+      false,
+      BEFORE_CUTOFF
     );
     expect(result.every((r) => r.actionDate === TODAY)).toBe(true);
   });
@@ -268,9 +364,47 @@ describe("reconciliation - empty-date auto-fill", () => {
       [{ task: "Water the plants", date_phrase: "", recurrence: "daily" }],
       TODAY,
       "Water the plants every 3 days",
-      ["3 days"]
+      ["3 days"],
+      false,
+      BEFORE_CUTOFF
     );
     expect(result[0].actionDate).toBe(TODAY);
+  });
+
+  it("DOES borrow a date across a sentence boundary when allowMultiSentenceAutoFill is set", () => {
+    // Same shape as "refuses to borrow a date across a sentence boundary"
+    // above, but this is the case the trigger-phrase gate exists to enable:
+    // a note only ever reaches extraction because it contains "remind me" /
+    // "make a note", so once there is exactly one task and exactly one date
+    // candidate, they belong together even across a sentence break.
+    const result = normalizeExtracted(
+      modelSaid("Arrange the airport pickup"),
+      TODAY,
+      "Mum's flight lands Tuesday the 22nd at 6:40am, terminal 1. Remind me to arrange the airport pickup.",
+      ["Tuesday the 22nd at 6:40am"],
+      true
+    );
+    expect(result[0].actionDate).not.toBe(TODAY);
+  });
+});
+
+describe("extraction trigger phrase gating", () => {
+  it.each([
+    "Remind me to call the plumber tomorrow.",
+    "REMIND ME to call the plumber tomorrow.",
+    "Make a note to buy milk.",
+    "So yeah, remind me to renew the library subscription.",
+  ])("recognizes an explicit trigger phrase: %s", (note) => {
+    expect(containsExtractionTrigger(note)).toBe(true);
+  });
+
+  it.each([
+    "We should see them around 12:30 this afternoon.",
+    "Feeling much better today than yesterday.",
+    "",
+    "   ",
+  ])("finds no trigger in plain journal text: %s", (note) => {
+    expect(containsExtractionTrigger(note)).toBe(false);
   });
 });
 

@@ -6,10 +6,11 @@ import BottomSheet, {
   BottomSheetTextInput,
   type BottomSheetBackdropProps,
 } from "@gorhom/bottom-sheet";
+import DateTimePicker, { type DateTimePickerEvent } from "@react-native-community/datetimepicker";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
-import { DEFAULT_NOTIFICATION_TIME, RECURRENCE_OPTIONS, type Recurrence } from "../db/schema";
+import { computeDefaultReminderDateTime, RECURRENCE_OPTIONS, type Recurrence } from "../db/schema";
 import type { ToDo } from "../services/todos/todoManager";
 
 export type AddTodoBottomSheetProps = {
@@ -53,30 +54,49 @@ function addDays(iso: string, days: number): string {
   return formatIsoDate(date);
 }
 
-/** Manual-entry validation for the "Custom" date field: exactly
- * YYYY-MM-DD, and the pieces have to form a real calendar date — e.g.
- * "2026-02-30" is the right shape but not a real day, and `new Date`
- * would silently roll it over into March rather than reject it. */
-function isValidIsoDate(value: string): boolean {
-  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!match) {
-    return false;
-  }
-  const [, yearStr, monthStr, dayStr] = match;
-  const year = Number(yearStr);
-  const month = Number(monthStr);
-  const day = Number(dayStr);
-  const date = new Date(year, month - 1, day);
-  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+/** Parses a plain YYYY-MM-DD into a local-midnight `Date` — the input each
+ * `DateTimePicker` (mode="date") needs for its own `value`/`minimumDate`
+ * props — via local year/month/day components, never `new Date(iso)`
+ * (which JS parses as UTC midnight, the same off-by-one-day trap this
+ * file's own `todayIso`/`addDays` already avoid). */
+function isoToDate(iso: string): Date {
+  const [year, month, day] = iso.split("-").map(Number);
+  return new Date(year, month - 1, day);
 }
 
-/** Quick-pick chips for the common cases, plus a "Custom" chip that reveals
- * a plain typed YYYY-MM-DD field for everything else. A full calendar
- * widget (e.g. `@react-native-community/datetimepicker`) would need a new
- * native dependency and the prebuild/run:android cycle that entails — not
- * worth it for a field that, per the user's own use case, is very often
- * just "today" or "tomorrow" anyway. Revisit with a real native picker if
- * "Custom" turns out to be the common case in practice. */
+/** "HH:MM" -> a `Date` carrying just that time (today's date, ignored) —
+ * `DateTimePicker` (mode="time") needs a full `Date` for its `value` even
+ * though only the hour/minute actually matter here. */
+function timeToDate(hhmm: string): Date {
+  const [hour, minute] = hhmm.split(":").map(Number);
+  const date = new Date();
+  date.setHours(hour, minute, 0, 0);
+  return date;
+}
+
+function dateToTime(date: Date): string {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+const MONTH_ABBR = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+] as const;
+
+/** "Oct 3" for the "Custom" chip's own label once a date has actually been
+ * picked — day+abbreviated-month, spelled out manually rather than via
+ * `toLocaleDateString` so the word order doesn't drift by device locale,
+ * same reasoning as TodoItemRow.tsx's identical-shaped formatter. */
+function formatShortDate(iso: string): string {
+  const [, month, day] = iso.split("-").map(Number);
+  return `${MONTH_ABBR[month - 1]} ${day}`;
+}
+
+/** Quick-pick chips for the common cases, plus a "Custom" chip that opens
+ * the native date picker for everything else. A first version of this
+ * field required typing an exact "YYYY-MM-DD" by hand behind "Custom" —
+ * replaced per explicit user request for a real native picker instead: no
+ * format to get wrong, and no regex to validate against in the first
+ * place (the OS dialog can only ever hand back a real calendar date). */
 const DATE_PRESETS: { label: string; getIso: (today: string) => string }[] = [
   { label: "Today", getIso: (today) => today },
   { label: "Tomorrow", getIso: (today) => addDays(today, 1) },
@@ -95,30 +115,22 @@ const TO_DATE_PRESETS: { label: string; getIso: (fromIso: string) => string | nu
 ];
 
 /** Phase 2 Step 4: same quick-pick-plus-custom pattern as the date presets
- * above, for the reminder's time-of-day. "5:00 AM" is
- * DEFAULT_NOTIFICATION_TIME itself, included as a preset so a user who
- * opened "Custom" by mistake (or wants to explicitly confirm the default)
- * has a one-tap way back to it. */
+ * above, for the reminder's time-of-day. "1:00 PM" matches
+ * computeDefaultReminderDateTime's own default (db/schema.ts) — included as
+ * a preset so a user who opened "Custom" by mistake (or wants to explicitly
+ * confirm the default) has a one-tap way back to it. */
 const TIME_PRESETS: { label: string; value: string }[] = [
-  { label: "5:00 AM", value: DEFAULT_NOTIFICATION_TIME },
+  { label: "1:00 PM", value: "13:00" },
   { label: "9:00 AM", value: "09:00" },
   { label: "6:00 PM", value: "18:00" },
 ];
 
-/** Manual-entry validation for the "Custom" time field: exactly HH:MM,
- * 24-hour, with real hour/minute ranges (00–23 / 00–59) — mirrors
- * isValidIsoDate's shape-plus-range approach above rather than trusting the
- * regex alone. */
-function isValidTime(value: string): boolean {
-  const match = value.match(/^([01]\d|2[0-3]):([0-5]\d)$/);
-  return match !== null;
-}
-
-/** "15:30" -> "3:30 PM" — this file's own display format for the time
- * picker's preview text; components/TodoItemRow.tsx has its own identical
- * formatter for the saved badge (kept separate rather than shared, same
- * "small enough to duplicate, not worth a cross-component util for" call as
- * this file's other small formatters). */
+/** "15:30" -> "3:30 PM" — this file's own display format for the "Custom"
+ * time chip's own label once a time has actually been picked;
+ * components/TodoItemRow.tsx has its own identical formatter for the saved
+ * badge (kept separate rather than shared, same "small enough to
+ * duplicate, not worth a cross-component util for" call as this file's
+ * other small formatters). */
 function formatTime12h(hhmm: string): string {
   const [hour, minute] = hhmm.split(":").map(Number);
   const period = hour >= 12 ? "PM" : "AM";
@@ -198,12 +210,20 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
   const [recurrence, setRecurrence] = useState<Recurrence>("none");
   // `actionDate` always holds the resolved ISO date that will actually be
   // saved. `isCustomDate` just tracks which chip is visually selected —
-  // "Custom" doesn't get its own iso value until the typed field is valid,
-  // so `actionDate` stays whatever it last was (defaulting to today) until
-  // then, rather than saving with an empty/invalid date.
-  const [actionDate, setActionDate] = useState(todayIso());
+  // whether the active value came from a preset tap or the native date
+  // picker (`showDatePicker` — see the render below, and this file's own
+  // top-level doc comment for why a real OS picker replaced a typed field
+  // here). There is no "invalid" state to track anymore: the OS dialog can
+  // only ever hand back a real calendar date.
+  // actionDate/notificationTime both seed from computeDefaultReminderDateTime
+  // (db/schema.ts) — the same 1pm-same-day/1pm-next-day rule the voice-
+  // extraction pipeline uses, so a to-do left untouched in this form defaults
+  // identically regardless of which entry point created it. Computed once per
+  // mount via a lazy initializer (not re-evaluated on every render) so both
+  // fields seed from the exact same "now" instant.
+  const [actionDate, setActionDate] = useState(() => computeDefaultReminderDateTime(new Date()).actionDate);
   const [isCustomDate, setIsCustomDate] = useState(false);
-  const [customDateText, setCustomDateText] = useState("");
+  const [showDatePicker, setShowDatePicker] = useState(false);
 
   // Phase 2 Step 4: optional end-of-range date. `toDate` is null by default
   // (plain single-day to-do) — unlike `actionDate`, "no value selected" is
@@ -211,13 +231,13 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
   // before a chip is tapped.
   const [toDate, setToDate] = useState<string | null>(null);
   const [isCustomToDate, setIsCustomToDate] = useState(false);
-  const [customToDateText, setCustomToDateText] = useState("");
+  const [showToDatePicker, setShowToDatePicker] = useState(false);
 
-  // Phase 2 Step 4: reminder time-of-day, same quick-pick-plus-custom shape
-  // as the date fields above.
-  const [notificationTime, setNotificationTime] = useState(DEFAULT_NOTIFICATION_TIME);
+  // Phase 2 Step 4: reminder time-of-day, same quick-pick-plus-native-
+  // picker shape as the date fields above.
+  const [notificationTime, setNotificationTime] = useState(() => computeDefaultReminderDateTime(new Date()).notificationTime);
   const [isCustomTime, setIsCustomTime] = useState(false);
-  const [customTimeText, setCustomTimeText] = useState("");
+  const [showTimePicker, setShowTimePicker] = useState(false);
 
   useEffect(() => {
     if (visible) {
@@ -226,9 +246,10 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
         // the whole point of this prop (see its own doc comment). Each
         // "isCustomX" flag is derived by checking whether the saved value
         // matches one of that field's own presets; if it doesn't, the
-        // corresponding "Custom" chip is what should show as active, with
-        // its typed field seeded from the real value (never a normal-
-        // looking empty state a resumed edit shouldn't have).
+        // corresponding "Custom" chip is what should show as active,
+        // displaying that real value (see formatShortDate/formatTime12h at
+        // the render site) rather than a normal-looking empty state a
+        // resumed edit shouldn't have.
         setText(editingTodo.text);
         setRecurrence(editingTodo.recurrence);
 
@@ -236,19 +257,16 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
         setActionDate(editingTodo.actionDate);
         const matchesDatePreset = DATE_PRESETS.some((preset) => preset.getIso(today) === editingTodo.actionDate);
         setIsCustomDate(!matchesDatePreset);
-        setCustomDateText(editingTodo.actionDate);
 
         setToDate(editingTodo.toDate);
         const matchesToDatePreset = TO_DATE_PRESETS.some(
           (preset) => preset.getIso(editingTodo.actionDate) === editingTodo.toDate
         );
         setIsCustomToDate(!matchesToDatePreset);
-        setCustomToDateText(editingTodo.toDate ?? "");
 
         setNotificationTime(editingTodo.notificationTime);
         const matchesTimePreset = TIME_PRESETS.some((preset) => preset.value === editingTodo.notificationTime);
         setIsCustomTime(!matchesTimePreset);
-        setCustomTimeText(editingTodo.notificationTime);
       }
       sheetRef.current?.snapToIndex(0);
     } else {
@@ -261,17 +279,18 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
   // so form state always resets exactly once, from a single path, rather
   // than every closing gesture needing its own reset call.
   const handleSheetClosed = useCallback(() => {
+    const defaultReminder = computeDefaultReminderDateTime(new Date());
     setText("");
     setRecurrence("none");
-    setActionDate(todayIso());
+    setActionDate(defaultReminder.actionDate);
     setIsCustomDate(false);
-    setCustomDateText("");
+    setShowDatePicker(false);
     setToDate(null);
     setIsCustomToDate(false);
-    setCustomToDateText("");
-    setNotificationTime(DEFAULT_NOTIFICATION_TIME);
+    setShowToDatePicker(false);
+    setNotificationTime(defaultReminder.notificationTime);
     setIsCustomTime(false);
-    setCustomTimeText("");
+    setShowTimePicker(false);
     onClose();
   }, [onClose]);
 
@@ -280,21 +299,24 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
     setActionDate(iso);
   }, []);
 
+  // Opens the native date picker — re-tapping "Custom" while it's already
+  // the active source (to pick a different date) reopens it too, rather
+  // than only working the first time.
   const handleCustomPress = useCallback(() => {
     setIsCustomDate(true);
-    // Seed the field with whatever's already selected so switching to
-    // "Custom" from "Tomorrow" doesn't drop what the user already picked.
-    setCustomDateText(actionDate);
-  }, [actionDate]);
-
-  const handleCustomDateChange = useCallback((value: string) => {
-    setCustomDateText(value);
-    if (isValidIsoDate(value)) {
-      setActionDate(value);
-    }
+    setShowDatePicker(true);
   }, []);
 
-  const isCustomDateInvalid = isCustomDate && customDateText.length > 0 && !isValidIsoDate(customDateText);
+  const handleDateChange = useCallback((event: DateTimePickerEvent, selectedDate?: Date) => {
+    // Android's picker is a system dialog, not an inline field — it always
+    // needs closing here regardless of outcome (`event.type === "set"` on a
+    // pick, "dismissed" on cancel), or this component would never know to
+    // let a later tap reopen it.
+    setShowDatePicker(false);
+    if (event.type === "set" && selectedDate) {
+      setActionDate(formatIsoDate(selectedDate));
+    }
+  }, []);
 
   const handleToDatePresetPress = useCallback(
     (iso: string | null) => {
@@ -306,25 +328,15 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
 
   const handleCustomToDatePress = useCallback(() => {
     setIsCustomToDate(true);
-    setCustomToDateText(toDate ?? "");
-  }, [toDate]);
-
-  const handleCustomToDateChange = useCallback((value: string) => {
-    setCustomToDateText(value);
-    if (isValidIsoDate(value)) {
-      setToDate(value);
-    }
+    setShowToDatePicker(true);
   }, []);
 
-  // Shape-valid AND not before the start date — a range ending before it
-  // begins is nonsensical regardless of whether "2026-09-05" is itself a
-  // real calendar date. Only checked while "Custom" is active and non-empty
-  // (an empty field mid-typing isn't an error yet, same convention as the
-  // action-date field's own `isCustomDateInvalid`).
-  const isCustomToDateInvalid =
-    isCustomToDate &&
-    customToDateText.length > 0 &&
-    (!isValidIsoDate(customToDateText) || customToDateText < actionDate);
+  const handleToDateChange = useCallback((event: DateTimePickerEvent, selectedDate?: Date) => {
+    setShowToDatePicker(false);
+    if (event.type === "set" && selectedDate) {
+      setToDate(formatIsoDate(selectedDate));
+    }
+  }, []);
 
   const handleTimePresetPress = useCallback((value: string) => {
     setIsCustomTime(false);
@@ -333,39 +345,31 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
 
   const handleCustomTimePress = useCallback(() => {
     setIsCustomTime(true);
-    setCustomTimeText(notificationTime);
-  }, [notificationTime]);
+    setShowTimePicker(true);
+  }, []);
 
-  const handleCustomTimeChange = useCallback((value: string) => {
-    setCustomTimeText(value);
-    if (isValidTime(value)) {
-      setNotificationTime(value);
+  const handleTimeChange = useCallback((event: DateTimePickerEvent, selectedDate?: Date) => {
+    setShowTimePicker(false);
+    if (event.type === "set" && selectedDate) {
+      setNotificationTime(dateToTime(selectedDate));
     }
   }, []);
 
-  const isCustomTimeInvalid = isCustomTime && customTimeText.length > 0 && !isValidTime(customTimeText);
-
-  const canSave =
-    text.trim().length > 0 && !isCustomDateInvalid && !isCustomToDateInvalid && !isCustomTimeInvalid;
+  // No "invalid" state left to gate on — a native OS picker can only ever
+  // hand back a real calendar date/time, and `minimumDate` (see the
+  // to-date picker's own render below) stops an end-before-start range
+  // from ever being pickable in the first place, rather than needing to be
+  // rejected after the fact.
+  const canSave = text.trim().length > 0;
 
   const handleSave = useCallback(() => {
     const trimmed = text.trim();
-    if (!trimmed || isCustomDateInvalid || isCustomToDateInvalid || isCustomTimeInvalid) {
+    if (!trimmed) {
       return;
     }
     onSave(trimmed, actionDate, toDate, notificationTime, recurrence);
     sheetRef.current?.close();
-  }, [
-    text,
-    actionDate,
-    toDate,
-    notificationTime,
-    recurrence,
-    isCustomDateInvalid,
-    isCustomToDateInvalid,
-    isCustomTimeInvalid,
-    onSave,
-  ]);
+  }, [text, actionDate, toDate, notificationTime, recurrence, onSave]);
 
   const renderBackdrop = useCallback(
     (props: BottomSheetBackdropProps) => (
@@ -449,22 +453,13 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
               onPress={handleCustomPress}
               style={[styles.recurrenceOption, isCustomDate && styles.recurrenceOptionActive]}
             >
-              <Text style={[styles.recurrenceText, isCustomDate && styles.recurrenceTextActive]}>Custom</Text>
+              <Text style={[styles.recurrenceText, isCustomDate && styles.recurrenceTextActive]} numberOfLines={1}>
+                {isCustomDate ? formatShortDate(actionDate) : "Custom"}
+              </Text>
             </Pressable>
           </View>
-          {isCustomDate && (
-            <>
-              <BottomSheetTextInput
-                value={customDateText}
-                onChangeText={handleCustomDateChange}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor="rgba(235,235,245,0.45)"
-                style={[styles.input, isCustomDateInvalid && styles.inputInvalid]}
-                keyboardType="numbers-and-punctuation"
-                maxLength={10}
-              />
-              {isCustomDateInvalid && <Text style={styles.errorText}>Enter a valid date as YYYY-MM-DD.</Text>}
-            </>
+          {showDatePicker && (
+            <DateTimePicker value={isoToDate(actionDate)} mode="date" display="default" onChange={handleDateChange} />
           )}
 
           {/* Phase 2 Step 4: optional end-of-range date. "None" is the
@@ -492,32 +487,31 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
               onPress={handleCustomToDatePress}
               style={[styles.recurrenceOption, isCustomToDate && styles.recurrenceOptionActive]}
             >
-              <Text style={[styles.recurrenceText, isCustomToDate && styles.recurrenceTextActive]}>Custom</Text>
+              <Text style={[styles.recurrenceText, isCustomToDate && styles.recurrenceTextActive]} numberOfLines={1}>
+                {isCustomToDate && toDate ? formatShortDate(toDate) : "Custom"}
+              </Text>
             </Pressable>
           </View>
-          {isCustomToDate && (
-            <>
-              <BottomSheetTextInput
-                value={customToDateText}
-                onChangeText={handleCustomToDateChange}
-                placeholder="YYYY-MM-DD"
-                placeholderTextColor="rgba(235,235,245,0.45)"
-                style={[styles.input, isCustomToDateInvalid && styles.inputInvalid]}
-                keyboardType="numbers-and-punctuation"
-                maxLength={10}
-              />
-              {isCustomToDateInvalid && (
-                <Text style={styles.errorText}>Enter a valid date on or after the start date.</Text>
-              )}
-            </>
+          {showToDatePicker && (
+            <DateTimePicker
+              value={isoToDate(toDate ?? actionDate)}
+              mode="date"
+              display="default"
+              // Stops an end-before-start range from ever being pickable in
+              // the first place, rather than needing to reject it after the
+              // fact — the OS dialog itself refuses to let the user select
+              // anything earlier than this.
+              minimumDate={isoToDate(actionDate)}
+              onChange={handleToDateChange}
+            />
           )}
 
-          {/* Phase 2 Step 4: reminder time-of-day. Only shown as a badge on
-              the saved row (components/TodoItemRow.tsx) when it's NOT the
-              5 AM default — see that file's own DEFAULT_NOTIFICATION_TIME
-              check — so leaving this untouched is a deliberate, silent
-              "use the default" rather than something that needs its own
-              explicit confirmation here. */}
+          {/* Phase 2 Step 4: reminder time-of-day. Only shown as a time chip
+              on the saved card (components/calendar/CalendarTaskCard.tsx)
+              when it's NOT the 1 PM default — see that file's own
+              DEFAULT_REMINDER_TIME check — so leaving this untouched is a
+              deliberate, silent "use the default" rather than something
+              that needs its own explicit confirmation here. */}
           <Text style={styles.sectionLabel}>Notification Time</Text>
           <View style={styles.recurrenceRow}>
             {TIME_PRESETS.map((preset) => {
@@ -538,28 +532,18 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
               onPress={handleCustomTimePress}
               style={[styles.recurrenceOption, isCustomTime && styles.recurrenceOptionActive]}
             >
-              <Text style={[styles.recurrenceText, isCustomTime && styles.recurrenceTextActive]}>Custom</Text>
+              <Text style={[styles.recurrenceText, isCustomTime && styles.recurrenceTextActive]} numberOfLines={1}>
+                {isCustomTime ? formatTime12h(notificationTime) : "Custom"}
+              </Text>
             </Pressable>
           </View>
-          {isCustomTime && (
-            <>
-              <BottomSheetTextInput
-                value={customTimeText}
-                onChangeText={handleCustomTimeChange}
-                placeholder="HH:MM (24-hour)"
-                placeholderTextColor="rgba(235,235,245,0.45)"
-                style={[styles.input, isCustomTimeInvalid && styles.inputInvalid]}
-                keyboardType="numbers-and-punctuation"
-                maxLength={5}
-              />
-              {isCustomTimeInvalid ? (
-                <Text style={styles.errorText}>Enter a valid 24-hour time as HH:MM.</Text>
-              ) : (
-                customTimeText.length > 0 && (
-                  <Text style={styles.timePreviewText}>{formatTime12h(notificationTime)}</Text>
-                )
-              )}
-            </>
+          {showTimePicker && (
+            <DateTimePicker
+              value={timeToDate(notificationTime)}
+              mode="time"
+              display="default"
+              onChange={handleTimeChange}
+            />
           )}
 
           <Text style={styles.sectionLabel}>Repeats</Text>
@@ -632,19 +616,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     paddingHorizontal: spacing.base,
     paddingVertical: spacing.md,
-  },
-  inputInvalid: {
-    borderColor: colors.danger,
-  },
-  errorText: {
-    color: colors.danger,
-    fontSize: 12,
-    marginTop: -spacing.sm,
-  },
-  timePreviewText: {
-    color: colors.textMuted,
-    fontSize: 12,
-    marginTop: -spacing.sm,
   },
   sectionLabel: {
     color: colors.textMuted,

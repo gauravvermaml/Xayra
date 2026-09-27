@@ -1005,7 +1005,7 @@ export default function HomeScreen() {
           </Animated.Text>
         ) : (
           <Animated.Text key="subtitle" entering={FadeIn} style={styles.brandSubtitle}>
-            Tap to record your thoughts, later bring back your memories by tapping Xayra....
+            Say "remind me" or "make a note" for a to-do — everything else is saved as a journal entry.
           </Animated.Text>
         )}
       </View>
