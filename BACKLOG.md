@@ -75,14 +75,4 @@ than it should.
 
 Raised 2026-09-29.
 
-### Ask mode: auto-scroll to the latest exchange while thinking/answering
-
-In the sheet's 50% stage, asking a new question doesn't reliably scroll the
-view down to show it (or the live "thinking"/streaming state) — it can stay
-showing the earliest Q&A at the top instead. `ChatSheetContent.tsx` already
-wires `scrollToEnd()` to fire on content-size change; worth retesting first
-now that the Record/Ask list-swap scroll bug (Build 50) is fixed, since that
-may have been suppressing this too rather than it being a separate issue.
-
-Raised 2026-09-29.
 

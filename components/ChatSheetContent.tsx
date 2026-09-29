@@ -79,10 +79,12 @@ function StreamingStageLabel({ color }: { color: string }) {
 const STARTER_PROMPTS = ["Summarize my latest notes", "What did I record about work?", "List my recent tasks"] as const;
 
 export type ChatSheetContentProps = {
-  /** Record shows the notes list (newest first); Ask shows Q&A history.
-   * Both render through the SAME persistent FlatList instance — see this
-   * file's own top-level doc comment for why that's load-bearing, not a
-   * style choice. */
+  /** Record shows the notes list (newest first); Ask shows Q&A history,
+   * newest EXCHANGE first too (see the `data` useMemo below for how a
+   * question+answer pair's own internal order stays question-then-answer
+   * even though exchanges themselves are reversed). Both render through the
+   * SAME persistent FlatList instance — see this file's own top-level doc
+   * comment for why that's load-bearing, not a style choice. */
   mode: "record" | "ask";
   /** Record-mode data — ignored while `mode === "ask"`. */
   notes: Note[];
@@ -155,22 +157,23 @@ export function ChatSheetContent({
   usePlainList,
 }: ChatSheetContentProps) {
   // Two separate, exactly-typed refs rather than one shared union-typed
-  // ref — `FlatList` and `BottomSheetFlatList` both expose `scrollToEnd`,
+  // ref — `FlatList` and `BottomSheetFlatList` both expose `scrollToOffset`,
   // but their ref types aren't structurally assignable to each other, so
   // TypeScript rejects a single ref used as both. Only one of the two ever
   // actually mounts for a given instance's lifetime (`usePlainList` is a
   // constant prop), so exactly one of these is ever populated.
   const plainListRef = useRef<FlatList<DrawerListItem>>(null);
   const sheetListRef = useRef<React.ElementRef<typeof BottomSheetFlatList<DrawerListItem>>>(null);
-  // Ask-mode only: auto-scroll to the newest exchange (including live
-  // "thinking"/streaming state) as it arrives. Record mode's notes are
-  // newest-FIRST (see `notes` prop's own doc comment) — scrolling "to the
-  // end" there would jump to the OLDEST note instead, which is wrong, so
-  // this is never wired up as a callback at all while `mode === "record"`
-  // (see the FlatList props below).
-  const scrollToEnd = () => {
-    plainListRef.current?.scrollToEnd({ animated: true });
-    sheetListRef.current?.scrollToEnd({ animated: true });
+  // Ask-mode only: keep the newest exchange (including live "thinking"/
+  // streaming state) pinned at the TOP as it arrives — Ask's list is
+  // newest-exchange-first (see the `data` useMemo below), matching Record
+  // mode's own newest-first notes list, so "bring the latest into view"
+  // means scrolling to offset 0, not to the end. Never wired up at all while
+  // `mode === "record"` (see the FlatList props below) — Record's notes list
+  // doesn't grow at the top the same way mid-render.
+  const scrollToTop = () => {
+    plainListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    sheetListRef.current?.scrollToOffset({ offset: 0, animated: true });
   };
 
   const handleAllowCellularDownload = () => {
@@ -182,13 +185,30 @@ export function ChatSheetContent({
 
   const messageListContentContainerStyle = { paddingBottom: bottomInset + 80 };
 
-  const data: DrawerListItem[] = useMemo(
-    () =>
-      mode === "record"
-        ? notes.map((note) => ({ kind: "note" as const, note }))
-        : messages.map((message) => ({ kind: "message" as const, message })),
-    [mode, notes, messages]
-  );
+  const data: DrawerListItem[] = useMemo(() => {
+    if (mode === "record") {
+      return notes.map((note) => ({ kind: "note" as const, note }));
+    }
+    // Newest exchange first, matching Record mode's own newest-first notes
+    // list (live product decision — see BACKLOG.md's now-resolved "Ask mode:
+    // auto-scroll" entry). useChatSession.ts always appends a user message
+    // immediately followed by its assistant placeholder in one call
+    // (`[...prev, userMessage, assistantMessage]`), so `messages` is a flat
+    // array of consecutive [question, answer] pairs in chronological order.
+    // Reversing that array directly would also flip each PAIR's own
+    // internal order (the answer would render above its own question), so
+    // this groups into pairs first, reverses the GROUP order, then flattens
+    // — each exchange still reads question-then-answer top to bottom, it's
+    // just the newest exchange that sits above older ones.
+    const exchanges: ChatMessage[][] = [];
+    for (let i = 0; i < messages.length; i += 2) {
+      exchanges.push(messages.slice(i, i + 2));
+    }
+    return exchanges
+      .reverse()
+      .flat()
+      .map((message) => ({ kind: "message" as const, message }));
+  }, [mode, notes, messages]);
 
   const emptyComponent =
     mode === "record" ? (
@@ -281,7 +301,7 @@ export function ChatSheetContent({
           contentContainerStyle={messageListContentContainerStyle}
           data={data}
           keyExtractor={(item) => (item.kind === "note" ? item.note.id : item.message.id)}
-          onContentSizeChange={mode === "ask" ? scrollToEnd : undefined}
+          onContentSizeChange={mode === "ask" ? scrollToTop : undefined}
           ListEmptyComponent={emptyComponent}
           renderItem={renderItem}
         />
@@ -292,7 +312,7 @@ export function ChatSheetContent({
           contentContainerStyle={messageListContentContainerStyle}
           data={data}
           keyExtractor={(item) => (item.kind === "note" ? item.note.id : item.message.id)}
-          onContentSizeChange={mode === "ask" ? scrollToEnd : undefined}
+          onContentSizeChange={mode === "ask" ? scrollToTop : undefined}
           ListEmptyComponent={emptyComponent}
           renderItem={renderItem}
         />
