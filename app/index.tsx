@@ -4,7 +4,14 @@ import * as FileSystem from "expo-file-system/legacy";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import BottomSheet, { useBottomSheetSpringConfigs } from "@gorhom/bottom-sheet";
-import Animated, { FadeIn, FadeOut, interpolate, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
+import Animated, {
+  FadeIn,
+  FadeOut,
+  interpolate,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+} from "react-native-reanimated";
 
 import { CentralRecorderCanvas, type RecorderCanvasState } from "../components/CentralRecorderCanvas";
 import { ChatSheetContent } from "../components/ChatSheetContent";
@@ -45,11 +52,14 @@ import {
   countNotes,
   createTextNote,
   createVoiceNote,
+  deleteNote,
   EmptyRecordingError,
   isSilentTranscript,
+  listNotes,
   retryPendingEmbeddings,
   retryPendingExtractions,
   SilentRecordingError,
+  type Note,
 } from "../services/notes/noteManager";
 import { getGreetingFirstName } from "../services/sync/driveSync";
 import { getTimeBasedGreeting } from "../utils/greeting";
@@ -64,6 +74,25 @@ const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 /** How long the launch greeting ("Good morning, ...") stays up before
  * cross-fading into the header's normal persistent subtitle. */
 const GREETING_VISIBLE_MS = 3500;
+
+/** Design-sandbox pass: the quick-menu popover's pop-out entrance —
+ * approved spring config (mass 0.6, stiffness 140, damping 18) driving BOTH
+ * opacity and scale together. A plain `FadeIn.springify()` can't do this:
+ * its `withInitialValues` override is typed to opacity only, since `FadeIn`
+ * is an opacity-only preset — combining a scale requires a custom worklet
+ * entrance function instead (Reanimated's own documented escape hatch for
+ * "animate more than one property together"), not a chained builder. */
+const QUICK_MENU_POP_SPRING = { damping: 18, stiffness: 140, mass: 0.6 };
+function quickMenuPopIn() {
+  "worklet";
+  return {
+    initialValues: { opacity: 0, transform: [{ scale: 0.95 }] },
+    animations: {
+      opacity: withSpring(1, QUICK_MENU_POP_SPRING),
+      transform: [{ scale: withSpring(1, QUICK_MENU_POP_SPRING) }],
+    },
+  };
+}
 
 // Percentage snap points (SHEET_SNAP_POINTS = ['20%', '50%'] — see
 // HistorySheet.tsx's own doc comment for why the monochromatic glass box's
@@ -224,11 +253,24 @@ export default function HomeScreen() {
   // own doc comment for why this is deliberately NOT done by changing which
   // index the sheet snaps to.
   const [isComposing, setIsComposing] = useState(false);
-  // The one remaining use for this pair on the home screen: opening a note
-  // from a chat citation chip (handleShowCitation below). The home screen's
-  // own full notes list/browse/delete/Drive-restore state moved to
-  // app/archive.tsx entirely — see the "Quiet Corner" placement discussion.
+  // Opens a note from either a chat citation chip (handleShowCitation below)
+  // or a tap on a row in the Record-mode notes list (`notes` below) — same
+  // modal either way.
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
+  // Record-mode drawer content: the sheet shows this list (newest first —
+  // listNotes() already queries `ORDER BY created_at DESC`) instead of
+  // Ask-mode's Q&A history. Reintroduced per explicit request — the
+  // "Quiet Corner" pass (see quiet-corner-ui-overhaul memory) had moved the
+  // full notes browse/search/Drive-restore experience to app/archive.tsx
+  // entirely and left this screen showing the SAME "Ask anything..." chat
+  // placeholder regardless of which mode was selected, which read as a bug
+  // once both modes existed side by side: a user in Record mode has no
+  // reason to see an Ask-mode empty state. This is deliberately the
+  // read/delete slice only, not the full Archive feature set — no search bar,
+  // and "Restore from Drive" (ChatSheetContent's own Record-mode empty-state
+  // link) hands off to Archive rather than duplicating its Google-Sign-In/
+  // restore flow here (see handleRestoreFromDriveShortcut below).
+  const [notes, setNotes] = useState<Note[]>([]);
   const [processingState, setProcessingState] = useState<"idle" | "processing">("idle");
   const [processingLabel, setProcessingLabel] = useState<"note" | "query" | null>(null);
   // Real, granular pipeline progress (see services/ai/pipelineStage.ts) —
@@ -357,8 +399,20 @@ export default function HomeScreen() {
       void countNotes()
         .then(setNotesCount)
         .catch(() => {});
+      // Record-mode drawer list (see `notes` state's own doc comment) —
+      // same silent-on-failure treatment; a stale list for one focus cycle
+      // isn't worth surfacing an error banner for.
+      void listNotes()
+        .then(setNotes)
+        .catch(() => {});
     }, [])
   );
+
+  const refreshNotes = useCallback(() => {
+    void listNotes()
+      .then(setNotes)
+      .catch(() => {});
+  }, []);
 
   // ---- Explicit mode routing ----------------------------------------------
   //
@@ -377,6 +431,9 @@ export default function HomeScreen() {
           : await createTextNote(text);
         showToast("Saved thought to memory");
         sheetRef.current?.snapToIndex(0);
+        // So the Record-mode drawer list shows the new note immediately,
+        // not just after the next screen-focus refresh.
+        refreshNotes();
         if (note.status !== "embedded") {
           setError(null);
         }
@@ -389,7 +446,7 @@ export default function HomeScreen() {
         }
       }
     },
-    []
+    [refreshNotes]
   );
 
   /** Shared by ComposeBar's typed submit and both voice paths. `audioUri`
@@ -940,12 +997,39 @@ export default function HomeScreen() {
         } · tap to cancel`
       : null;
 
-  // Opens a citation chip's source note from the chat view — the one
-  // remaining "view a note" path on this screen, unrelated to Archive's own
-  // full browse/delete list (app/archive.tsx).
+  // Opens a note's detail modal — shared by a chat citation chip's tap AND
+  // a row tap in the Record-mode notes list (ChatSheetContent's
+  // `onShowCitation` prop is reused for both, same `(noteId: string) => void`
+  // shape either way).
   const handleShowCitation = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
   const handleSettingsPress = useCallback(() => router.push("/settings"), [router]);
   const handleOpenArchive = useCallback(() => router.push("/archive"), [router]);
+  // Same confirm-then-delete flow as Archive's own handleDeleteNote — kept
+  // in sync deliberately (this is the one place besides Archive a note can
+  // be deleted from).
+  const handleDeleteNote = useCallback((noteId: string) => {
+    Alert.alert("Delete Note", "Are you sure you want to permanently delete this note?", [
+      { text: "Cancel", style: "cancel" },
+      {
+        text: "Delete",
+        style: "destructive",
+        onPress: () => {
+          void deleteNote(noteId)
+            .then(() => setNotes((prev) => prev.filter((note) => note.id !== noteId)))
+            .catch((err) => {
+              const message = err instanceof Error ? err.message : "Failed to delete note.";
+              Alert.alert("Delete Error", message);
+            });
+        },
+      },
+    ]);
+  }, []);
+  // ChatSheetContent's Record-mode empty state always renders a "Restore
+  // from Drive" link — rather than duplicating Archive's whole Google-Sign-
+  // In/restoreFromDrive/sync-status flow here for what's otherwise a
+  // compact, read/delete-only list, this just hands off to the screen that
+  // already has it built and working.
+  const handleRestoreFromDriveShortcut = useCallback(() => router.push("/archive"), [router]);
   // Sheet still snaps to index 1 on focus — same as always, and load-bearing:
   // this is the mechanism (paired with `android_keyboardInputMode=
   // "adjustResize"` in HistorySheet.tsx) that took real on-device debugging
@@ -1131,8 +1215,19 @@ export default function HomeScreen() {
             placeholder={inputMode === "record" ? "Type your thoughts..." : "Search your thoughts..."}
           />
         }
+        // Record mode shows the notes list (newest first); Ask mode keeps
+        // the Q&A history it always has — both through ChatSheetContent's
+        // own single persistent list now (see that file's own top-level doc
+        // comment for why swapping between two separately-mounted scrollable
+        // components here broke scrolling at this sheet's 50% stage,
+        // confirmed on-device).
         content={
           <ChatSheetContent
+            mode={inputMode}
+            notes={notes}
+            onDeleteNote={handleDeleteNote}
+            isRestoring={false}
+            onRestoreFromDrive={handleRestoreFromDriveShortcut}
             messages={chatSession.messages}
             isSending={chatSession.isSending}
             speakingMessageId={chatSession.speakingMessageId}
@@ -1166,16 +1261,21 @@ export default function HomeScreen() {
           header, center button, floating pills, the sheet itself, even the
           nav-bar inset strip above. See ExpandedTextOverlay.tsx's own doc
           comment for why this is a separate component entirely rather than
-          a stage of `<HistorySheet>`. Builds its OWN fresh ChatSheetContent
-          element (not the same instance passed to `<HistorySheet>` above)
-          since only one of the two copies is ever actually mounted at a
-          time — this one, while expanded; HistorySheet's own copy,
-          otherwise. Only ever Q&A content now — the Notes/QA segment choice
-          this once branched on is gone along with the home screen's own
-          Notes list (see app/archive.tsx). */}
+          a stage of `<HistorySheet>`. Builds its OWN fresh content element
+          (not the same instance passed to `<HistorySheet>` above) since only
+          one of the two copies is ever actually mounted at a time — this
+          one, while expanded; HistorySheet's own copy, otherwise. Same
+          Record/Ask mode split as HistorySheet's own `content` prop above —
+          expanding from the notes list should keep showing notes, not
+          suddenly switch to Q&A history. */}
       {isTextBoxExpanded && (
         <ExpandedTextOverlay topInset={insets.top} bottomInset={insets.bottom} onClose={handleToggleExpand}>
           <ChatSheetContent
+            mode={inputMode}
+            notes={notes}
+            onDeleteNote={handleDeleteNote}
+            isRestoring={false}
+            onRestoreFromDrive={handleRestoreFromDriveShortcut}
             messages={chatSession.messages}
             isSending={chatSession.isSending}
             speakingMessageId={chatSession.speakingMessageId}
@@ -1228,7 +1328,16 @@ export default function HomeScreen() {
               screen-height math below) since the icon sits low on screen,
               and right-aligns its own right edge to the icon's, so it never
               spills off the right edge of the screen. */}
-          <View
+          {/* Design-sandbox pass: this used to pop into existence with zero
+              animation — the one overlay in this file with no entrance
+              transition at all. Fluid pop-out spring (scale 0.95->1.0 +
+              fade), same physics approved in the sandbox prototype. Only the
+              inner surface animates, not quickMenuBackdropView above — that
+              outer View is just an invisible tap-to-dismiss catcher, nothing
+              to animate. */}
+          <Animated.View
+            entering={quickMenuPopIn}
+            exiting={FadeOut.duration(120)}
             style={[
               styles.quickMenuPopover,
               {
@@ -1255,7 +1364,7 @@ export default function HomeScreen() {
             >
               <Text style={styles.quickMenuRowText}>⚙️ Settings</Text>
             </Pressable>
-          </View>
+          </Animated.View>
         </View>
       )}
     </Pressable>

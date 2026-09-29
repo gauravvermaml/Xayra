@@ -10,6 +10,7 @@ import Animated, {
   withSpring,
   withTiming,
 } from "react-native-reanimated";
+import * as Haptics from "expo-haptics";
 
 import { colors } from "../constants/theme";
 
@@ -112,6 +113,12 @@ export function CentralRecorderCanvas({
   // buttonAnimatedStyle below for what it actually drives.
   const pressedProgress = useSharedValue(0);
   const handlePressIn = () => {
+    // Design-sandbox pass: the depress/spring-back physics and highlight
+    // dimming below already made this feel tactile — the one thing missing
+    // was a physical click to go with it. Fires on press-IN (not onPress),
+    // same moment the depress animation starts, so it reads as simultaneous
+    // with the visual "click" rather than a delayed afterthought on release.
+    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     pressedProgress.value = withTiming(1, { duration: 80, easing: Easing.out(Easing.quad) });
   };
   const handlePressOut = () => {

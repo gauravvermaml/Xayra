@@ -1,13 +1,21 @@
-import { useEffect, useRef, useState } from "react";
-import { Animated, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, Animated, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
 
 import { MarkdownText } from "./MarkdownText";
+import { NoteCard } from "./NoteCard";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { allowCellularDownloadAndResume, resumeDownloads, type ModelDownloadStatus } from "../services/ai/modelDownloadManager";
 import { PIPELINE_STAGE_LABELS, subscribeToPipelineStage } from "../services/ai/pipelineStage";
 import type { ChatMessage } from "../services/ai/useChatSession";
+import type { Note } from "../services/notes/noteManager";
 import { copyTextWithFeedback } from "../utils/clipboard";
+
+/** One row of this drawer's list — either a note (Record mode) or a chat
+ * message (Ask mode). See this file's own top-level doc comment for why
+ * both live in ONE persistent list now instead of two separately-mounted
+ * ones. */
+type DrawerListItem = { kind: "note"; note: Note } | { kind: "message"; message: ChatMessage };
 
 /** Blinking "▋" cursor shown at the end of a message still streaming in
  * from local Llama — a quiet visual cue that generation is live, not stalled. */
@@ -71,6 +79,17 @@ function StreamingStageLabel({ color }: { color: string }) {
 const STARTER_PROMPTS = ["Summarize my latest notes", "What did I record about work?", "List my recent tasks"] as const;
 
 export type ChatSheetContentProps = {
+  /** Record shows the notes list (newest first); Ask shows Q&A history.
+   * Both render through the SAME persistent FlatList instance — see this
+   * file's own top-level doc comment for why that's load-bearing, not a
+   * style choice. */
+  mode: "record" | "ask";
+  /** Record-mode data — ignored while `mode === "ask"`. */
+  notes: Note[];
+  onDeleteNote: (noteId: string) => void;
+  isRestoring: boolean;
+  onRestoreFromDrive: () => void;
+  /** Ask-mode data — ignored while `mode === "record"`. */
   messages: ChatMessage[];
   isSending: boolean;
   speakingMessageId: string | null;
@@ -78,6 +97,8 @@ export type ChatSheetContentProps = {
   isModelReady: boolean;
   onSubmitStarterPrompt: (text: string) => void;
   onToggleSpeech: (message: ChatMessage) => void;
+  /** Opens a note's detail view — a chat citation-chip tap (Ask mode) and a
+   * row tap in the notes list (Record mode) both call this. */
   onShowCitation: (noteId: string) => void;
   /** Device's safe-area bottom inset — Build 20 SCROLL CONTENT CLEARANCE:
    * added as extra trailing padding (on top of an 80px margin) so the last
@@ -95,12 +116,33 @@ export type ChatSheetContentProps = {
 };
 
 /**
- * The sheet's "QA History" segment content — purely presentational (see
- * services/ai/useChatSession.ts for the actual conversation state/logic,
- * which lives in app/index.tsx so it survives this component being
- * unmounted whenever the segment control switches to "Notes").
+ * The sheet's ONE drawer list — Record mode's notes and Ask mode's Q&A
+ * history both render through this single component now, deliberately
+ * NEVER unmounting/remounting its own FlatList just because `mode` toggles
+ * (only `data`/`renderItem` change). This replaced an earlier version where
+ * app/index.tsx swapped between this component and a separate
+ * `NotesSheetContent` instance depending on mode — a real, confirmed
+ * on-device bug: switching between two independently-mounted
+ * `BottomSheetFlatList`s in the same `<BottomSheet>` slot left the newly-
+ * mounted one unable to scroll at the sheet's 50% stage (it scrolled fine
+ * once expanded to `ExpandedTextOverlay`'s plain full-screen View, which
+ * has no competing sheet-drag gesture to coordinate with at all — the one
+ * clean diagnostic that pointed at the swap itself, not general container
+ * styling, as the cause). `@gorhom/bottom-sheet` tracks exactly one
+ * "registered scrollable" per sheet for gesture coordination; keeping a
+ * single persistent list sidesteps whatever specific internal state that
+ * hand-off was corrupting, rather than chasing the exact mechanism inside
+ * a third-party library's gesture internals.
+ *
+ * services/ai/useChatSession.ts owns the actual conversation state/logic —
+ * this file stays purely presentational.
  */
 export function ChatSheetContent({
+  mode,
+  notes,
+  onDeleteNote,
+  isRestoring,
+  onRestoreFromDrive,
   messages,
   isSending,
   speakingMessageId,
@@ -118,8 +160,14 @@ export function ChatSheetContent({
   // TypeScript rejects a single ref used as both. Only one of the two ever
   // actually mounts for a given instance's lifetime (`usePlainList` is a
   // constant prop), so exactly one of these is ever populated.
-  const plainListRef = useRef<FlatList<ChatMessage>>(null);
-  const sheetListRef = useRef<React.ElementRef<typeof BottomSheetFlatList<ChatMessage>>>(null);
+  const plainListRef = useRef<FlatList<DrawerListItem>>(null);
+  const sheetListRef = useRef<React.ElementRef<typeof BottomSheetFlatList<DrawerListItem>>>(null);
+  // Ask-mode only: auto-scroll to the newest exchange (including live
+  // "thinking"/streaming state) as it arrives. Record mode's notes are
+  // newest-FIRST (see `notes` prop's own doc comment) — scrolling "to the
+  // end" there would jump to the OLDEST note instead, which is wrong, so
+  // this is never wired up as a callback at all while `mode === "record"`
+  // (see the FlatList props below).
   const scrollToEnd = () => {
     plainListRef.current?.scrollToEnd({ animated: true });
     sheetListRef.current?.scrollToEnd({ animated: true });
@@ -133,48 +181,96 @@ export function ChatSheetContent({
   };
 
   const messageListContentContainerStyle = { paddingBottom: bottomInset + 80 };
-  const emptyComponent = <Text style={styles.emptyText}>Ask anything — answers are grounded in your recorded notes.</Text>;
-  const renderItem = ({ item }: { item: ChatMessage }) => (
-    <Pressable
-      onLongPress={() => void copyTextWithFeedback(item.text)}
-      disabled={item.text.trim().length === 0}
-      style={[styles.bubble, item.role === "user" ? styles.bubbleUser : styles.bubbleAssistant]}
-    >
-      <Text style={styles.roleLabel}>{item.role === "user" ? "You" : "Xayra"}</Text>
-      {item.isStreaming && item.text.length === 0 ? (
-        <View style={styles.streamingStartRow}>
-          <StreamingStageLabel color={colors.textMuted} />
-        </View>
-      ) : (
-        <View style={styles.bubbleTextWrap}>
-          {/* Build 22: explicit selectable={false} — MarkdownText
-              defaults to true, which inside this BottomSheetFlatList
-              let a drag starting on a message bubble be captured as
-              text-selection instead of list scroll. */}
-          <MarkdownText
-            text={item.text}
-            color={item.role === "user" ? colors.onAccent : colors.textPrimary}
-            selectable={false}
-          />
-          {item.isStreaming && <StreamingCursor color={item.role === "user" ? colors.onAccent : colors.accent} />}
-        </View>
-      )}
-      {item.role === "assistant" && !item.isStreaming && item.text.length > 0 && (
-        <Pressable onPress={() => onToggleSpeech(item)} style={styles.speakerButton}>
-          <Text style={styles.speakerButtonText}>{speakingMessageId === item.id ? "⏹ Stop" : "🔊 Listen"}</Text>
-        </Pressable>
-      )}
-      {!!item.citations?.length && (
-        <View style={styles.citationRow}>
-          {item.citations.map((citation) => (
-            <Pressable key={citation.noteId} onPress={() => onShowCitation(citation.noteId)} style={styles.citationChip}>
-              <Text style={styles.citationChipText}>[Note {citation.index}]</Text>
-            </Pressable>
-          ))}
-        </View>
-      )}
-    </Pressable>
+
+  const data: DrawerListItem[] = useMemo(
+    () =>
+      mode === "record"
+        ? notes.map((note) => ({ kind: "note" as const, note }))
+        : messages.map((message) => ({ kind: "message" as const, message })),
+    [mode, notes, messages]
   );
+
+  const emptyComponent =
+    mode === "record" ? (
+      // Same copy/structure as NotesSheetContent.tsx's own empty state —
+      // duplicated rather than imported since that component no longer
+      // renders here at all (see this file's own top-level doc comment);
+      // Archive.tsx still uses NotesSheetContent directly and keeps its own
+      // copy of this same empty state in sync independently.
+      <View style={styles.notesEmptyState}>
+        <Text style={styles.emptyText}>No notes recorded yet.</Text>
+        <Text style={styles.notesEmptySubtext}>Tap Xayra to record your first voice note</Text>
+        <Pressable onPress={onRestoreFromDrive} disabled={isRestoring} style={styles.restoreLinkRow}>
+          {isRestoring ? (
+            <ActivityIndicator color={colors.accent} size="small" />
+          ) : (
+            <Text style={styles.restoreLinkText}>Already have a backup? Restore vault from Google Drive</Text>
+          )}
+        </Pressable>
+      </View>
+    ) : (
+      <Text style={styles.emptyText}>Ask anything — answers are grounded in your recorded notes.</Text>
+    );
+
+  const renderItem = ({ item }: { item: DrawerListItem }) => {
+    if (item.kind === "note") {
+      const note = item.note;
+      return (
+        <NoteCard
+          content={note.content}
+          audioUri={note.audioUri}
+          createdAt={note.createdAt}
+          onPress={() => onShowCitation(note.id)}
+          onDelete={() => onDeleteNote(note.id)}
+        />
+      );
+    }
+
+    const message = item.message;
+    return (
+      <Pressable
+        onLongPress={() => void copyTextWithFeedback(message.text)}
+        disabled={message.text.trim().length === 0}
+        style={[styles.bubble, message.role === "user" ? styles.bubbleUser : styles.bubbleAssistant]}
+      >
+        <Text style={styles.roleLabel}>{message.role === "user" ? "You" : "Xayra"}</Text>
+        {message.isStreaming && message.text.length === 0 ? (
+          <View style={styles.streamingStartRow}>
+            <StreamingStageLabel color={colors.textMuted} />
+          </View>
+        ) : (
+          <View style={styles.bubbleTextWrap}>
+            {/* Build 22: explicit selectable={false} — MarkdownText
+                defaults to true, which inside this BottomSheetFlatList
+                let a drag starting on a message bubble be captured as
+                text-selection instead of list scroll. */}
+            <MarkdownText
+              text={message.text}
+              color={message.role === "user" ? colors.onAccent : colors.textPrimary}
+              selectable={false}
+            />
+            {message.isStreaming && (
+              <StreamingCursor color={message.role === "user" ? colors.onAccent : colors.accent} />
+            )}
+          </View>
+        )}
+        {message.role === "assistant" && !message.isStreaming && message.text.length > 0 && (
+          <Pressable onPress={() => onToggleSpeech(message)} style={styles.speakerButton}>
+            <Text style={styles.speakerButtonText}>{speakingMessageId === message.id ? "⏹ Stop" : "🔊 Listen"}</Text>
+          </Pressable>
+        )}
+        {!!message.citations?.length && (
+          <View style={styles.citationRow}>
+            {message.citations.map((citation) => (
+              <Pressable key={citation.noteId} onPress={() => onShowCitation(citation.noteId)} style={styles.citationChip}>
+                <Text style={styles.citationChipText}>[Note {citation.index}]</Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </Pressable>
+    );
+  };
 
   return (
     <View style={styles.container}>
@@ -183,9 +279,9 @@ export function ChatSheetContent({
           ref={plainListRef}
           style={styles.messageList}
           contentContainerStyle={messageListContentContainerStyle}
-          data={messages}
-          keyExtractor={(item) => item.id}
-          onContentSizeChange={scrollToEnd}
+          data={data}
+          keyExtractor={(item) => (item.kind === "note" ? item.note.id : item.message.id)}
+          onContentSizeChange={mode === "ask" ? scrollToEnd : undefined}
           ListEmptyComponent={emptyComponent}
           renderItem={renderItem}
         />
@@ -194,15 +290,15 @@ export function ChatSheetContent({
           ref={sheetListRef}
           style={styles.messageList}
           contentContainerStyle={messageListContentContainerStyle}
-          data={messages}
-          keyExtractor={(item) => item.id}
-          onContentSizeChange={scrollToEnd}
+          data={data}
+          keyExtractor={(item) => (item.kind === "note" ? item.note.id : item.message.id)}
+          onContentSizeChange={mode === "ask" ? scrollToEnd : undefined}
           ListEmptyComponent={emptyComponent}
           renderItem={renderItem}
         />
       )}
 
-      {messages.length === 0 && isModelReady && (
+      {mode === "ask" && messages.length === 0 && isModelReady && (
         <View style={styles.starterChipRow}>
           {STARTER_PROMPTS.map((prompt) => (
             <Pressable
@@ -222,7 +318,7 @@ export function ChatSheetContent({
           HistorySheet.tsx beneath whichever list is showing, Notes or QA
           alike, rather than duplicated per-tab. */}
 
-      {modelDownload.status === "cellular_blocked" && (
+      {mode === "ask" && modelDownload.status === "cellular_blocked" && (
         <View style={styles.chatModelPrompt}>
           <Text style={styles.chatModelPromptTitle}>Chat model needed</Text>
           <Text style={styles.chatModelPromptBody}>
@@ -235,7 +331,7 @@ export function ChatSheetContent({
         </View>
       )}
 
-      {(modelDownload.status === "error" || modelDownload.status === "paused_offline") && (
+      {mode === "ask" && (modelDownload.status === "error" || modelDownload.status === "paused_offline") && (
         <View style={styles.chatModelPrompt}>
           <Text style={styles.chatModelPromptTitle}>
             {modelDownload.status === "paused_offline" ? "Download Paused" : "Setup Interrupted"}
@@ -266,6 +362,31 @@ const styles = StyleSheet.create({
     marginTop: spacing.xl,
     textAlign: "center",
     paddingHorizontal: spacing.lg,
+  },
+  // Record-mode empty state — same copy/shape as NotesSheetContent.tsx's own
+  // (Archive still uses that component directly and keeps this in sync
+  // independently; see this file's DrawerListItem/emptyComponent doc
+  // comments for why the two copies exist).
+  notesEmptyState: {
+    alignItems: "center",
+    paddingTop: spacing.xxl,
+    paddingHorizontal: spacing.lg,
+  },
+  notesEmptySubtext: {
+    color: colors.textMuted,
+    fontSize: 13,
+    marginTop: spacing.xs,
+    textAlign: "center",
+  },
+  restoreLinkRow: {
+    marginTop: spacing.lg,
+    alignItems: "center",
+  },
+  restoreLinkText: {
+    color: colors.accent,
+    fontSize: 13,
+    fontWeight: "600",
+    textAlign: "center",
   },
   bubble: {
     borderRadius: radius.lg,
