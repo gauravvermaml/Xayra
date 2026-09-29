@@ -111,6 +111,26 @@ export const FEW_SHOT_ANSWER =
   "• Groceries: You have a note to buy milk, eggs, and sourdough.\n" +
   "• Appointments: Dentist checkup scheduled for Tuesday morning.";
 
+/**
+ * A second, narrower few-shot turn — minimal mode's own, injected instead of
+ * (not alongside) the general-format example above. Live device testing
+ * found that the appended person-voice instruction in
+ * `buildSystemPromptWithDate()` alone wasn't enough: the fine-tuned model's
+ * SFT training apparently never drilled converting a note's own first-person
+ * phrasing ("I bought milk") into a second-person answer ("You bought
+ * milk") the way the "full" prompt's LAW 6 used to guarantee it for the
+ * stock model, and a single instruction sentence with no example to anchor
+ * it wasn't strong enough to override that. This example is deliberately
+ * narrow and blunt — its ONLY job is demonstrating that exact conversion,
+ * unlike FEW_SHOT_ANSWER above (format/bullets), which minimal mode still
+ * skips as redundant with the trained weights.
+ */
+export const MINIMAL_PERSON_VOICE_EXAMPLE_CONTEXT =
+  "--- NOTE 1 [Recorded: Monday, 01 Jan 2026 at 08:00] ---\n" +
+  "I bought milk and eggs this morning, and I need to call the dentist tomorrow.";
+export const MINIMAL_PERSON_VOICE_EXAMPLE_QUERY = "What did I buy this morning?";
+export const MINIMAL_PERSON_VOICE_EXAMPLE_ANSWER = "You bought milk and eggs this morning.";
+
 export const WEEKDAY_NAMES = [
   "Sunday",
   "Monday",
@@ -168,7 +188,23 @@ export function buildSystemPromptWithDate(): string {
     // Today's date is runtime context, not instruction — no amount of
     // fine-tuning teaches a model what day it is at inference time, so this
     // still has to be injected even in the minimal prompt.
-    return `${MINIMAL_RAG_SYSTEM_PROMPT}\n\nToday is ${today}.`;
+    //
+    // The person-voice line below is appended the same way, for the same
+    // reason: MINIMAL_RAG_SYSTEM_PROMPT itself must stay byte-for-byte the
+    // string scripts/dataset/generate_sft.py trained against (see that
+    // constant's own doc comment) — this sentence is runtime-appended
+    // context, not a change to the trained prompt. Live user report: notes
+    // are transcribed in the user's own first-person voice ("I bought
+    // milk"), and without an explicit instruction the fine-tuned model
+    // carries that same "I" straight through into its answer instead of
+    // converting it to "you" — the SFT set apparently didn't drill this
+    // consistently enough to hold it in the weights alone. The "full"
+    // prompt's LAW 6 above states the same rule for the stock model; this
+    // is that rule's minimal-mode equivalent.
+    return (
+      `${MINIMAL_RAG_SYSTEM_PROMPT}\n\nToday is ${today}. Always refer to the user in the second person ` +
+      '("you"), never as "I" — the notes are written in the user\'s own first-person voice, but your answer must address them, not speak as them.'
+    );
   }
 
   return (
@@ -203,13 +239,18 @@ export const CHAT_TEMPLATE_STOP_TOKENS = [QWEN_IM_END, "<|endoftext|>"];
 export function buildPrompt(userQuery: string, noteContext: string): string {
   const systemPrompt = buildSystemPromptWithDate();
 
-  // A fine-tuned model holds the answer format in its weights; replaying the
-  // fixed few-shot exchange would spend prefill teaching it something it
-  // already knows — the same reasoning extractionLogic.ts's minimal mode
-  // uses to drop its few-shot block.
+  // A fine-tuned model holds the answer FORMAT in its weights, so replaying
+  // FEW_SHOT_ANSWER's bullets-and-structure example would spend prefill
+  // teaching it something it already knows — the same reasoning
+  // extractionLogic.ts's minimal mode uses to drop its own few-shot block.
+  // MINIMAL_PERSON_VOICE_EXAMPLE_* is a narrower, separate exception to that:
+  // see its own doc comment for why the specific first-person-to-second-
+  // person conversion wasn't reliably trained in and needed a demonstrating
+  // turn, not just an instruction sentence.
   const fewShotTurns =
     ragPromptMode === "minimal"
-      ? ""
+      ? `<|im_start|>user\n${MINIMAL_PERSON_VOICE_EXAMPLE_CONTEXT}\n\n${MINIMAL_PERSON_VOICE_EXAMPLE_QUERY}${QWEN_IM_END}\n` +
+        `<|im_start|>assistant\n${MINIMAL_PERSON_VOICE_EXAMPLE_ANSWER}${QWEN_IM_END}\n`
       : `<|im_start|>user\n${FEW_SHOT_CONTEXT}\n\n${FEW_SHOT_USER_QUERY}${QWEN_IM_END}\n` +
         `<|im_start|>assistant\n${FEW_SHOT_ANSWER}${QWEN_IM_END}\n`;
 

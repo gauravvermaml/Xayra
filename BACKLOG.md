@@ -86,13 +86,3 @@ may have been suppressing this too rather than it being a separate issue.
 
 Raised 2026-09-29.
 
-### RAG answers should address the user in third person, not first
-
-Notes are transcribed in the user's own first-person voice ("I bought
-milk…"), and Xayra's RAG answers currently carry that same "I" straight
-through into the response instead of converting it to "you" — reads as
-Xayra claiming the user's own actions rather than reporting on them. Needs a
-prompt-level fix (`services/ai/localLlama.ts`'s system prompt / "7 laws" —
-see `qwen-15b-single-model-cutover` in project memory), not a UI change.
-
-Raised 2026-09-29.
