@@ -1,6 +1,8 @@
-import { Pressable, StyleSheet, View } from "react-native";
-import Animated, { FadeIn, FadeOut } from "react-native-reanimated";
-import { Feather } from "@expo/vector-icons";
+import { useState } from "react";
+import { StyleSheet, View } from "react-native";
+import Animated, { interpolate, runOnJS, useAnimatedReaction, useAnimatedStyle, type SharedValue } from "react-native-reanimated";
+
+import { SwipeableTrayHandle } from "./SwipeableTrayHandle";
 
 export type ExpandedTextOverlayProps = {
   /** Device's safe-area top inset — pads the box's own top edge so it
@@ -10,15 +12,46 @@ export type ExpandedTextOverlayProps = {
   /** Device's safe-area bottom inset — pads the box's own bottom edge so it
    * stops just above the Android nav bar rather than running under it. */
   bottomInset: number;
-  onClose: () => void;
+  /** Shared 0 (hidden, at the tray)..1 (fully expanded) progress — see
+   * SwipeableTrayHandle.tsx's own doc comment for the full gesture
+   * contract. Drives this component's own position/opacity continuously;
+   * app/index.tsx owns the value and keeps this component mounted
+   * permanently (not conditionally on some "isExpanded" boolean) so a drag
+   * can be tracked from its very first pixel rather than only reacting
+   * after a release. */
+  progress: SharedValue<number>;
+  /** Pixels of drag mapped to `progress`'s full 0..1 range — same value
+   * HistorySheet.tsx's own tray handle uses for the same `progress`. Also
+   * doubles as this component's own "how far off-screen to sit at
+   * `progress === 0`" offset — see this file's own doc comment below. */
+  dragDistance: number;
+  /** Fires once a drag on this component's own (closing) handle settles
+   * toward 0 (closed) or 1 (still expanded) — see SwipeableTrayHandle.tsx's
+   * own `onSettle` doc comment for why this fires on the release DECISION,
+   * not once the spring animation finishes. */
+  onSettle: (expanded: boolean) => void;
   /** Whichever list (Recorded notes or Searched notes) is currently active
    * — rendered as a fresh element here, independent of HistorySheet's own
    * copy of the same content (see this file's own doc comment for why). */
   children: React.ReactNode;
 };
 
+/** Below this, the overlay is fully hidden and non-interactive, and its
+ * (real, potentially not-cheap) `children` aren't mounted at all — matches
+ * the render cost this component had at rest back when it was
+ * conditionally mounted outright, while still letting `progress` start
+ * tracking a drag from its very first pixel of movement. */
+const INTERACTIVE_THRESHOLD = 0.01;
+/** Opacity ramps in over just the first sliver of the drag, on top of the
+ * continuous position tracking below — pure position alone (no fade) looks
+ * acceptable by itself, since this box and the tray beneath it share the
+ * same dark glass palette, but a quick fade removes any risk of a visible
+ * seam right as `children` mounts in at `INTERACTIVE_THRESHOLD`. */
+const OPACITY_RAMP_END = 0.15;
+
 /**
- * MONOCHROMATIC GLASS — FULL-SCREEN EXPANDED STAGE.
+ * MONOCHROMATIC GLASS — FULL-SCREEN EXPANDED STAGE, CONTINUOUSLY DRAG-
+ * TRACKED.
  *
  * A real, deliberate architecture change from this feature's first version:
  * that version tried to reach "88%" by asking `@gorhom/bottom-sheet` itself
@@ -41,26 +74,64 @@ export type ExpandedTextOverlayProps = {
  * the entire canvas, rendered as a sibling of `<HistorySheet>` in
  * app/index.tsx, completely independent of the sheet's own snap-point state
  * machine. The sheet itself is left exactly where it was (50%) underneath;
- * since this overlay is opaque and covers the whole screen, nothing about
- * that matters visually. This also directly satisfies two related asks:
- * the compose bar and drag handle (both owned by the sheet) are structurally
- * impossible to see here since they're a different component entirely, and
- * a `flex: 1` box inside a plain (non-bottom-sheet) container tracks its
- * real parent height on every frame with no library-imposed ceiling — it
- * genuinely fills from just below the status bar to just above the nav bar.
+ * this overlay simply grows to cover it.
+ *
+ * SECOND real architecture change, on top of the first: this component used
+ * to be conditionally MOUNTED on an `isExpanded` boolean, entering with a
+ * `FadeIn`/scale-spring "pop" once a separate threshold-swipe gesture
+ * (elsewhere) decided to commit. Live user testing rejected that outright —
+ * no matter how the pop's own spring was tuned, it never felt like the SAME
+ * gesture as the sheet's own native 0%-50% drag, because nothing on screen
+ * actually followed the finger during the swipe itself; the pop only ever
+ * happened AFTER release. This version is instead ALWAYS mounted (whenever
+ * the tray itself would be) and driven continuously by `progress`:
+ *  - `transform.translateY` interpolates from `dragDistance` (roughly
+ *    aligning this box's top edge with the TRAY's own top edge, at
+ *    `progress === 0`) down to `0` (fully in place, `progress === 1`) —
+ *    `dragDistance` is deliberately the SAME distance the drag gesture maps
+ *    across (see SwipeableTrayHandle.tsx), not a separately chosen number,
+ *    so the two stay geometrically consistent by construction.
+ *  - `opacity` only ramps in over the first `OPACITY_RAMP_END` of that
+ *    range, and the real `children` only mount once `progress` clears
+ *    `INTERACTIVE_THRESHOLD` — this component's OWN wrapper (backdrop + box
+ *    + handle) is cheap enough to keep permanently mounted, but its
+ *    children are exactly as expensive as before, so they stay
+ *    conditionally mounted to preserve the old at-rest cost profile.
+ * The net effect: dragging the tray's own handle (HistorySheet.tsx) or this
+ * component's own closing handle both manipulate the SAME `progress` value
+ * continuously, and this box visibly tracks the finger the whole time,
+ * genuinely matching the sheet's own native drag feel rather than
+ * approximating it with a tuned entrance animation.
  */
-export function ExpandedTextOverlay({ topInset, bottomInset, onClose, children }: ExpandedTextOverlayProps) {
+export function ExpandedTextOverlay({ topInset, bottomInset, progress, dragDistance, onSettle, children }: ExpandedTextOverlayProps) {
+  const [interactive, setInteractive] = useState(false);
+
+  useAnimatedReaction(
+    () => progress.value > INTERACTIVE_THRESHOLD,
+    (isInteractive, wasInteractive) => {
+      if (isInteractive !== wasInteractive) {
+        runOnJS(setInteractive)(isInteractive);
+      }
+    }
+  );
+
+  const containerStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(progress.value, [0, OPACITY_RAMP_END], [0, 1], "clamp"),
+    transform: [{ translateY: (1 - progress.value) * dragDistance }],
+  }));
+
   return (
-    <Animated.View entering={FadeIn.duration(200)} exiting={FadeOut.duration(150)} style={styles.overlay}>
+    <Animated.View pointerEvents={interactive ? "auto" : "none"} style={[styles.overlay, containerStyle]}>
       <View style={[styles.box, { marginTop: topInset + 16, marginBottom: bottomInset + 16 }]}>
-        <Pressable onPress={onClose} hitSlop={8} style={styles.microChip}>
-          <Feather name="x" size={18} color="#E2E8F0" />
-        </Pressable>
-        {/* CHIP CLEARANCE: same fixed offset (chip's own 44px bottom edge +
-            a 12px gap) as HistorySheet's own idle-stage box, so the gap
-            between the chip and the first card reads identically whether
-            the box is at its 50% or its fully expanded stage. */}
-        <View style={styles.listClearance}>{children}</View>
+        {/* Same handle component as HistorySheet.tsx's own tray — dragging
+            it down continuously drives the SAME `progress` value back
+            toward 0, collapsing this box back into the tray. */}
+        <SwipeableTrayHandle progress={progress} dragDistance={dragDistance} onSettle={onSettle} style={styles.closeHandleRow} />
+        {/* `listClearance`'s padding matches HistorySheet.tsx's own tray
+            exactly — see that file's `listClearance`/`trayHandleRow` styles
+            for the full reasoning. `children` only mounts once interactive
+            (see this file's own top doc comment for why). */}
+        <View style={styles.listClearance}>{interactive ? children : null}</View>
       </View>
     </Animated.View>
   );
@@ -93,18 +164,10 @@ const styles = StyleSheet.create({
   },
   listClearance: {
     flex: 1,
-    paddingTop: 40,
+    paddingTop: 4,
   },
-  microChip: {
-    position: "absolute",
-    top: 12,
-    right: 12,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: "rgba(255, 255, 255, 0.08)",
-    alignItems: "center",
-    justifyContent: "center",
-    zIndex: 10,
+  closeHandleRow: {
+    paddingTop: 4,
+    paddingBottom: 8,
   },
 });

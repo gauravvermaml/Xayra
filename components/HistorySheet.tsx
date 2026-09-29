@@ -1,10 +1,10 @@
-import { forwardRef, useCallback } from "react";
+import { forwardRef, useCallback, useMemo } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
 import BottomSheet, { type BottomSheetProps } from "@gorhom/bottom-sheet";
 import type { SharedValue } from "react-native-reanimated";
-import { Feather } from "@expo/vector-icons";
 
 import { ModelDownloadCard } from "./ModelDownloadCard";
+import { createExpandOverdragGestureHandlersHook } from "./useExpandOverdragGestureHandlers";
 import { spacing } from "../constants/theme";
 import type { ModelDownloadStatus } from "../services/ai/modelDownloadManager";
 
@@ -44,12 +44,22 @@ import type { ModelDownloadStatus } from "../services/ai/modelDownloadManager";
  * full-screen overlay (`components/ExpandedTextOverlay.tsx`), rendered by
  * app/index.tsx as an ordinary sibling of `<HistorySheet>` — not a stage of
  * this sheet at all, and entirely outside `@gorhom/bottom-sheet`'s state
- * machine. This sheet's own gesture range genuinely never exceeds 50%
- * (nothing above it is even a concept this component has anymore), and the
- * overlay's plain `flex: 1` box has no library-imposed content-height
- * ceiling to fight. This component's own micro-chip (see below) only ever
- * shows the arrow and only ever calls `onToggleExpand` — it has no "expanded"
- * state of its own to render.
+ * machine (its own content area has no library-imposed height ceiling to
+ * fight, unlike a real stage of this sheet would).
+ *
+ * ONE HANDLE, NOT TWO — live product correction: an earlier version of this
+ * gave the 50%-100% transition its OWN separate handle, rendered inside the
+ * tray's own glass box below. At the 50% resting stage that put two handles
+ * on screen simultaneously (this sheet's own, above the compose bar, and
+ * the tray's), and a user could easily grab the WRONG one expecting it to
+ * collapse the sheet back to its peek. The fix: this sheet's own
+ * `handleComponent` (`SheetDragHandle`, below) is now the ONLY handle for
+ * the ENTIRE 20%-50%-100% range — dragging it up past 50%, without
+ * releasing, continues seamlessly into `expandProgress` via a custom
+ * `gestureEventsHandlersHook` (`useExpandOverdragGestureHandlers.ts` — see
+ * its own doc comment for exactly how it hooks into the library's own
+ * gesture internals without replacing them). The tray's glass box below no
+ * longer renders any handle of its own at all.
  */
 export const SHEET_SNAP_POINTS = ["20%", "50%"];
 
@@ -129,12 +139,22 @@ export type HistorySheetProps = {
       screenshot showed the card's subtitle clipped flush against the
       Android nav bar without it). */
   bottomInset: number;
-  /** Opens `ExpandedTextOverlay` (owned and rendered by app/index.tsx,
-   * entirely outside this sheet) — this component's own micro-chip
-   * (top-right of `textContainerBox`) only ever shows the arrow and only
-   * ever calls this; it has no "expanded" state of its own to track or
-   * render (see SHEET_SNAP_POINTS's doc comment above for why). */
-  onToggleExpand: () => void;
+  /** Shared 0..1 progress this sheet's own handle drives once a drag
+   * continues past its highest (50%) snap point — see
+   * useExpandOverdragGestureHandlers.ts's own doc comment for the full
+   * mechanism, and SHEET_SNAP_POINTS's above for why the "expanded,
+   * full-screen" state it drives toward (`ExpandedTextOverlay`, rendered by
+   * app/index.tsx) isn't a stage of this sheet at all. */
+  expandProgress: SharedValue<number>;
+  /** Pixels of continued drag past the highest snap point mapped to
+   * `expandProgress`'s full 0..1 range — same value `ExpandedTextOverlay`'s
+   * own closing handle uses for the reverse direction. */
+  expandDragDistance: number;
+  /** Fires once a drag past the highest snap point settles toward 1 (open)
+   * or 0 (still collapsed) — see useExpandOverdragGestureHandlers.ts's own
+   * `onExpandSettle` doc comment for why this fires on the release
+   * DECISION, not once the spring animation finishes. */
+  onExpandSettle: (expanded: boolean) => void;
   /** Spring physics shared with every `snapToIndex` call this sheet makes,
    * via `@gorhom/bottom-sheet`'s own `animationConfigs` prop — so every snap
    * (backdrop tap, auto-peek on submit, keyboard focus, drag-handle tap)
@@ -147,12 +167,13 @@ export type HistorySheetProps = {
  * reads as part of the same canvas as the screen behind it. Two
  * gesture-reachable snap points (see SHEET_SNAP_POINTS) — the 50% stage is
  * what `app/index.tsx` snaps to automatically while an ASK-classified
- * request is processing, and is also as far as any manual swipe can ever
- * go. `content` (Q&A/"Recent Answers" history) sits inside the
- * monochromatic glass box; its own micro-chip opens `ExpandedTextOverlay` —
+ * request is processing, and is also the sheet's own configured ceiling;
+ * dragging its handle past that continues into `expandProgress` instead
+ * (ONE HANDLE, NOT TWO — see SHEET_SNAP_POINTS's own doc comment). `content`
+ * (Q&A/"Recent Answers" history) sits inside the monochromatic glass box,
+ * unchanged — `ExpandedTextOverlay`, the state that handle drags toward, is
  * a separate, full-screen component app/index.tsx renders outside this
- * sheet entirely; see SHEET_SNAP_POINTS's doc comment above for why that
- * state doesn't live here.
+ * sheet entirely.
  */
 export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function HistorySheet(
   {
@@ -164,7 +185,9 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     contentHidden,
     modelDownload,
     bottomInset,
-    onToggleExpand,
+    expandProgress,
+    expandDragDistance,
+    onExpandSettle,
     animationConfigs,
   },
   ref
@@ -179,6 +202,21 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     }
     ref.current?.snapToIndex(1);
   }, [ref]);
+
+  // ONE HANDLE, NOT TWO (see SHEET_SNAP_POINTS's own doc comment) — this
+  // hook wraps the library's own default handle-gesture behavior so that
+  // dragging THIS sheet's handle past 50%, without releasing, continues
+  // driving `expandProgress` instead of just rubber-banding and springing
+  // back. Memoized on its (all effectively stable — a SharedValue, a
+  // useCallback'd function, a constant number) inputs so `<BottomSheet>`
+  // receives the same `gestureEventsHandlersHook` reference across renders,
+  // the same way its own `handleComponent` (`renderHandle`, below) does —
+  // see useExpandOverdragGestureHandlers.ts's own doc comment for the full
+  // mechanism.
+  const expandGestureHandlersHook = useMemo(
+    () => createExpandOverdragGestureHandlersHook({ expandProgress, expandDragDistance, onExpandSettle }),
+    [expandProgress, expandDragDistance, onExpandSettle]
+  );
 
   const renderHandle = useCallback(() => <SheetDragHandle onPress={handleTapDragHandle} />, [handleTapDragHandle]);
 
@@ -237,6 +275,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       android_keyboardInputMode="adjustResize"
       backgroundStyle={styles.background}
       handleComponent={renderHandle}
+      gestureEventsHandlersHook={expandGestureHandlersHook}
       animationConfigs={animationConfigs}
     >
       {/* Build 21 STICKY DRAWER HEADER: always rendered, at every snap
@@ -274,28 +313,13 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
         <View style={styles.body}>
           {/* Monochromatic glass container: one translucent, bordered box
               rather than the list rendering directly against the sheet's
-              own jet-black background. This box's own micro-chip only ever
-              shows the arrow and only ever calls `onToggleExpand` — the
-              "expanded, full-screen" state it opens is
-              `ExpandedTextOverlay`, a completely separate component
-              app/index.tsx renders outside this sheet (see
-              SHEET_SNAP_POINTS's doc comment above for why). */}
-          <View style={styles.textContainerBox}>
-            <Pressable onPress={onToggleExpand} hitSlop={8} style={styles.microChip}>
-              <Feather name="arrow-up-right" size={18} color="#E2E8F0" />
-            </Pressable>
-            {/* CHIP CLEARANCE: found on-device — the chip (top:12, 32px tall,
-                so it occupies the box's own top 12-44px) was overlapping the
-                very top of the first message card, since the box's own 16px
-                padding alone wasn't enough clearance below it. This fixed
-                extra top offset (chip's own 44px bottom edge + a 12px gap)
-                reserves real layout space above the list instead, so
-                content structurally starts below the chip rather than
-                merely being visually covered by it. `ExpandedTextOverlay`
-                uses this exact same offset for its own copy of this box, so
-                the gap reads identically in both places. */}
-            <View style={styles.listClearance}>{content}</View>
-          </View>
+              own jet-black background. No handle of its own — see
+              SHEET_SNAP_POINTS's own doc comment for why (ONE HANDLE, NOT
+              TWO): the sheet's own handle above (`handleComponent`) now
+              covers the whole 20%-50%-100% range via
+              `expandGestureHandlersHook`, so this box is just its plain
+              padded content, same as any other flex box in this app. */}
+          <View style={styles.textContainerBox}>{content}</View>
 
           <View style={{ paddingBottom: bottomInset }}>
             <ModelDownloadCard modelDownload={modelDownload} />
@@ -354,28 +378,5 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     padding: 16,
     overflow: "hidden",
-  },
-  // CHIP CLEARANCE (see the render-side comment above): 44 (chip's own
-  // bottom edge, relative to the box's outer top) + 12 (breathing room)
-  // rounded to 40, on top of the box's own 16px padding — 56px total from
-  // the box's top edge to the first list item, a clean 12px gap below the
-  // chip.
-  listClearance: {
-    flex: 1,
-    paddingTop: 40,
-  },
-  // Floating micro-chip toggle, top-right corner of textContainerBox.
-  microChip: {
-    position: "absolute",
-    top: 12,
-    right: 12,
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: "rgba(255, 255, 255, 0.08)",
-    alignItems: "center",
-    justifyContent: "center",
-    // Sits above the list content it's layered on top of.
-    zIndex: 10,
   },
 });

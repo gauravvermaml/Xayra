@@ -104,7 +104,7 @@ function quickMenuPopIn() {
 // animated index, so they're derived here once, from SHEET_SNAP_POINTS
 // itself, rather than each hardcoding the split independently. Both stay
 // pinned at their 50%-height values throughout the 88% expanded stage (that
-// stage isn't a real index — see `handleToggleExpand` below — so
+// stage isn't a real sheet index — see `expandProgress` below — so
 // `sheetAnimatedIndex` simply never reports anything past 1), which is fine:
 // what actually hides the record button behind the sheet at 88% is the
 // sheet's own real rendered height sitting on top of it in z-order, not
@@ -113,6 +113,15 @@ const SCREEN_HEIGHT = Dimensions.get("window").height;
 const SHEET_HEIGHTS_PX = SHEET_SNAP_POINTS.map(
   (point) => (parseFloat(point) / 100) * SCREEN_HEIGHT
 ) as [number, number];
+/** Pixels of drag the tray's own "expand" handle and the full-screen
+ * overlay's own "collapse" handle both map their full 0..1 progress across
+ * — deliberately the SAME distance the real sheet travels between its two
+ * configured snap points (its own native drag), not an arbitrary or
+ * screen-height-derived number, so the 50%↔100% gesture takes the same
+ * amount of finger travel to feel "settled" as the sheet's own 20%↔50% one
+ * does. See SwipeableTrayHandle.tsx's own doc comment for the full gesture
+ * design this feeds. */
+const EXPAND_DRAG_DISTANCE = SHEET_HEIGHTS_PX[1] - SHEET_HEIGHTS_PX[0];
 /** Clean breathing room kept between the record button and the sheet's top
  * edge, on top of the sheet's own current height — Build 20 BUTTON
  * CLEARANCE, most visible when the sheet auto-peeks to Index 1 (50%) while
@@ -152,8 +161,9 @@ export default function HomeScreen() {
   // The To-Dos screen is a full-screen overlay rendered as a sibling of this
   // screen's own content (see components/TodosOverlay.tsx's doc comment for
   // why it's deliberately NOT a pushed expo-router route) rather than
-  // navigation state — same conditional-mount pattern as
-  // `isTextBoxExpanded`/`ExpandedTextOverlay` below.
+  // navigation state — conditionally mounted the same way `ExpandedTextOverlay`
+  // used to be, before it became a permanently-mounted, continuously-dragged
+  // surface (see `expandProgress` below).
   const [isTodosVisible, setIsTodosVisible] = useState(false);
   // "Quiet Corner" pass: Archive/Settings' shared entry point — a small
   // popover anchored to the "•••" icon that opens it (quickMenuAnchor
@@ -309,20 +319,24 @@ export default function HomeScreen() {
   const [sheetIndex, setSheetIndex] = useState(0);
   const handleSheetIndexChange = useCallback((index: number) => setSheetIndex(index), []);
 
-  // MONOCHROMATIC GLASS EXPAND/COLLAPSE: the micro-chip toggle opens/closes
-  // `ExpandedTextOverlay` — a plain, full-screen component rendered further
-  // down as an ordinary sibling of `<HistorySheet>`, completely independent
-  // of the sheet's own snap-point state machine. Two earlier versions tried
-  // to make this a literal stage OF the sheet itself (a real "88%" snap
-  // point, then a `snapToPosition("88%")` excursion) — see
-  // HistorySheet.tsx's SHEET_SNAP_POINTS doc comment for exactly what broke
-  // both times. Because the overlay is a plain opaque full-screen View, not
-  // a sheet stage, nothing else in this file needs to know or care about
-  // `isTextBoxExpanded` — the sheet just stays wherever it already was
-  // (always 50%, since that's the only place the chip that opens this
-  // lives) underneath it.
+  // MONOCHROMATIC GLASS EXPAND/COLLAPSE: `expandProgress` (0 = tray, 1 =
+  // fully expanded) is dragged continuously by BOTH the tray's own handle
+  // (HistorySheet.tsx) and the full-screen overlay's own handle
+  // (ExpandedTextOverlay.tsx, always mounted now — see its own doc comment
+  // for why) — see SwipeableTrayHandle.tsx's doc comment for the full
+  // gesture design. Two earlier versions tried to make the expanded stage a
+  // literal stage OF the sheet itself (a real "88%" snap point, then a
+  // `snapToPosition("88%")` excursion), and a third used a discrete
+  // threshold-swipe that only triggered a separate fade-in after release —
+  // see HistorySheet.tsx's SHEET_SNAP_POINTS doc comment for exactly what
+  // broke each time. `isTextBoxExpanded` (plain JS state, unchanged in
+  // spirit from before) still exists for the few things that need a simple
+  // yes/no — hiding the floating pill cluster below — updated via
+  // `handleExpandSettle`, fired the instant a drag's release DECIDES which
+  // way it's settling, not once the spring animation actually finishes.
   const [isTextBoxExpanded, setIsTextBoxExpanded] = useState(false);
-  const handleToggleExpand = useCallback(() => setIsTextBoxExpanded((prev) => !prev), []);
+  const expandProgress = useSharedValue(0);
+  const handleExpandSettle = useCallback((expanded: boolean) => setIsTextBoxExpanded(expanded), []);
 
   // Shared spring physics for every snapToIndex call this sheet makes
   // (`@gorhom/bottom-sheet`'s own `animationConfigs` prop, applied uniformly
@@ -1138,8 +1152,9 @@ export default function HomeScreen() {
           second, independent animated position purely to track an
           overshoot state the user isn't even meant to interact with these
           controls during (they're browsing/reading, not recording, while
-          expanded — the chip's own "x" is right there to get back), hiding
-          the cluster removes the collision outright. */}
+          expanded — a swipe down on the expanded view's own handle is right
+          there to get back), hiding the cluster removes the collision
+          outright. */}
       {/* Also hidden while TodosOverlay is open (isTodosVisible) — plain
           sibling paint order alone didn't reliably keep this Animated.View
           (entering/exiting FadeIn/FadeOut) behind the overlay on-device;
@@ -1203,7 +1218,9 @@ export default function HomeScreen() {
         onIndexChange={handleSheetIndexChange}
         modelDownload={chatSession.modelDownload}
         bottomInset={insets.bottom}
-        onToggleExpand={handleToggleExpand}
+        expandProgress={expandProgress}
+        expandDragDistance={EXPAND_DRAG_DISTANCE}
+        onExpandSettle={handleExpandSettle}
         animationConfigs={sheetAnimationConfigs}
         composeBarSlot={
           <ComposeBar
@@ -1261,34 +1278,42 @@ export default function HomeScreen() {
           header, center button, floating pills, the sheet itself, even the
           nav-bar inset strip above. See ExpandedTextOverlay.tsx's own doc
           comment for why this is a separate component entirely rather than
-          a stage of `<HistorySheet>`. Builds its OWN fresh content element
-          (not the same instance passed to `<HistorySheet>` above) since only
-          one of the two copies is ever actually mounted at a time — this
-          one, while expanded; HistorySheet's own copy, otherwise. Same
+          a stage of `<HistorySheet>`, and for why it's ALWAYS mounted now
+          (driven continuously by `expandProgress`) rather than conditionally
+          on `isTextBoxExpanded` the way it used to be — dragging needs to
+          track from the first pixel, not just react after a release. Builds
+          its OWN fresh content element (not the same instance passed to
+          `<HistorySheet>` above) — both stay mounted simultaneously now
+          (unlike before), but only one is ever actually VISIBLE at a time,
+          gated by `expandProgress` inside ExpandedTextOverlay itself. Same
           Record/Ask mode split as HistorySheet's own `content` prop above —
           expanding from the notes list should keep showing notes, not
           suddenly switch to Q&A history. */}
-      {isTextBoxExpanded && (
-        <ExpandedTextOverlay topInset={insets.top} bottomInset={insets.bottom} onClose={handleToggleExpand}>
-          <ChatSheetContent
-            mode={inputMode}
-            notes={notes}
-            onDeleteNote={handleDeleteNote}
-            isRestoring={false}
-            onRestoreFromDrive={handleRestoreFromDriveShortcut}
-            messages={chatSession.messages}
-            isSending={chatSession.isSending}
-            speakingMessageId={chatSession.speakingMessageId}
-            modelDownload={chatSession.modelDownload}
-            isModelReady={chatSession.isModelReady}
-            onSubmitStarterPrompt={(prompt) => void chatSession.submitQuery(prompt, "text")}
-            onToggleSpeech={chatSession.toggleSpeech}
-            onShowCitation={handleShowCitation}
-            bottomInset={insets.bottom}
-            usePlainList
-          />
-        </ExpandedTextOverlay>
-      )}
+      <ExpandedTextOverlay
+        topInset={insets.top}
+        bottomInset={insets.bottom}
+        progress={expandProgress}
+        dragDistance={EXPAND_DRAG_DISTANCE}
+        onSettle={handleExpandSettle}
+      >
+        <ChatSheetContent
+          mode={inputMode}
+          notes={notes}
+          onDeleteNote={handleDeleteNote}
+          isRestoring={false}
+          onRestoreFromDrive={handleRestoreFromDriveShortcut}
+          messages={chatSession.messages}
+          isSending={chatSession.isSending}
+          speakingMessageId={chatSession.speakingMessageId}
+          modelDownload={chatSession.modelDownload}
+          isModelReady={chatSession.isModelReady}
+          onSubmitStarterPrompt={(prompt) => void chatSession.submitQuery(prompt, "text")}
+          onToggleSpeech={chatSession.toggleSpeech}
+          onShowCitation={handleShowCitation}
+          bottomInset={insets.bottom}
+          usePlainList
+        />
+      </ExpandedTextOverlay>
 
       <NoteDetailModal
         noteId={selectedNoteId}
