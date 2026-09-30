@@ -269,10 +269,11 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
   );
 
   // The four grid layouts all receive the SAME `onOpenTask` from
-  // CalendarBody — Week/Work Week route through the preview card instead of
-  // straight to the edit sheet; Day and Month keep today's direct-to-edit
-  // behavior (Month already has its own two-step via the day panel below).
-  const handleGridOpenTask = layoutMode === "week" || layoutMode === "work_week" ? handlePreviewTask : handleEditDetails;
+  // CalendarBody — Day/Week/Work Week all route through the preview card
+  // now (live-requested: Day used to go straight to the full edit sheet,
+  // inconsistent with the other two); Month keeps its own separate
+  // two-step via the day panel below instead of this preview sheet.
+  const handleGridOpenTask = layoutMode === "month" ? handleEditDetails : handlePreviewTask;
 
   // One handler for both the Add and Edit sheets, since they're the same
   // component in two modes (see `editingTodo`'s own doc comment) — branches

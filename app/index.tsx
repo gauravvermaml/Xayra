@@ -1122,7 +1122,25 @@ export default function HomeScreen() {
   }
 
   return (
-    <Pressable style={styles.canvas} onPress={handleBackdropPress}>
+    <>
+    {/* `pointerEvents="none"` (not just `disabled`) on this backdrop while
+        TodosOverlay is open — live on-device report: this backdrop stayed
+        fully mounted and touchable underneath TodosOverlay (a plain
+        absolute-positioned overlay, not a real native Modal/window), and its
+        own `onPress` was firing on taps meant for TodosOverlay's own search
+        bar — confirmed via temporary diagnostic logging (`Keyboard.dismiss()`
+        firing right after the search bar's own `onFocus`, killing the
+        keyboard before it could ever show). `disabled` alone would only stop
+        THIS Pressable's own `onPress` — it doesn't block descendants, so the
+        record button nested inside `CentralRecorderCanvas` below could still
+        independently receive the same kind of stray touch; `pointerEvents="none"`
+        structurally blocks the whole subtree instead.
+        CRITICAL: TodosOverlay/quickMenu must be siblings OUTSIDE this
+        Pressable (moved out to the `<>` below), not children of it — an
+        earlier version of this fix nested them inside the same Pressable and
+        `pointerEvents="none"` blocked TodosOverlay's own subtree too,
+        freezing the entire To-Dos screen (no scroll, no tap, nothing). */}
+    <Pressable style={styles.canvas} onPress={handleBackdropPress} pointerEvents={isTodosVisible ? "none" : "auto"}>
       {/* Build 23 CLEAN TOP BRAND HEADER: back to just the logo/title (plus
           its subtitle) — no pills, no cogwheel. Both moved out: the cogwheel
           returned to ComposeBar's row (see that component), and Handsfree +
@@ -1357,12 +1375,17 @@ export default function HomeScreen() {
         onClose={() => setSelectedNoteId(null)}
         onDeleted={() => setSelectedNoteId(null)}
       />
+    </Pressable>
 
       {/* Rendered last so it paints above absolutely everything — header,
           center button, floating pills, the sheet, even ExpandedTextOverlay
           — matching that overlay's own z-order reasoning. See
           components/TodosOverlay.tsx's doc comment for why this is a plain
-          sibling overlay rather than a pushed route. */}
+          sibling overlay rather than a pushed route.
+          MUST be a sibling of the canvas Pressable above, not nested inside
+          it — see that Pressable's own doc comment for why (pointerEvents
+          "none" on the parent would otherwise block this overlay's entire
+          subtree too, freezing To-Dos completely). */}
       {isTodosVisible && (
         <Animated.View entering={todosOverlayPopIn} exiting={FadeOut.duration(150)} style={styles.todosOverlayWrap}>
           <TodosOverlay onClose={() => setIsTodosVisible(false)} />
@@ -1432,7 +1455,7 @@ export default function HomeScreen() {
           </Animated.View>
         </View>
       )}
-    </Pressable>
+    </>
   );
 }
 

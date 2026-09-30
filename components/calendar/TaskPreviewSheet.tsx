@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { StyleSheet } from "react-native";
+import { StyleSheet, View } from "react-native";
 import BottomSheet, { BottomSheetBackdrop, BottomSheetView, type BottomSheetBackdropProps } from "@gorhom/bottom-sheet";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
@@ -81,29 +81,47 @@ export function TaskPreviewSheet({
   );
 
   return (
-    <BottomSheet
-      ref={sheetRef}
-      index={-1}
-      enablePanDownToClose
-      onClose={onClose}
-      backdropComponent={renderBackdrop}
-      backgroundStyle={styles.sheetBackground}
-      handleIndicatorStyle={styles.handleIndicator}
-    >
-      <BottomSheetView style={[styles.content, { paddingBottom: insets.bottom + spacing.lg }]}>
-        {item && (
-          <CalendarTaskCard
-            item={item}
-            variant="full"
-            onPress={onOpenTask}
-            onCheck={onCheckTask}
-            onOpenSourceNote={onOpenSourceNote}
-            onLongPressDelete={onLongPressDelete}
-            onSendToCalendar={onSendToCalendar}
-          />
-        )}
-      </BottomSheetView>
-    </BottomSheet>
+    // Defensive belt-and-suspenders on top of @gorhom/bottom-sheet's own
+    // internal pointerEvents toggling — same fix, same reasoning, as
+    // AddTodoBottomSheet.tsx's own identical wrapper (see that file's doc
+    // comment): BottomSheetBackdrop's `pointerEvents` correction to "none" is
+    // driven by a `useAnimatedReaction` that writes through an `isMounted`
+    // ref set in a `useEffect` — on this sheet's very first mount, that
+    // reaction's initial evaluation can race ahead of the effect and get
+    // silently dropped, leaving the backdrop's default pointerEvents="auto"
+    // (its un-corrected initial state) stuck full-screen and touch-blocking
+    // until a real open/close cycle runs once. Confirmed live on-device as
+    // the actual root cause of the To-Dos search bar being untappable right
+    // after opening the screen, and working again only after first opening
+    // this exact sheet once (Week/Work Week's reminder-tap preview) — this
+    // sheet was the one place that earlier fix was missed. This outer View
+    // makes the guarantee explicit and independent of the library's internal
+    // state, regardless of whether its own animated reaction has settled.
+    <View pointerEvents={item ? "auto" : "none"} style={StyleSheet.absoluteFill}>
+      <BottomSheet
+        ref={sheetRef}
+        index={-1}
+        enablePanDownToClose
+        onClose={onClose}
+        backdropComponent={renderBackdrop}
+        backgroundStyle={styles.sheetBackground}
+        handleIndicatorStyle={styles.handleIndicator}
+      >
+        <BottomSheetView style={[styles.content, { paddingBottom: insets.bottom + spacing.lg }]}>
+          {item && (
+            <CalendarTaskCard
+              item={item}
+              variant="full"
+              onPress={onOpenTask}
+              onCheck={onCheckTask}
+              onOpenSourceNote={onOpenSourceNote}
+              onLongPressDelete={onLongPressDelete}
+              onSendToCalendar={onSendToCalendar}
+            />
+          )}
+        </BottomSheetView>
+      </BottomSheet>
+    </View>
   );
 }
 
