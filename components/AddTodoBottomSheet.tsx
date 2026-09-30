@@ -4,6 +4,7 @@ import BottomSheet, {
   BottomSheetBackdrop,
   BottomSheetScrollView,
   BottomSheetTextInput,
+  useBottomSheetSpringConfigs,
   type BottomSheetBackdropProps,
 } from "@gorhom/bottom-sheet";
 import DateTimePicker, { type DateTimePickerEvent } from "@react-native-community/datetimepicker";
@@ -182,6 +183,18 @@ function formatTime12h(hhmm: string): string {
 // doesn't do correctly.
 const SNAP_POINTS = ["90%"];
 
+/** Live product request: the "+" button's opening motion should have the
+ * same soft/springy feel this session gave the To-Dos pill's own open
+ * (`app/index.tsx`'s `TODOS_OVERLAY_SPRING` — see its own doc comment for
+ * the damping-ratio math on why a genuinely underdamped tuple like this one
+ * is what actually reads as a bounce, versus HistorySheet.tsx's own
+ * `sheetAnimationConfigs`, which is deliberately smoother/non-bouncy for a
+ * sheet mid-drag). Kept as its own local copy of the same values rather
+ * than a shared import, matching this codebase's established per-file
+ * spring-constant convention. Without this, `<BottomSheet>` falls back to
+ * the library's own default spring, unrelated to this app's own physics. */
+const ADD_TODO_SHEET_SPRING = { damping: 14, stiffness: 180, mass: 1 };
+
 /**
  * On-demand "Add a to-do" sheet — a plain `<BottomSheet>` (not
  * `BottomSheetModal`) closed by default (`index={-1}`) and driven open/shut
@@ -206,6 +219,10 @@ const SNAP_POINTS = ["90%"];
 export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = null }: AddTodoBottomSheetProps) {
   const insets = useSafeAreaInsets();
   const sheetRef = useRef<BottomSheet>(null);
+  const animationConfigs = useBottomSheetSpringConfigs(ADD_TODO_SHEET_SPRING);
+  // Imperative focus target for the task input — see the `visible` effect
+  // below for why this replaced a plain `autoFocus` prop.
+  const taskInputRef = useRef<React.ElementRef<typeof BottomSheetTextInput>>(null);
   const [text, setText] = useState("");
   const [recurrence, setRecurrence] = useState<Recurrence>("none");
   // `actionDate` always holds the resolved ISO date that will actually be
@@ -269,6 +286,20 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
         setIsCustomTime(!matchesTimePreset);
       }
       sheetRef.current?.snapToIndex(0);
+      // Replaces a plain `autoFocus` prop on the task input — live bug
+      // report: the Android keyboard was popping up the INSTANT the To-Dos
+      // screen opened, covering half the screen, with nothing tapped. Root
+      // cause: this whole component is always mounted by TodosOverlay.tsx
+      // (a fixed `<BottomSheet index={-1}>`, opened/closed via `visible`
+      // driving `snapToIndex`/`close()`, never conditionally rendered) — so
+      // `autoFocus` fired the moment TodosOverlay itself mounted, regardless
+      // of this sheet's own closed `index={-1}` state; a keyboard doesn't
+      // care whether the input requesting it is visually on-screen. Focusing
+      // imperatively, only inside this branch (only ever reached when
+      // `visible` is actually true — an explicit "+"/edit tap), fixes that:
+      // the keyboard now only ever appears when this sheet is genuinely
+      // opening.
+      taskInputRef.current?.focus();
     } else {
       sheetRef.current?.close();
     }
@@ -403,6 +434,7 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
         keyboardBehavior="interactive"
         keyboardBlurBehavior="restore"
         android_keyboardInputMode="adjustResize"
+        animationConfigs={animationConfigs}
       >
         {/* BottomSheetScrollView, not a plain View — the sheet's fixed 50%
             height plus the Android keyboard (itself routinely ~40-50% of
@@ -423,12 +455,12 @@ export function AddTodoBottomSheet({ visible, onClose, onSave, editingTodo = nul
           <Text style={styles.title}>{editingTodo ? "Edit To-Do" : "New To-Do"}</Text>
 
           <BottomSheetTextInput
+            ref={taskInputRef}
             value={text}
             onChangeText={setText}
             placeholder="What do you need to do?"
             placeholderTextColor="rgba(235,235,245,0.45)"
             style={styles.input}
-            autoFocus
             returnKeyType="done"
           />
 

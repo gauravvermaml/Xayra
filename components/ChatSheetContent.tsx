@@ -376,20 +376,31 @@ const styles = StyleSheet.create({
   messageList: {
     flex: 1,
   },
+  // Styling pass, live feedback: this value used to be `spacing.xl` (24) —
+  // the tray's own handle-to-first-item clearance (HistorySheet.tsx's
+  // `listClearance`/`trayHandleRow`) was tightened to match the list's own
+  // ~12px inter-item rhythm earlier in this session, but this empty-state
+  // text's own top margin is a SEPARATE value that never got the same pass,
+  // so Ask's "Ask anything…" placeholder still sat noticeably further from
+  // the handle than a real first list item would. `spacing.sm` here, on top
+  // of `listClearance`'s own small top padding, lands the total gap back in
+  // that same ~12px rhythm.
   emptyText: {
     color: colors.textMuted,
     fontSize: 14,
-    marginTop: spacing.xl,
+    marginTop: spacing.sm,
     textAlign: "center",
     paddingHorizontal: spacing.lg,
   },
   // Record-mode empty state — same copy/shape as NotesSheetContent.tsx's own
   // (Archive still uses that component directly and keeps this in sync
   // independently; see this file's DrawerListItem/emptyComponent doc
-  // comments for why the two copies exist).
+  // comments for why the two copies exist). Same spacing-pass fix as
+  // `emptyText` above — was `spacing.xxl` (32), even further off the tray's
+  // own tightened rhythm than Ask's copy was.
   notesEmptyState: {
     alignItems: "center",
-    paddingTop: spacing.xxl,
+    paddingTop: spacing.sm,
     paddingHorizontal: spacing.lg,
   },
   notesEmptySubtext: {

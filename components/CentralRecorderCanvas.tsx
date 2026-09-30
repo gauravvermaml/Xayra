@@ -4,6 +4,7 @@ import Animated, {
   Easing,
   interpolate,
   type SharedValue,
+  useAnimatedReaction,
   useAnimatedStyle,
   useSharedValue,
   withRepeat,
@@ -33,43 +34,148 @@ const BAR_WIDTH = 3;
 const MIN_BAR_HEIGHT = 2;
 const MAX_BAR_HEIGHT = 34;
 
-/** One bar of the waveform. All three states are driven by the same pair of
- * shared values (`amplitude`, `pulsePhase`) rather than each bar owning its
- * own animation loop — cheaper, and keeps every bar's motion visually in
- * sync with its neighbors. */
+/** Live on-device report + root-caused: `recorder.amplitude` (real RMS from
+ * `computeRms`, wav.ts) is technically correct — a literal 0..1 ratio of the
+ * loudest possible sample — but normal speech at ordinary phone-mic distance
+ * only ever reaches a small fraction of full-scale (this codebase already
+ * documented and fixed the exact same characteristic for the SAVED WAV file,
+ * via `normalizePcmGain` in wav.ts — that gain is applied only once, after
+ * recording finishes, never to the live per-chunk value this component
+ * reads). Linearly mapping that raw value straight to bar height is why the
+ * waveform looked almost perfectly flat during real, audible speech.
+ *
+ * The fix belongs HERE, not in `computeRms` itself — `activeMode.ts` also
+ * calls `computeRms` directly, for Handsfree's own VAD/noise-floor
+ * calibration, which is tuned to that exact raw scale and must not shift.
+ *
+ * FIRST attempt used a fixed gain + power-curve (guessed constants tuned to
+ * an assumed "typical" raw RMS range). Live on-device report: it overcorrected
+ * — normal speech now saturated the visual value to ~1.0 well within ordinary
+ * speaking volume, so the waveform just looked like a dense, near-maxed wall
+ * of bars with barely any visible quiet-vs-loud contrast. A fixed constant
+ * was always going to be fragile here anyway — `normalizePcmGain`'s own doc
+ * comment already establishes that raw mic level is genuinely
+ * distance/device-dependent, not a fixed characteristic to hardcode a gain
+ * against.
+ *
+ * REAL fix: normalize live against THIS RECORDING's own loudest moment so
+ * far — the same "peak-normalize relative to this take's own peak"
+ * philosophy `normalizePcmGain` already uses for the saved file, just
+ * applied incrementally instead of after the fact. Self-calibrates to
+ * whatever mic sensitivity/distance/environment this specific recording
+ * actually has, so quiet-vs-loud contrast stays visible regardless. The
+ * peak decays slowly (`PEAK_DECAY`) rather than only ever increasing, so
+ * one early loud moment (a cough, a door) doesn't permanently flatten the
+ * visual range for the rest of a long recording — plain AGC-style
+ * behavior. `MIN_PEAK_FLOOR` stops near-silence at the very start (before
+ * any real signal has been observed) from being divided by a near-zero
+ * peak and reading as falsely loud. */
+const MIN_PEAK_FLOOR = 0.03;
+const PEAK_DECAY = 0.995;
+
+const CENTER_INDEX = (BAR_COUNT - 1) / 2;
+
+/** 1 at the center bar, 0 at the outer edges, smooth cosine falloff between
+ * — a genuine "symmetrical equalizer" shape (tallest in the middle, shorter
+ * toward both ends), not the double-humped shape a full-cycle sine across
+ * the whole row previously produced. Fixed per bar, never time-varying —
+ * see this file's own top doc comment on why NOTHING here maps to a
+ * timestamp or index-over-time; only `amplitude`/`activity` (both live,
+ * externally driven values) determine how tall this shape currently is. */
+function centerFalloff(index: number): number {
+  const distance = Math.abs(index - CENTER_INDEX) / CENTER_INDEX; // 0 at center, 1 at edges
+  return Math.cos(distance * (Math.PI / 2));
+}
+
+/** One bar of the waveform.
+ *
+ * `recording`: a genuine ROLLING HISTORY — THIRD rewrite of this state.
+ * Round 1 (a symmetric "equalizer" shape, every bar showing the SAME live
+ * amplitude scaled by its own fixed position) was live-reported as "a
+ * static bell curve... not how premium apps behave" — replaced with this
+ * ring-buffer mechanic. Round 2 tried to smooth each buffer shift by
+ * calling `withTiming` INLINE inside this worklet's own return expression,
+ * on a plain computed local rather than a persistent shared value's own
+ * `.value` being reassigned — confirmed via temporary diagnostic logging to
+ * produce `NaN` for every bar's height, rendering the whole waveform blank.
+ * Removing that smoothing fixed the blank-render bug, but left every buffer
+ * shift snapping discretely — live-reported as "blocky, Tetris-like
+ * movement instead of a fluid river of sound."
+ *
+ * THIS version smooths correctly: each bar owns its OWN persistent
+ * `displayedLevel` shared value (below), and a `useAnimatedReaction`
+ * assigns `displayedLevel.value = withTiming(target, ...)` whenever
+ * `history.value[index]`'s target changes — an ASSIGNMENT to a real shared
+ * value, the actually-supported pattern, not an inline expression. This
+ * worklet then only ever READS `displayedLevel.value` — a plain, safe
+ * read, never a fresh `withTiming` call — so every bar glides smoothly
+ * between one buffer shift and the next instead of popping.
+ *
+ * `history` itself: a fixed-size ring buffer a new (peak-normalized) sample
+ * gets pushed onto (oldest dropped) on every incoming audio chunk (see the
+ * effect below in the parent). Index 0 is the oldest still-retained sample
+ * (left edge), the last index is the newest (right edge) — new data enters
+ * on the right and scrolls left as it ages, same convention as a real
+ * oscilloscope/DAW waveform.
+ *
+ * `transcribing`: no live audio exists once recording has stopped, so
+ * there's no history to roll — `activity` (a synthetic breathing
+ * oscillation, same idiom as `glowPhase`'s Handsfree glow below) scales a
+ * fixed, symmetric `centerFalloff` shape as a whole. Unchanged from the
+ * previous round. */
 function WaveformBar({
   index,
   state,
-  amplitude,
-  pulsePhase,
+  history,
+  activity,
 }: {
   index: number;
   state: RecorderCanvasState;
-  amplitude: SharedValue<number>;
-  pulsePhase: SharedValue<number>;
+  history: SharedValue<number[]>;
+  activity: SharedValue<number>;
 }) {
-  // A fixed per-bar phase offset so State A→B doesn't animate every bar to
-  // the exact same height — real mic amplitude modulates a gentle sine
-  // curve across the bars instead of a flat block, reading as a waveform
-  // rather than a single pulsing rectangle.
-  const phaseOffset = (index / BAR_COUNT) * Math.PI * 2;
+  const shape = centerFalloff(index); // 0..1, fixed for this bar's position — transcribing only
+  // This bar's own smoothly-animating displayed level — see this
+  // function's own doc comment for why the smoothing lives HERE (an
+  // assignment inside `useAnimatedReaction`) and not inline inside
+  // `useAnimatedStyle` below.
+  const displayedLevel = useSharedValue(0);
+
+  useAnimatedReaction(
+    () => history.value[index] ?? 0,
+    (current, previous) => {
+      if (current !== previous) {
+        // Over-damped spring (ζ≈1.5, no bounce/overshoot), not a fixed-
+        // duration ease — live on-device report: a 180ms `withTiming` still
+        // read as "stepped," because it fully settles between one buffer
+        // shift and the next (chunks arrive ~100-200ms apart), producing a
+        // repeating settle-then-jump pattern even though each individual
+        // transition was itself smooth. A spring never "arrives and waits"
+        // the same way — retargeting it mid-motion (which happens
+        // constantly here) blends continuously into the new target instead
+        // of restarting a fresh ease each time, which is what actually
+        // reads as one continuous glide rather than discrete steps.
+        displayedLevel.value = withSpring(current, { damping: 26, stiffness: 120, mass: 0.6 });
+      }
+    }
+  );
 
   const animatedStyle = useAnimatedStyle(() => {
     if (state === "recording") {
-      const wave = (Math.sin(phaseOffset) + 1) / 2; // 0..1, stable per bar
-      const height =
-        MIN_BAR_HEIGHT + amplitude.value * (MAX_BAR_HEIGHT - MIN_BAR_HEIGHT) * (0.35 + 0.65 * wave);
+      const level = Math.max(0, Math.min(1, displayedLevel.value));
+      const height = MIN_BAR_HEIGHT + level * (MAX_BAR_HEIGHT - MIN_BAR_HEIGHT);
       return { height, opacity: 1 };
     }
     if (state === "transcribing") {
-      // Traveling pulse: a bright band sweeps left-to-right across the line
-      // once every loop, each bar brightening/growing as the band passes it.
-      const distance = Math.abs(((index / (BAR_COUNT - 1)) - pulsePhase.value + 1) % 1);
-      const proximity = interpolate(distance, [0, 0.12, 1], [1, 0.15, 0], "clamp");
-      return {
-        height: MIN_BAR_HEIGHT + proximity * (MAX_BAR_HEIGHT * 0.55 - MIN_BAR_HEIGHT),
-        opacity: 0.35 + proximity * 0.65,
-      };
+      // No live audio exists once recording has stopped — `activity` is a
+      // synthetic breathing value (0..1, oscillating smoothly), the same
+      // "slow breathe in and out" idiom this file already uses for the
+      // Handsfree listening glow (`glowPhase`, below), not a new mechanic.
+      // Every bar breathes together, in place — the shape scales as a
+      // whole, it never shifts sideways.
+      const level = activity.value;
+      const height = MIN_BAR_HEIGHT + level * (MAX_BAR_HEIGHT * 0.6 - MIN_BAR_HEIGHT) * (0.3 + 0.7 * shape);
+      return { height, opacity: 0.45 + level * 0.55 };
     }
     // Idle: flat line.
     return { height: MIN_BAR_HEIGHT, opacity: 0.5 };
@@ -96,8 +202,22 @@ export function CentralRecorderCanvas({
   onLongPress,
   disabled,
 }: CentralRecorderCanvasProps) {
-  const amplitudeShared = useSharedValue(0);
-  const pulsePhase = useSharedValue(0);
+  // Ring buffer of this recording's most recent (peak-normalized) samples,
+  // oldest at index 0 (left) to newest at the last index (right) — see
+  // WaveformBar's own doc comment for why this replaced a single shared
+  // amplitude scalar. Reassigned wholesale (never mutated in place) on every
+  // incoming chunk, which is what makes every dependent `useAnimatedStyle`
+  // correctly re-run — Reanimated tracks shared-value reference changes.
+  const history = useSharedValue<number[]>(new Array(BAR_COUNT).fill(0));
+  // This recording's own running loudest-moment-so-far — see MIN_PEAK_FLOOR/
+  // PEAK_DECAY's own doc comment above for why amplitude is normalized
+  // against this instead of a fixed guessed gain. Reset to the floor
+  // whenever a fresh recording starts (the effect below).
+  const runningPeak = useSharedValue(MIN_PEAK_FLOOR);
+  // Synthetic "how alive does this look right now" value for the
+  // transcribing/processing state — see WaveformBar's own doc comment for
+  // why this replaced a traveling, index-mapped `pulsePhase`.
+  const activity = useSharedValue(0);
   // Handsfree "awake and listening" glow: a slow breathing opacity pulse on
   // a soft accent-colored ring behind the button, distinct from the
   // recording waveform (which only appears once actual speech is being
@@ -126,21 +246,40 @@ export function CentralRecorderCanvas({
   };
 
   useEffect(() => {
-    amplitudeShared.value = withTiming(state === "recording" ? amplitude : 0, { duration: 80 });
-  }, [amplitude, state, amplitudeShared]);
+    if (state !== "recording") {
+      // Reset for the NEXT recording — each take gets its own fresh
+      // loudest-moment reference and a clean, silent history, not ones
+      // carried over from a previous recording taken from a different
+      // distance/environment.
+      runningPeak.value = MIN_PEAK_FLOOR;
+      history.value = new Array(BAR_COUNT).fill(0);
+      return;
+    }
+    // See MIN_PEAK_FLOOR/PEAK_DECAY's own doc comment above for why this
+    // normalizes against the recording's OWN observed peak rather than a
+    // fixed guessed gain.
+    runningPeak.value = Math.max(amplitude, runningPeak.value * PEAK_DECAY, MIN_PEAK_FLOOR);
+    const level = Math.min(1, amplitude / runningPeak.value);
+    // Push the newest sample onto the right, drop the oldest off the left —
+    // a plain ring buffer. This is the ONLY place JS touches `history` at
+    // all; every bar's own animation runs off this shared value purely on
+    // the UI thread from here on (see WaveformBar's own doc comment).
+    history.value = [...history.value.slice(1), level];
+  }, [amplitude, state, history, runningPeak]);
 
   useEffect(() => {
     if (state === "transcribing") {
-      pulsePhase.value = 0;
-      pulsePhase.value = withRepeat(
-        withTiming(1, { duration: 1400, easing: Easing.linear }),
-        -1,
-        false
-      );
+      // Breathing, not a one-way repeating ramp — `true` as the third
+      // `withRepeat` argument reverses each cycle (0->1->0->1...) instead of
+      // snapping back to 0, the exact same idiom `glowPhase` below already
+      // uses for the Handsfree listening glow. This value never maps to a
+      // bar INDEX (see WaveformBar's own doc comment) — every bar reads it
+      // directly and moves together.
+      activity.value = withRepeat(withTiming(1, { duration: 700, easing: Easing.inOut(Easing.sin) }), -1, true);
     } else {
-      pulsePhase.value = 0;
+      activity.value = withTiming(0, { duration: 200 });
     }
-  }, [state, pulsePhase]);
+  }, [state, activity]);
 
   useEffect(() => {
     if (state === "listening") {
@@ -165,7 +304,11 @@ export function CentralRecorderCanvas({
   // recording still shrinks a little further from wherever the amplitude
   // pulse currently has it, instead of the press fighting/overriding it.
   const buttonScaleStyle = useAnimatedStyle(() => {
-    const recordingPulse = state === "recording" ? 1 + amplitudeShared.value * 0.06 : 1;
+    // Newest sample in the history buffer (the right-most bar's own value)
+    // is "right now" — same value the pulse used to read off the old single
+    // shared amplitude scalar.
+    const currentLevel = state === "recording" ? history.value[history.value.length - 1] ?? 0 : 0;
+    const recordingPulse = state === "recording" ? 1 + currentLevel * 0.06 : 1;
     const pressScale = interpolate(pressedProgress.value, [0, 1], [1, 0.93]);
     const pressTranslateY = interpolate(pressedProgress.value, [0, 1], [0, 3]);
     return {
@@ -265,7 +408,7 @@ export function CentralRecorderCanvas({
       {state !== "idle" && state !== "listening" && (
         <View style={styles.waveform} pointerEvents="none">
           {Array.from({ length: BAR_COUNT }).map((_, index) => (
-            <WaveformBar key={index} index={index} state={state} amplitude={amplitudeShared} pulsePhase={pulsePhase} />
+            <WaveformBar key={index} index={index} state={state} history={history} activity={activity} />
           ))}
         </View>
       )}
@@ -372,6 +515,13 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
+    // Extra clearance on top of `wrapper`'s own 18px gap — live on-device
+    // report: the tallest bar spikes could touch/intersect the bottom edge
+    // of the purple outer glow ring around the button. This is scoped to
+    // the waveform row itself (not a change to `wrapper`'s general gap),
+    // so it doesn't affect the button's own resting position in the idle/
+    // listening states, which never render this row at all.
+    marginTop: 20,
   },
   bar: {
     width: BAR_WIDTH,

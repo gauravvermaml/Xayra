@@ -39,13 +39,16 @@ export type DayColumnTimelineProps = {
 };
 
 /**
- * One day's hourly grid: a `HOURS.length * hourHeight`-tall column with a
- * subtle horizontal line at every hour boundary and, optionally, a vertical
- * divider on its trailing edge (the "structural grid" the layout spec asks
- * for), task chips positioned by their own `notificationTime`, and a live
- * red "now" line when `isToday`. Same positioning math as DayLayout.tsx's
- * single-day timeline, generalized to one column among several, but with
- * every dimension passed in live rather than read from a fixed constant.
+ * One day's hourly grid: a `HOURS.length * hourHeight`-tall column with,
+ * optionally, a vertical divider on its trailing edge (the "structural
+ * grid" the layout spec asks for), task chips positioned by their own
+ * `notificationTime`, and a live red "now" line when `isToday`. Same
+ * positioning math as DayLayout.tsx's single-day timeline, generalized to
+ * one column among several, but with every dimension passed in live rather
+ * than read from a fixed constant. The horizontal hour-boundary lines
+ * themselves are NOT drawn here — every column would draw an identical copy
+ * at the exact same 24 positions, so they're drawn once, shared, by
+ * SharedHourGridLines.tsx instead (see that file's own doc comment for why).
  *
  * Tasks sharing the exact same clock time fill ONE hour-row's worth of
  * height (from the gridline above to the one below, never beyond it) and
@@ -84,10 +87,13 @@ export function DayColumnTimeline({
         style,
       ]}
     >
-      {HOURS.map((hour) => (
-        <View key={hour} style={[styles.hourLine, { top: hour * hourHeight }]} />
-      ))}
-
+      {/* Hour-boundary lines are no longer drawn here — every column sits at
+          the exact same 24 vertical positions, so drawing them once per
+          column was pure duplication (up to 7x for Week view). Now drawn
+          ONCE, shared across all columns, by SharedHourGridLines.tsx
+          (rendered by WeekGridLayout.tsx behind this and its sibling
+          columns) — a real, measured fix for this layout's native
+          view-creation cost, not just a style cleanup. */}
       {isToday && <View style={[styles.nowLine, { top: (nowMinutes / 60) * hourHeight }]} />}
 
       {slots.map(([time, group]) => {
@@ -129,13 +135,6 @@ const styles = StyleSheet.create({
   rightBorder: {
     borderRightWidth: StyleSheet.hairlineWidth,
     borderRightColor: colors.border,
-  },
-  hourLine: {
-    position: "absolute",
-    left: 0,
-    right: 0,
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: colors.border,
   },
   nowLine: {
     position: "absolute",

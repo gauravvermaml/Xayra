@@ -299,33 +299,48 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           the library's own keyboard math from overriding it. */}
       <View style={styles.header}>{composeBarSlot}</View>
 
-      {/* IDLE PEEK ISOLATION (cont.): at index 0 (20%), everything below the
-          sticky header renders nothing at all — not the glass box, not the
-          list inside it. Both only mount once the sheet reaches its
-          expanded 50% stage. PADDING & CLEARANCE: `body`'s `marginTop`
-          (16dp, below) is a real flex margin, not a clipping trick — the
-          list can structurally never render behind the sticky header above
-          it (there's no absolute positioning or negative margin anywhere in
-          this tree that could cause that), so this gap holds regardless of
-          scroll position or sheet index, matching the Apple Maps
-          reference. */}
-      {sheetIndex > 0 && !contentHidden && (
-        <View style={styles.body}>
-          {/* Monochromatic glass container: one translucent, bordered box
-              rather than the list rendering directly against the sheet's
-              own jet-black background. No handle of its own — see
-              SHEET_SNAP_POINTS's own doc comment for why (ONE HANDLE, NOT
-              TWO): the sheet's own handle above (`handleComponent`) now
-              covers the whole 20%-50%-100% range via
-              `expandGestureHandlersHook`, so this box is just its plain
-              padded content, same as any other flex box in this app. */}
-          <View style={styles.textContainerBox}>{content}</View>
+      {/* IDLE PEEK ISOLATION, REVISED — was a full conditional mount/unmount
+          (`{sheetIndex > 0 && !contentHidden && (<View>...)}`), which is
+          exactly what caused a real, live-reported bug: `content`'s list
+          (`BottomSheetFlatList`, in NotesSheetContent/ChatSheetContent)
+          registers its native scroll handle with this sheet's OWN internal
+          gesture coordinator via a one-shot `useEffect`
+          (`useScrollableSetter.ts` in @gorhom/bottom-sheet's own source —
+          calls `findNodeHandle(ref.current)` exactly once and never retries).
+          Mounting the list LATE (only once the sheet reaches its expanded
+          stage) raced that native ref not being attached yet at the moment
+          that effect ran, silently failing the registration — the list would
+          then show a scrollbar/respond to nothing until some UNRELATED state
+          change (confirmed on-device: opening and closing the note-detail
+          popup) happened to force a remount that finally won the race.
+          Always mounting `content` from this sheet's very first render (so
+          its scrollable ref registers correctly long before the user ever
+          expands it) fixes this at the root. `pointerEvents="none"` plus
+          `opacity: 0` (styles.bodyHidden) at index 0 restores two of the
+          original three IDLE PEEK ISOLATION guarantees — can't steal a stray
+          touch, invisible — the third (fully absent from the tree/a11y
+          tree) is a deliberately accepted, minor trade-off against an actual
+          functional bug. PADDING & CLEARANCE: `body`'s `marginTop` (16dp,
+          below) is a real flex margin, not a clipping trick — the list can
+          structurally never render behind the sticky header above it. */}
+      <View
+        style={[styles.body, (sheetIndex === 0 || contentHidden) && styles.bodyHidden]}
+        pointerEvents={sheetIndex === 0 || contentHidden ? "none" : undefined}
+      >
+        {/* Monochromatic glass container: one translucent, bordered box
+            rather than the list rendering directly against the sheet's
+            own jet-black background. No handle of its own — see
+            SHEET_SNAP_POINTS's own doc comment for why (ONE HANDLE, NOT
+            TWO): the sheet's own handle above (`handleComponent`) now
+            covers the whole 20%-50%-100% range via
+            `expandGestureHandlersHook`, so this box is just its plain
+            padded content, same as any other flex box in this app. */}
+        <View style={styles.textContainerBox}>{content}</View>
 
-          <View style={{ paddingBottom: bottomInset }}>
-            <ModelDownloadCard modelDownload={modelDownload} />
-          </View>
+        <View style={{ paddingBottom: bottomInset }}>
+          <ModelDownloadCard modelDownload={modelDownload} />
         </View>
-      )}
+      </View>
     </BottomSheet>
   );
 });
@@ -363,6 +378,12 @@ const styles = StyleSheet.create({
     // reference screenshot's spacing between its search bar and its "Find
     // Nearby" result grid.
     marginTop: 16,
+  },
+  // See the render body's own IDLE PEEK ISOLATION comment — this is what
+  // visually hides `content` at the collapsed peek stage now that it's
+  // always mounted, rather than a full unmount.
+  bodyHidden: {
+    opacity: 0,
   },
   // MONOCHROMATIC GLASS: a single translucent, subtly-bordered box wrapping
   // the Q&A history list — `flex: 1` and `overflow: "hidden"` are additive

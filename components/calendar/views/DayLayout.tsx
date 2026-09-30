@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { StyleSheet, Text, View } from "react-native";
+import { useEffect, useMemo, useState } from "react";
+import { StyleSheet, Text, View, type NativeScrollEvent, type NativeSyntheticEvent } from "react-native";
 // RNGH's own ScrollView, not plain react-native's — CalendarBody.tsx wraps
 // this whole layout in a `Gesture.Pan()` swipe-to-navigate detector, and a
 // vanilla RN ScrollView doesn't participate in RNGH's native gesture
@@ -42,6 +42,10 @@ export type DayLayoutProps = {
   onOpenTask: (item: ToDo) => void;
   onCheckTask: (item: ToDo) => void;
   onLongPressDelete: (item: ToDo) => void;
+  /** See SwipeableCalendarPager.tsx's `PageScrollSync` doc comment — `null`
+   * means "no shared position yet, use the wall-clock default below." */
+  initialScrollY?: number | null;
+  onScrollYChange?: (y: number) => void;
 };
 
 /**
@@ -63,10 +67,16 @@ export type DayLayoutProps = {
  * within the same slot (the spec's "multi-task overlaps stack side-by-
  * side"), splitting the available width evenly.
  */
-export function DayLayout({ selectedDate, todos, onOpenTask, onCheckTask, onLongPressDelete }: DayLayoutProps) {
+export function DayLayout({
+  selectedDate,
+  todos,
+  onOpenTask,
+  onCheckTask,
+  onLongPressDelete,
+  initialScrollY,
+  onScrollYChange,
+}: DayLayoutProps) {
   const insets = useSafeAreaInsets();
-  const scrollViewRef = useRef<ScrollView>(null);
-  const hasAutoScrolledRef = useRef(false);
   const [nowMinutes, setNowMinutes] = useState(() => {
     const now = new Date();
     return now.getHours() * 60 + now.getMinutes();
@@ -83,35 +93,34 @@ export function DayLayout({ selectedDate, todos, onOpenTask, onCheckTask, onLong
     return () => clearInterval(interval);
   }, []);
 
-  // Auto-scroll to roughly the current hour, once — without this, Day view
-  // always opens scrolled to 12 AM at the very top, meaning every single
-  // open requires scrolling past however many empty overnight hours to
-  // reach anything relevant. One hour of lead-in above the current hour
-  // (rather than snapping it to the very top edge) keeps the "now" line
-  // comfortably inside the viewport instead of sitting flush against it.
+  // A declarative initial scroll position, not an imperative `scrollTo`
+  // fired from `onLayout` — matches WeekGridLayout.tsx's own identical fix
+  // and reasoning (see weekGridGeometry.ts's doc comment): the old two-step
+  // mount-then-jump pattern visibly snapped once this component started
+  // being freshly mounted per date under SwipeableCalendarPager's keyed
+  // window, instead of being one long-lived instance reused across date
+  // changes forever the way it used to be.
   //
-  // Fired from the ScrollView's own `onLayout` (see the render below), NOT
-  // a bare mount-time `useEffect` — a plain effect can race the native
-  // view on Android, calling `scrollTo` before it's actually measured and
-  // laid out, which silently no-ops. `onLayout` only fires once that
-  // measurement is real. `hasAutoScrolledRef` makes this a true one-shot:
-  // `onLayout` can re-fire on later layout passes (e.g. a rotation), and
-  // re-scrolling then would fight whatever position the user had actually
-  // scrolled to since opening.
-  //
-  // Anchors to the real wall-clock hour regardless of which date is being
-  // viewed (not re-triggered by `selectedDate` changing) — matches how a
-  // calendar app's day view still opens near "now" even when browsing a
-  // different day, and re-scrolling out from under someone on every prev/
-  // next tap would fight their own navigation.
-  const handleTimelineLayout = () => {
-    if (hasAutoScrolledRef.current) {
-      return;
+  // `initialScrollY` (from `scrollSync`, see SwipeableCalendarPager's
+  // `PageScrollSync` doc comment): when provided, this is wherever the user
+  // was ACTUALLY looking on whatever page was current a moment ago — a
+  // brand new day entering the window starts there instead of independently
+  // defaulting to "an hour before now," which is what a live on-device
+  // report caught (scroll to 6 PM, swipe, land back at the morning).
+  // Falling back to the wall-clock default when it's `null` (no shared
+  // position yet) matches this component's old one-shot auto-scroll intent:
+  // without it, Day view would always open scrolled to 12 AM.
+  const initialScrollOffset = useMemo(() => {
+    if (initialScrollY != null) {
+      return initialScrollY;
     }
-    hasAutoScrolledRef.current = true;
     const now = new Date();
-    const initialScrollY = Math.max(0, (now.getHours() - 1) * HOUR_HEIGHT);
-    scrollViewRef.current?.scrollTo({ y: initialScrollY, animated: false });
+    return Math.max(0, (now.getHours() - 1) * HOUR_HEIGHT);
+  }, [initialScrollY]);
+  const contentOffset = useMemo(() => ({ x: 0, y: initialScrollOffset }), [initialScrollOffset]);
+
+  const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    onScrollYChange?.(event.nativeEvent.contentOffset.y);
   };
 
   const dayTodos = useMemo(() => {
@@ -147,8 +156,17 @@ export function DayLayout({ selectedDate, todos, onOpenTask, onCheckTask, onLong
   return (
     <View style={styles.container}>
       <ScrollView
-        ref={scrollViewRef}
-        onLayout={handleTimelineLayout}
+        contentOffset={contentOffset}
+        onScroll={handleScroll}
+        // 16ms (~60fps), not RN's usual 100-200ms default throttle — this
+        // value feeds `onScrollYChange`, which SwipeableCalendarPager reads
+        // at the exact moment a neighbor page mounts to decide its own
+        // starting scroll position (see PageScrollSync's doc comment). A
+        // coarser throttle means swiping right after scrolling can hand the
+        // new page a position that's up to that many ms stale — live
+        // on-device report of "still a minor lag" after the initial scroll-
+        // sync fix, traced to exactly this.
+        scrollEventThrottle={16}
         style={styles.timeline}
         // Real content ends at exactly `HOUR_HEIGHT * 24` (midnight, the
         // end of the 11 PM row) — the extra space beyond that is blank,

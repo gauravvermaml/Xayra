@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 import { StyleSheet, Text, useWindowDimensions, View } from "react-native";
 // RNGH's own ScrollView, not plain react-native's — see DayLayout.tsx's
 // identical import comment for why (CalendarBody.tsx's swipe-to-navigate
@@ -6,7 +6,8 @@ import { StyleSheet, Text, useWindowDimensions, View } from "react-native";
 // also the real fix for "the day panel below the grid doesn't scroll" —
 // a vanilla ScrollView never had anything to actually claim the gesture in
 // the first place once it sat inside a Gesture.Pan detector).
-import { ScrollView, TouchableOpacity } from "react-native-gesture-handler";
+import { Gesture, GestureDetector, ScrollView } from "react-native-gesture-handler";
+import { runOnJS } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { colors, radius, spacing, typography } from "../../../constants/theme";
@@ -24,6 +25,14 @@ import { CalendarTaskCard } from "../CalendarTaskCard";
 
 const DAY_INITIALS = ["S", "M", "T", "W", "T", "F", "S"] as const;
 const MAX_DOTS = 3;
+/** Fixed, not intrinsic — applied to `cell`'s own style below (overriding
+ * whatever its content would otherwise size to) so this value exactly
+ * matches the real rendered row height, which the single shared tap
+ * gesture's manual hit-testing depends on being accurate. Matches the
+ * pre-existing intrinsic size (4px top/bottom padding + 28px date bubble +
+ * 4px gap + 8px dots row = 48px) so this change is a pure performance
+ * fix, not a visual one. */
+const CELL_HEIGHT = 48;
 
 function parseIso(iso: string): { year: number; month: number; day: number } {
   const [year, month, day] = iso.split("-").map(Number);
@@ -101,9 +110,9 @@ export function MonthLayout({
   const { width: screenWidth } = useWindowDimensions();
 
   // Explicit computed width per cell, not `flex: 1` on the cell itself —
-  // `react-native-gesture-handler`'s `TouchableOpacity` (required here, see
-  // this file's own touchable doc comment below) does not reliably
-  // propagate `flex` sizing to its rendered native view on Android in this
+  // this RNGH version's touchables (this grid used a `TouchableOpacity` per
+  // cell until the single-shared-gesture rewrite below) did not reliably
+  // propagate `flex` sizing to their rendered native view on Android in this
   // RNGH version, which collapsed every cell to its own intrinsic content
   // width instead of 1/7 of the row — the on-device symptom was the whole
   // month's dates rendering packed into what looked like one jumbled row
@@ -152,6 +161,38 @@ export function MonthLayout({
 
   const selectedDayTodos = groupByDate.get(selectedDate) ?? [];
 
+  // ONE shared gesture recognizer for the whole grid, doing manual
+  // row/column hit-testing from the tap's local coordinates, instead of a
+  // separate `TouchableOpacity` (its own native gesture recognizer) per
+  // cell — up to 35-42 of them for a 5-6 row month. Live on-device logcat
+  // timing (see BACKLOG.md's now-resolved "Month/Week grid native render
+  // cost" entry) measured ~500ms of native view-creation cost per page
+  // change, and per-cell touchables were a real, mountable-view-count
+  // contributor to that. `cellWidth`/`CELL_HEIGHT` are both applied as
+  // EXPLICIT, fixed styles on the cell View below (not left to intrinsic
+  // sizing) specifically so this math can trust them.
+  const handleGridTap = useCallback(
+    (localX: number, localY: number) => {
+      const col = Math.min(6, Math.max(0, Math.floor(localX / cellWidth)));
+      const row = Math.min(weeks.length - 1, Math.max(0, Math.floor(localY / CELL_HEIGHT)));
+      const cell = weeks[row]?.[col];
+      if (!cell) {
+        return;
+      }
+      const items = groupByDate.get(cell.date) ?? [];
+      const disabled = items.length === 0 && !cell.inMonth;
+      if (disabled) {
+        return;
+      }
+      onSelectDate(cell.date);
+    },
+    [weeks, cellWidth, groupByDate, onSelectDate]
+  );
+
+  const gridTapGesture = Gesture.Tap().onEnd((event) => {
+    runOnJS(handleGridTap)(event.x, event.y);
+  });
+
   return (
     <ScrollView
       style={styles.scroll}
@@ -166,50 +207,48 @@ export function MonthLayout({
         ))}
       </View>
 
-      {weeks.map((week, rowIndex) => (
-        <View key={rowIndex} style={styles.weekRow}>
-          {week.map(({ date, inMonth }) => {
-            const { day } = parseIso(date);
-            const items = groupByDate.get(date) ?? [];
-            const isToday = date === today;
-            const isSelected = date === selectedDate && !isToday;
+      <GestureDetector gesture={gridTapGesture}>
+        <View>
+          {weeks.map((week, rowIndex) => (
+            <View key={rowIndex} style={styles.weekRow}>
+              {week.map(({ date, inMonth }) => {
+                const { day } = parseIso(date);
+                const items = groupByDate.get(date) ?? [];
+                const isToday = date === today;
+                const isSelected = date === selectedDate && !isToday;
 
-            return (
-              <TouchableOpacity
-                key={date}
-                onPress={() => onSelectDate(date)}
-                activeOpacity={0.7}
-                style={[styles.cell, { width: cellWidth }]}
-                disabled={items.length === 0 && !inMonth}
-              >
-                <View
-                  style={[
-                    styles.dateBubble,
-                    isSelected && styles.dateBubbleSelected,
-                    isToday && styles.dateBubbleActive,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.dateNumber,
-                      !inMonth && styles.dateNumberDimmed,
-                      isToday && styles.dateNumberActive,
-                    ]}
-                  >
-                    {day}
-                  </Text>
-                </View>
-                <View style={styles.dotsRow}>
-                  {items.slice(0, MAX_DOTS).map((item) => (
-                    <View key={item.id} style={styles.dot} />
-                  ))}
-                  {items.length > MAX_DOTS && <Text style={styles.moreText}>+{items.length - MAX_DOTS}</Text>}
-                </View>
-              </TouchableOpacity>
-            );
-          })}
+                return (
+                  <View key={date} style={[styles.cell, { width: cellWidth, height: CELL_HEIGHT }]}>
+                    <View
+                      style={[
+                        styles.dateBubble,
+                        isSelected && styles.dateBubbleSelected,
+                        isToday && styles.dateBubbleActive,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.dateNumber,
+                          !inMonth && styles.dateNumberDimmed,
+                          isToday && styles.dateNumberActive,
+                        ]}
+                      >
+                        {day}
+                      </Text>
+                    </View>
+                    <View style={styles.dotsRow}>
+                      {items.slice(0, MAX_DOTS).map((item) => (
+                        <View key={item.id} style={styles.dot} />
+                      ))}
+                      {items.length > MAX_DOTS && <Text style={styles.moreText}>+{items.length - MAX_DOTS}</Text>}
+                    </View>
+                  </View>
+                );
+              })}
+            </View>
+          ))}
         </View>
-      ))}
+      </GestureDetector>
 
       <View style={styles.dayPanel}>
         <Text style={styles.dayPanelTitle}>{formatFullDate(selectedDate)}</Text>

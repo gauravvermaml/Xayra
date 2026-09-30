@@ -41,14 +41,20 @@ export function DayHeaderCell({ date, isToday, taskCount = 0, style }: DayHeader
       <View style={[styles.dateBubble, isToday && styles.dateBubbleActive]}>
         <Text style={[styles.dateNumber, isToday && styles.dateNumberActive]}>{day}</Text>
       </View>
-      {taskCount > 0 && (
-        <View style={styles.dotsRow}>
-          {Array.from({ length: Math.min(taskCount, MAX_DOTS) }).map((_, index) => (
-            <View key={index} style={styles.dot} />
-          ))}
-          {taskCount > MAX_DOTS && <Text style={styles.moreText}>+{taskCount - MAX_DOTS}</Text>}
-        </View>
-      )}
+      {/* ALWAYS rendered, even at taskCount=0 (just empty) — reserves this
+          row's own height + the column's `gap` before it unconditionally,
+          so a day/week WITHOUT any tasks has the exact same header height
+          as one with tasks. Live bug: this used to be conditionally
+          rendered, so swiping between a week with tasks and one without
+          made the whole header row visibly change height mid-transition —
+          the same "reserve the space regardless" fix MonthLayout's own
+          dots row (see its own doc comment) already had from the start. */}
+      <View style={styles.dotsRow}>
+        {Array.from({ length: Math.min(taskCount, MAX_DOTS) }).map((_, index) => (
+          <View key={index} style={styles.dot} />
+        ))}
+        {taskCount > MAX_DOTS && <Text style={styles.moreText}>+{taskCount - MAX_DOTS}</Text>}
+      </View>
     </View>
   );
 }

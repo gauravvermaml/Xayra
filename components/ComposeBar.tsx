@@ -4,6 +4,14 @@ import { BottomSheetTextInput } from "@gorhom/bottom-sheet";
 
 import { colors, radius, spacing } from "../constants/theme";
 
+/** Live-requested cap: past this many lines, earlier lines scroll up out of
+ * view instead of the box growing further, so the line currently being
+ * typed always stays visible. Kept in exact agreement with `input`'s own
+ * `lineHeight` below — see `numberOfLines` on the TextInput itself for the
+ * other half of this. */
+const MAX_INPUT_LINES = 5;
+const INPUT_LINE_HEIGHT = 20;
+
 export type ComposeBarProps = {
   inputText: string;
   onInputChange: (text: string) => void;
@@ -116,13 +124,12 @@ export const ComposeBar = memo(function ComposeBar({
     }
     hasPendingSubmitRef.current = true;
     // Dismiss on every submit, Record or Ask alike — `blurOnSubmit={false}`
-    // below only stops the TextInput's own AUTOMATIC blur-on-submit (which
-    // would've fired even for a wanted mid-typing "Enter" in a multiline
-    // future, say); it was never a statement that the keyboard should stay
-    // up after a real send. A submitted note/question is done — same "get
-    // out of the way" instinct as this pass's other fixes (the history list
-    // hiding while composing, the mis-tap-prone settings gear moving out of
-    // this row): once you've sent it, the keyboard has nothing left to do.
+    // below only stops the TextInput's own AUTOMATIC blur-on-submit; it was
+    // never a statement that the keyboard should stay up after a real send.
+    // A submitted note/question is done — same "get out of the way" instinct
+    // as this pass's other fixes (the history list hiding while composing,
+    // the mis-tap-prone settings gear moving out of this row): once you've
+    // sent it, the keyboard has nothing left to do.
     Keyboard.dismiss();
     onSubmit(inputText.trim());
   };
@@ -140,15 +147,27 @@ export const ComposeBar = memo(function ComposeBar({
             placeholder={placeholder}
             placeholderTextColor="rgba(235,235,245,0.45)"
             style={styles.input}
-            returnKeyType="send"
+            multiline
+            // Android-specific: for a multiline TextInput, this is what
+            // actually caps the box to N lines' worth of height and makes it
+            // internally scroll beyond that (auto-scrolling to keep the
+            // caret/newest line visible) — a plain style `maxHeight` alone
+            // didn't reliably cap growth on-device. `MAX_INPUT_LINES` and
+            // `input`'s explicit `lineHeight` below are kept in exact
+            // agreement so the two mechanisms describe the same 5 lines.
+            numberOfLines={MAX_INPUT_LINES}
+            textAlignVertical="top"
             blurOnSubmit={false}
-            onSubmitEditing={handleSubmit}
           />
-          {/* The keyboard is dismissed by handleSubmit itself (Keyboard.
-              dismiss()), on an explicit submit — never as a side effect of
-              typing (see the component doc above). onSubmitEditing below
-              (the keyboard's own "send" key) goes through the exact same
-              handleSubmit, so both paths dismiss identically. */}
+          {/* Submitting is the dedicated arrow button below ONLY — not the
+              keyboard's return key. `returnKeyType="send"` (removed) hid the
+              keyboard's own newline "enter" glyph and hijacked Enter to
+              submit instead of inserting a line break, which is exactly the
+              live-reported bug ("no enter button, can't write multiple
+              lines"). Same pattern chat composers (WhatsApp, Telegram, etc.)
+              use: Enter always inserts a newline, the arrow is the only way
+              to send. The keyboard is still dismissed by handleSubmit itself
+              (Keyboard.dismiss()) on that explicit tap. */}
           <Pressable
             onPress={handleSubmit}
             disabled={!canSubmit}
@@ -184,7 +203,12 @@ const styles = StyleSheet.create({
     borderRadius: radius.lg,
     paddingLeft: spacing.base,
     paddingRight: spacing.xs,
-    height: 40,
+    // `minHeight` (was a fixed `height: 40`) plus vertical padding, not a
+    // fixed height — `multiline` above means this box needs to actually grow
+    // as the user types more lines, the same way any chat composer's input
+    // does, instead of clipping everything past the first line.
+    minHeight: 40,
+    paddingVertical: spacing.xs,
   },
   searchIcon: {
     color: "rgba(235,235,245,0.6)",
@@ -195,7 +219,12 @@ const styles = StyleSheet.create({
     flex: 1,
     color: colors.textPrimary,
     fontSize: 15,
-    height: 40,
+    // Explicit, not left to the platform default — `numberOfLines` on the
+    // TextInput itself (the prop that actually enforces the 5-line cap on
+    // Android) needs to agree with this exactly, or the two disagree about
+    // where the 5th line ends.
+    lineHeight: INPUT_LINE_HEIGHT,
+    maxHeight: INPUT_LINE_HEIGHT * MAX_INPUT_LINES,
   },
   submitButton: {
     width: 30,

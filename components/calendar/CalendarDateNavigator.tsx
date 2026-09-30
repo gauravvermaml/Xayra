@@ -106,25 +106,27 @@ export function CalendarDateNavigator({ mode, selectedDate, onPrevious, onNext, 
         <Text style={styles.label} numberOfLines={1}>
           {label}
         </Text>
-        {taskCount > 0 && (
-          <View style={styles.dotsRow}>
-            {Array.from({ length: Math.min(taskCount, MAX_DOTS) }).map((_, index) => (
-              <View key={index} style={styles.dot} />
-            ))}
-            {taskCount > MAX_DOTS && <Text style={styles.moreText}>+{taskCount - MAX_DOTS}</Text>}
-          </View>
-        )}
+        {/* ALWAYS rendered, even at taskCount=0 — see DayHeaderCell.tsx's
+            identical fix for why: reserving this row's height unconditionally
+            stops the whole header from changing height when swiping between
+            a day with tasks and one without. */}
+        <View style={styles.dotsRow}>
+          {Array.from({ length: Math.min(taskCount, MAX_DOTS) }).map((_, index) => (
+            <View key={index} style={styles.dot} />
+          ))}
+          {taskCount > MAX_DOTS && <Text style={styles.moreText}>+{taskCount - MAX_DOTS}</Text>}
+        </View>
       </View>
-
-      <TouchableOpacity onPress={onNext} hitSlop={10} activeOpacity={0.7} style={styles.arrowButton}>
-        <Feather name="chevron-right" size={18} color={colors.textPrimary} />
-      </TouchableOpacity>
 
       {!isToday && (
         <TouchableOpacity onPress={onToday} activeOpacity={0.7} style={styles.todayChip}>
           <Text style={styles.todayChipText}>Today</Text>
         </TouchableOpacity>
       )}
+
+      <TouchableOpacity onPress={onNext} hitSlop={10} activeOpacity={0.7} style={styles.arrowButton}>
+        <Feather name="chevron-right" size={18} color={colors.textPrimary} />
+      </TouchableOpacity>
     </View>
   );
 }

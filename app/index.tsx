@@ -94,6 +94,42 @@ function quickMenuPopIn() {
   };
 }
 
+/** To-Dos pill tap opening `TodosOverlay`.
+ *
+ * Deliberately NOT `sheetAnimationConfigs`'s tuple (damping 24/stiffness
+ * 260/mass 0.9) despite that one being labeled "the sheet's own bounce"
+ * elsewhere in this app (`ExpandedTextOverlay`'s entrance,
+ * `SwipeableTrayHandle`'s settle) — live testing here found it doesn't
+ * actually read as bouncy at all, and the damping-ratio math explains why:
+ * ζ = damping / (2·√(stiffness·mass)) ≈ 0.78 for that tuple, and
+ * `QUICK_MENU_POP_SPRING` above works out to ζ ≈ 0.98 — both close enough to
+ * critically damped (ζ = 1) that neither one visibly overshoots its target;
+ * they're tuned for a smooth, quick, CONTROLLED settle (right for a sheet
+ * mid-drag, or a small popover), not a perceptible bounce. This tuple
+ * targets ζ ≈ 0.52 instead — genuinely underdamped, so it actually
+ * overshoots and settles back, which is what "soft bounce" actually needs.
+ * Paired with a real 80px `translateY` range, not a subtle scale change —
+ * a separate, earlier lesson (ExpandedTextOverlay's own first entrance
+ * attempt used an 8% scale change and the overshoot was imperceptible even
+ * with a truly bouncy spring; the visual AMPLITUDE has to be large enough
+ * to show it, independent of getting the physics right). Also used by
+ * AddTodoBottomSheet.tsx's own `animationConfigs` (the "+" button's sheet)
+ * for the same requested feel — kept as a separate local copy there rather
+ * than a shared import, matching this file's own established per-file
+ * spring-constant convention (see `QUICK_MENU_POP_SPRING`,
+ * `sheetAnimationConfigs`). */
+const TODOS_OVERLAY_SPRING = { damping: 14, stiffness: 180, mass: 1 };
+function todosOverlayPopIn() {
+  "worklet";
+  return {
+    initialValues: { opacity: 0, transform: [{ translateY: 80 }] },
+    animations: {
+      opacity: withSpring(1, TODOS_OVERLAY_SPRING),
+      transform: [{ translateY: withSpring(0, TODOS_OVERLAY_SPRING) }],
+    },
+  };
+}
+
 // Percentage snap points (SHEET_SNAP_POINTS = ['20%', '50%'] — see
 // HistorySheet.tsx's own doc comment for why the monochromatic glass box's
 // 88% "expanded" stage is deliberately NOT a third entry here) are the
@@ -1327,7 +1363,11 @@ export default function HomeScreen() {
           — matching that overlay's own z-order reasoning. See
           components/TodosOverlay.tsx's doc comment for why this is a plain
           sibling overlay rather than a pushed route. */}
-      {isTodosVisible && <TodosOverlay onClose={() => setIsTodosVisible(false)} />}
+      {isTodosVisible && (
+        <Animated.View entering={todosOverlayPopIn} exiting={FadeOut.duration(150)} style={styles.todosOverlayWrap}>
+          <TodosOverlay onClose={() => setIsTodosVisible(false)} />
+        </Animated.View>
+      )}
 
       {/* "Quiet Corner" quick menu — Archive + Settings, opened from the
           small "•••" icon next to the To-Dos pill.
@@ -1401,6 +1441,19 @@ const styles = StyleSheet.create({
     flex: 1,
     // True jet black — see the redesign's explicit CANVAS requirement.
     backgroundColor: "#000000",
+  },
+  // Written out directly rather than via StyleSheet.absoluteFillObject —
+  // matching ExpandedTextOverlay.tsx's own note that this RN version's type
+  // declarations don't expose that helper. TodosOverlay's own root is
+  // ALSO position:absolute/zero-inset, so this wrapper and its child share
+  // the exact same full-screen bounds — this one exists purely to carry
+  // `todosOverlayPopIn`'s translateY/opacity animation on mount/unmount.
+  todosOverlayWrap: {
+    position: "absolute",
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
   },
   header: {
     paddingHorizontal: 24,

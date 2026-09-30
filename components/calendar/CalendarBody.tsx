@@ -1,26 +1,21 @@
+import { useCallback, useEffect, useState } from "react";
 import { StyleSheet, View } from "react-native";
-import { Gesture, GestureDetector } from "react-native-gesture-handler";
-import { runOnJS } from "react-native-reanimated";
 
-import { filterToDosByRange, getDateRangeForMode, groupToDosByDate, type CalendarLayoutMode, type DateRange } from "../../services/calendar/dateRange";
+import {
+  filterToDosByRange,
+  getDateRangeForMode,
+  groupToDosByDate,
+  type CalendarLayoutMode,
+  type DateRange,
+} from "../../services/calendar/dateRange";
 import type { ToDo } from "../../services/todos/todoManager";
 import { CalendarDateNavigator } from "./CalendarDateNavigator";
-import { SwipeableCalendarPager } from "./SwipeableCalendarPager";
+import { SwipeableCalendarPager, type PageScrollSync } from "./SwipeableCalendarPager";
 import { DayLayout } from "./views/DayLayout";
 import { MonthLayout } from "./views/MonthLayout";
 import { ScheduleLayout } from "./views/ScheduleLayout";
 import { WeekLayout } from "./views/WeekLayout";
 import { WorkWeekLayout } from "./views/WorkWeekLayout";
-
-/** Minimum horizontal drag (px) OR release velocity (px/s) that counts as a
- * deliberate swipe rather than an accidental brush — matches the "obviously
- * on purpose" feel of a real gesture, not a hair-trigger on any sideways
- * finger movement. Either threshold alone is enough: a short fast flick and
- * a slow deliberate drag should both register. Used by Week/Work Week/
- * Month's plain jump-on-release swipe below — Day's own copy of this same
- * pair of constants lives in SwipeableCalendarPager.tsx. */
-const SWIPE_TRANSLATION_THRESHOLD = 50;
-const SWIPE_VELOCITY_THRESHOLD = 400;
 
 export type CalendarBodyProps = {
   mode: CalendarLayoutMode;
@@ -75,21 +70,13 @@ export type CalendarBodyProps = {
  * navigator hides during a search for the same reason it hides in
  * Schedule mode itself — there's no date range being browsed to navigate.
  *
- * SWIPE: DAY VS. EVERYTHING ELSE (deliberate, measured split). Day view uses
- * SwipeableCalendarPager's continuous 1:1-finger-tracking drag. Work Week/
- * Week/Month use the plain "jump on release" swipe below instead — NOT a
- * regression, a measured decision. All four originally used the continuous
- * pager, but live on-device logcat timing (adb, one commit traced end to
- * end) showed WeekGridLayout/MonthLayout's real NATIVE commit — not any JS
- * logic, not the swipe mechanism itself — takes ~500ms per page on this
- * hardware (MonthLayout alone mounts ~35-42 `TouchableOpacity` cells). That
- * cost exists identically via the plain date-navigator arrow buttons too;
- * it only reads as "broken" after a continuous drag because the drag
- * promises instant continuity that a pre-existing ~500ms native-render
- * pause then breaks. Fixing that render cost is real, separate work — see
- * BACKLOG.md's "Month/Week grid native render cost" entry — not something
- * to bolt onto the swipe engine. Day has no such per-cell-heavy structure
- * (a single hourly gutter) and measured fine, so it keeps the fuller effect.
+ * SWIPE: all four grid modes use SwipeableCalendarPager's continuous
+ * 1:1-finger-tracking drag, ALWAYS with real pages — see that file's own
+ * top doc comment for the full history (a ghost-preview era existed in
+ * between and was removed: it traded one bottleneck for an unbounded
+ * "does this element match the real one" audit surface, and was replaced
+ * by pre-mounting real neighbor pages off-screen during idle time instead
+ * of approximating them).
  */
 export function CalendarBody({
   mode,
@@ -109,6 +96,24 @@ export function CalendarBody({
 }: CalendarBodyProps) {
   const rangeFilteredTodos = filterToDosByRange(calendarTodos, activeRange);
 
+  // Drives CalendarDateNavigator's own label/dots during an active swipe —
+  // see SwipeableCalendarPager's own `onPreviewChange` doc comment for why
+  // this exists at all (the header used to only update once a swipe fully
+  // committed, visibly lagging behind the grid content it sits above, which
+  // already tracks the finger continuously), and for why it's a real date
+  // string here rather than a relative offset re-derived via
+  // `stepSelectedDate` — an earlier version did the re-derive here, which
+  // combined with the pager's own now-fixed sign bug to show the wrong
+  // month partway through a drag, and separately could flash the OLD
+  // month's neighbor for one frame right at landing (a race between
+  // `selectedDate` updating and this offset resetting). Reset to neutral
+  // whenever `selectedDate` actually changes — covers non-drag navigation
+  // (arrow taps, "Today") too, which never touches this at all and should
+  // just keep reading `selectedDate` directly.
+  const [previewDate, setPreviewDate] = useState<string | null>(null);
+  useEffect(() => setPreviewDate(null), [selectedDate]);
+  const headerDate = previewDate ?? selectedDate;
+
   // Day view has no per-column header the way Week/Work Week do (see
   // CalendarDateNavigator's own doc comment on `taskCount`) — this is the
   // one place left to give it the same "know there's something without
@@ -116,18 +121,41 @@ export function CalendarBody({
   // carry their own dots elsewhere and don't need this value at all.
   // `true`: a ranged to-do spanning through `selectedDate` should count here
   // even if it started on an earlier day — same expansion every grid layout
-  // now applies (see groupToDosByDate's own doc comment).
+  // now applies (see groupToDosByDate's own doc comment). Reads `headerDate`
+  // (not the raw `selectedDate`), so the dot count previews correctly too.
   const selectedDayTaskCount =
-    mode === "day" ? (groupToDosByDate(rangeFilteredTodos, true).find((g) => g.date === selectedDate)?.items.length ?? 0) : 0;
+    mode === "day" ? (groupToDosByDate(rangeFilteredTodos, true).find((g) => g.date === headerDate)?.items.length ?? 0) : 0;
 
-  // Renders one full grid page for an arbitrary date — used directly for
-  // Week/Work Week/Month's single current page below, and passed to
-  // SwipeableCalendarPager for Day, which calls it again for the previous/
-  // next dates too (see that file's own doc comment). Independent of the
-  // outer `selectedDate`/`activeRange` props so it can recompute its own
-  // range/filtered-todos per date rather than assuming it's always the one
-  // the user is currently on.
-  const renderGridForDate = (dateForPage: string) => {
+  // Renders one full, ALWAYS-REAL grid page for an arbitrary date,
+  // independent of the outer `selectedDate`/`activeRange` props —
+  // SwipeableCalendarPager calls this for every page in its mounted window
+  // (current plus pre-mounted neighbors, see that file's own doc comment),
+  // so it must recompute its own range/filtered-todos per date rather than
+  // reusing the top-level `activeRange`/`rangeFilteredTodos` above (which
+  // are only ever valid for the single date the user is actually on right
+  // now).
+  //
+  // WRAPPED IN useCallback, deliberately excluding `previewOffset`/
+  // `headerDate` (neither is referenced in the body below) — this is the
+  // fix for a measured, on-device root cause: `onPreviewChange` firing
+  // during a drag calls `setPreviewOffset` right here in CalendarBody, and
+  // an unmemoized `renderGridForDate` being recreated on every one of those
+  // state updates fed SwipeableCalendarPager a fresh function + fresh
+  // `pageTodos` array identity on every render, defeating MonthLayout's/
+  // WeekGridLayout's own internal `useMemo`s and forcing a full unnecessary
+  // native re-commit of the ALREADY-SETTLED, on-screen page mid-gesture.
+  // Live adb-logcat timing traced one real swipe: three full render
+  // cascades (preview-flip, actual commit, offset-reset-to-0 on settle)
+  // instead of one. Paired with wrapping SwipeableCalendarPager itself in
+  // `React.memo` (see that file), a `previewOffset` update now only
+  // re-renders CalendarDateNavigator, never touches the pager/grid subtree
+  // at all.
+  // `scrollSync`: only Day/Work Week/Week have a per-time-of-day vertical
+  // scroll to keep in sync across pages — see SwipeableCalendarPager's own
+  // `PageScrollSync` doc comment for the full reasoning (swiping used to
+  // reset to "an hour before now" instead of wherever the user was actually
+  // looking). Month has no equivalent concept, so its branch ignores it.
+  const renderGridForDate = useCallback((dateForPage: string, scrollSync: PageScrollSync) => {
     const pageRange = getDateRangeForMode(mode, dateForPage);
     const pageTodos = filterToDosByRange(calendarTodos, pageRange);
     return (
@@ -139,6 +167,8 @@ export function CalendarBody({
             onOpenTask={onOpenTask}
             onCheckTask={onCheckTask}
             onLongPressDelete={onLongPressDelete}
+            initialScrollY={scrollSync.initialScrollY}
+            onScrollYChange={scrollSync.onScrollYChange}
           />
         )}
         {mode === "work_week" && pageRange && (
@@ -148,6 +178,8 @@ export function CalendarBody({
             onOpenTask={onOpenTask}
             onCheckTask={onCheckTask}
             onLongPressDelete={onLongPressDelete}
+            initialScrollY={scrollSync.initialScrollY}
+            onScrollYChange={scrollSync.onScrollYChange}
           />
         )}
         {mode === "week" && pageRange && (
@@ -157,6 +189,8 @@ export function CalendarBody({
             onOpenTask={onOpenTask}
             onCheckTask={onCheckTask}
             onLongPressDelete={onLongPressDelete}
+            initialScrollY={scrollSync.initialScrollY}
+            onScrollYChange={scrollSync.onScrollYChange}
           />
         )}
         {mode === "month" && pageRange && (
@@ -173,23 +207,7 @@ export function CalendarBody({
         )}
       </View>
     );
-  };
-
-  // Plain "jump on release" swipe for Week/Work Week/Month — see this
-  // component's own doc comment for why these three don't get the
-  // continuous pager. Same activation thresholds and activeOffsetX/
-  // failOffsetY gesture-composition technique the original single swipe
-  // gesture used, just without any drag-following visual.
-  const jumpSwipeGesture = Gesture.Pan()
-    .activeOffsetX([-20, 20])
-    .failOffsetY([-15, 15])
-    .onEnd((event) => {
-      if (event.translationX <= -SWIPE_TRANSLATION_THRESHOLD || event.velocityX <= -SWIPE_VELOCITY_THRESHOLD) {
-        runOnJS(onNext)();
-      } else if (event.translationX >= SWIPE_TRANSLATION_THRESHOLD || event.velocityX >= SWIPE_VELOCITY_THRESHOLD) {
-        runOnJS(onPrevious)();
-      }
-    });
+  }, [mode, calendarTodos, onOpenTask, onCheckTask, onLongPressDelete, onOpenSourceNote, onSelectDate]);
 
   if (isSearching) {
     return (
@@ -212,7 +230,7 @@ export function CalendarBody({
       {mode !== "schedule" && (
         <CalendarDateNavigator
           mode={mode}
-          selectedDate={selectedDate}
+          selectedDate={headerDate}
           onPrevious={onPrevious}
           onNext={onNext}
           onToday={onToday}
@@ -230,10 +248,15 @@ export function CalendarBody({
             onLongPressDelete={onLongPressDelete}
           />
         </View>
-      ) : mode === "day" ? (
-        <SwipeableCalendarPager mode={mode} selectedDate={selectedDate} onNext={onNext} onPrevious={onPrevious} renderPage={renderGridForDate} />
       ) : (
-        <GestureDetector gesture={jumpSwipeGesture}>{renderGridForDate(selectedDate)}</GestureDetector>
+        <SwipeableCalendarPager
+          mode={mode}
+          selectedDate={selectedDate}
+          onNext={onNext}
+          onPrevious={onPrevious}
+          renderPage={renderGridForDate}
+          onPreviewChange={setPreviewDate}
+        />
       )}
     </View>
   );

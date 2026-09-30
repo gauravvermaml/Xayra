@@ -8,6 +8,8 @@ export type WorkWeekLayoutProps = {
   onOpenTask: (item: ToDo) => void;
   onCheckTask: (item: ToDo) => void;
   onLongPressDelete: (item: ToDo) => void;
+  initialScrollY?: number | null;
+  onScrollYChange?: (y: number) => void;
 };
 
 /** Mon-Fri, 5 columns — see WeekGridLayout.tsx for the shared implementation
