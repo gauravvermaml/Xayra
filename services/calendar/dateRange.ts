@@ -28,6 +28,18 @@ export function todayIso(): string {
   return formatIsoDate(new Date());
 }
 
+/** "Friday, 25 September 2026" — shared day-panel title format, used
+ * everywhere a grid layout shows a persistent "here's this date's to-dos"
+ * panel (MonthLayout.tsx originally, now also WeekGridLayout.tsx). */
+export function formatFullDate(iso: string): string {
+  return parseIsoDate(iso).toLocaleDateString(undefined, {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+}
+
 export function shiftIsoDate(iso: string, days: number): string {
   const date = parseIsoDate(iso);
   date.setDate(date.getDate() + days);

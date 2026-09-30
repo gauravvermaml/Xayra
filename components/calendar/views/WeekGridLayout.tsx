@@ -23,6 +23,19 @@ import { TimelineHourGutter } from "./TimelineHourGutter";
 export type WeekGridLayoutProps = {
   range: DateRange;
   todos: ToDo[];
+  /** Which date shows a selected-ring in its header — `null` (no date's
+   * preview sheet is currently open) shows no ring at all, unlike
+   * MonthLayout.tsx's `selectedDate`, which is always some real date since
+   * its panel is a persistent fixture. Reported via `onSelectDate` on tap;
+   * CalendarBody.tsx wires that same tap to also pop open
+   * WeekDayPreviewSheet.tsx (a real draggable bottom sheet, not an inline
+   * panel — see that file's own doc comment for why this view specifically
+   * got a dismissible sheet instead of Month's always-visible inline one:
+   * the hourly timeline here is the primary content competing for the same
+   * screen space, unlike Month's tiny grid cells). This component itself
+   * doesn't know or care that tapping does more than just report a date. */
+  selectedDate: string | null;
+  onSelectDate: (date: string) => void;
   onOpenTask: (item: ToDo) => void;
   onCheckTask: (item: ToDo) => void;
   onLongPressDelete: (item: ToDo) => void;
@@ -66,10 +79,16 @@ export type WeekGridLayoutProps = {
  * ~90px-tall slot has nowhere near enough room regardless of column count.
  * "Compact" is still used, unchanged, by DayLayout.tsx's own floating
  * chips, which have real room to spare.
+ *
+ * Tapping a day-column header selects that date (the ring below) and, via
+ * CalendarBody.tsx's own wiring, opens WeekDayPreviewSheet.tsx — see that
+ * file for the actual day's-to-dos list/scroll/drag-to-dismiss behavior.
  */
 export function WeekGridLayout({
   range,
   todos,
+  selectedDate,
+  onSelectDate,
   onOpenTask,
   onCheckTask,
   onLongPressDelete,
@@ -134,6 +153,8 @@ export function WeekGridLayout({
             key={date}
             date={date}
             isToday={date === today}
+            isSelected={date === selectedDate}
+            onPress={onSelectDate}
             width={columnWidth}
             taskCount={(groupByDate.get(date) ?? []).length}
             showRightBorder={index < dates.length - 1}

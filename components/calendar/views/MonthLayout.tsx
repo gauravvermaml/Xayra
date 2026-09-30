@@ -13,6 +13,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { colors, radius, spacing, typography } from "../../../constants/theme";
 import {
   endOfMonth,
+  formatFullDate,
   groupToDosByDate,
   shiftIsoDate,
   startOfMonth,
@@ -42,18 +43,6 @@ function parseIso(iso: string): { year: number; month: number; day: number } {
 function parseIsoAsDate(iso: string): Date {
   const { year, month, day } = parseIso(iso);
   return new Date(year, month - 1, day);
-}
-
-/** "Friday, 25 September 2026" for the day panel's own header — same shape
- * CalendarDayTray.tsx's now-removed formatter used. */
-function formatFullDate(iso: string): string {
-  const { year, month, day } = parseIso(iso);
-  return new Date(year, month - 1, day).toLocaleDateString(undefined, {
-    weekday: "long",
-    day: "numeric",
-    month: "long",
-    year: "numeric",
-  });
 }
 
 export type MonthLayoutProps = {
@@ -173,6 +162,22 @@ export function MonthLayout({
   // contributor to that. `cellWidth`/`CELL_HEIGHT` are both applied as
   // EXPLICIT, fixed styles on the cell View below (not left to intrinsic
   // sizing) specifically so this math can trust them.
+  // Tapping a leading/trailing overflow-day cell (from the adjacent month)
+  // now navigates there, same as Google Calendar's own month view — the
+  // pager's own resync logic (SwipeableCalendarPager.tsx's render-time
+  // `selectedDate !== syncedDate` check) already recenters its mounted
+  // window on WHATEVER date `onSelectDate` reports, no matter which month
+  // it falls in, so this needs no special-case beyond just always calling
+  // it. Live bug fixed here: this used to also require
+  // `items.length === 0 && !cell.inMonth` to be false before allowing the
+  // tap — but `groupByDate` is built from THIS page's own `pageTodos`
+  // (services/calendar/dateRange.ts's `getDateRangeForMode("month", ...)`
+  // returns the STRICT calendar month, deliberately excluding the
+  // leading/trailing overflow days shown in the grid), so an overflow cell
+  // can never have an entry in `groupByDate` — that condition was always
+  // true for every overflow cell, silently disabling every single one of
+  // them, unconditionally, regardless of the `items.length === 0` half of
+  // the check.
   const handleGridTap = useCallback(
     (localX: number, localY: number) => {
       const col = Math.min(6, Math.max(0, Math.floor(localX / cellWidth)));
@@ -181,14 +186,9 @@ export function MonthLayout({
       if (!cell) {
         return;
       }
-      const items = groupByDate.get(cell.date) ?? [];
-      const disabled = items.length === 0 && !cell.inMonth;
-      if (disabled) {
-        return;
-      }
       onSelectDate(cell.date);
     },
-    [weeks, cellWidth, groupByDate, onSelectDate]
+    [weeks, cellWidth, onSelectDate]
   );
 
   const gridTapGesture = Gesture.Tap().onEnd((event) => {

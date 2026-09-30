@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { StyleSheet, View } from "react-native";
 
 import {
@@ -11,6 +11,7 @@ import {
 import type { ToDo } from "../../services/todos/todoManager";
 import { CalendarDateNavigator } from "./CalendarDateNavigator";
 import { SwipeableCalendarPager, type PageScrollSync } from "./SwipeableCalendarPager";
+import { WeekDayPreviewSheet } from "./WeekDayPreviewSheet";
 import { DayLayout } from "./views/DayLayout";
 import { MonthLayout } from "./views/MonthLayout";
 import { ScheduleLayout } from "./views/ScheduleLayout";
@@ -41,6 +42,16 @@ export type CalendarBodyProps = {
    * this component's own doc comment for what it overrides. */
   isSearching: boolean;
   onOpenTask: (item: ToDo) => void;
+  /** WeekDayPreviewSheet.tsx's own cards open straight to the full edit
+   * sheet, bypassing Week/Work Week's usual preview-first step
+   * (`onOpenTask` above, which for these two modes resolves to
+   * `handlePreviewTask`) — same reasoning TodosOverlay.tsx's own doc
+   * comment already gives for why search results do the same: the
+   * preview-card step exists ONLY for the grid's tiny inline reminder
+   * chips, and this sheet's cards are already the same full-size
+   * `CalendarTaskCard` a preview would show, so routing through another
+   * preview first would just be a redundant extra tap. */
+  onOpenTaskFromDayPreview: (item: ToDo) => void;
   onCheckTask: (item: ToDo) => void;
   onOpenSourceNote: (noteId: string) => void;
   onLongPressDelete: (item: ToDo) => void;
@@ -91,6 +102,7 @@ export function CalendarBody({
   calendarTodos,
   isSearching,
   onOpenTask,
+  onOpenTaskFromDayPreview,
   onCheckTask,
   onOpenSourceNote,
   onLongPressDelete,
@@ -115,6 +127,31 @@ export function CalendarBody({
   const [previewDate, setPreviewDate] = useState<string | null>(null);
   useEffect(() => setPreviewDate(null), [selectedDate]);
   const headerDate = previewDate ?? selectedDate;
+
+  // WeekDayPreviewSheet's own open/closed state — a tapped day-column header
+  // in Week/Work Week both selects that date (below, via `onSelectDate`,
+  // same as every other layout's date navigation) AND opens this sheet; see
+  // WeekDayPreviewSheet.tsx's own doc comment for why it's a dismissible
+  // sheet here specifically rather than Month's always-visible inline panel,
+  // and why it's mounted once here rather than inside WeekGridLayout.tsx
+  // itself (which SwipeableCalendarPager mounts up to three times at once).
+  // Reset on any mode change — switching away from Week/Work Week and back
+  // shouldn't resurrect a sheet left open from a previous visit to this mode.
+  const [dayPreviewDate, setDayPreviewDate] = useState<string | null>(null);
+  useEffect(() => setDayPreviewDate(null), [mode]);
+  const handleOpenDayPreview = useCallback(
+    (date: string) => {
+      onSelectDate(date);
+      setDayPreviewDate(date);
+    },
+    [onSelectDate]
+  );
+  const dayPreviewTodos = useMemo(() => {
+    if (!dayPreviewDate) {
+      return [];
+    }
+    return groupToDosByDate(calendarTodos, true).find((group) => group.date === dayPreviewDate)?.items ?? [];
+  }, [calendarTodos, dayPreviewDate]);
 
   // Day view has no per-column header the way Week/Work Week do (see
   // CalendarDateNavigator's own doc comment on `taskCount`) — this is the
@@ -177,6 +214,8 @@ export function CalendarBody({
           <WorkWeekLayout
             range={pageRange}
             todos={pageTodos}
+            selectedDate={dayPreviewDate}
+            onSelectDate={handleOpenDayPreview}
             onOpenTask={onOpenTask}
             onCheckTask={onCheckTask}
             onLongPressDelete={onLongPressDelete}
@@ -188,6 +227,8 @@ export function CalendarBody({
           <WeekLayout
             range={pageRange}
             todos={pageTodos}
+            selectedDate={dayPreviewDate}
+            onSelectDate={handleOpenDayPreview}
             onOpenTask={onOpenTask}
             onCheckTask={onCheckTask}
             onLongPressDelete={onLongPressDelete}
@@ -261,6 +302,19 @@ export function CalendarBody({
           onPrevious={onPrevious}
           renderPage={renderGridForDate}
           onPreviewChange={setPreviewDate}
+        />
+      )}
+
+      {(mode === "week" || mode === "work_week") && (
+        <WeekDayPreviewSheet
+          date={dayPreviewDate}
+          todos={dayPreviewTodos}
+          onClose={() => setDayPreviewDate(null)}
+          onOpenTask={onOpenTaskFromDayPreview}
+          onCheckTask={onCheckTask}
+          onOpenSourceNote={onOpenSourceNote}
+          onLongPressDelete={onLongPressDelete}
+          onSendToCalendar={onSendToCalendar}
         />
       )}
     </View>

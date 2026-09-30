@@ -17,6 +17,13 @@ function parseIso(iso: string): { day: number; weekday: number } {
 export type DayHeaderCellProps = {
   date: string;
   isToday: boolean;
+  /** Selected date's own day panel below the grid shows this date's
+   * to-dos — see WeekGridLayout.tsx's own doc comment. Renders as an accent
+   * ring around the date bubble, same visual language as MonthLayout.tsx's
+   * `dateBubbleSelected` (kept visually distinct from `isToday`'s filled
+   * bubble so "today" and "the date the panel below is showing" never look
+   * identical when they're two different dates). */
+  isSelected?: boolean;
   /** Count of to-dos on this date — renders as small dots (capped at
    * `MAX_DOTS`, "+N" beyond that) under the date bubble, same visual
    * language as MonthLayout.tsx's per-cell dots. Lets a reminder set for
@@ -30,15 +37,23 @@ export type DayHeaderCellProps = {
 /** One column's header — day initial + date-number bubble, today filled
  * with the accent color — shared by WorkWeekLayout and WeekLayout so both
  * headers stay visually identical (they only differ in sizing strategy,
- * passed via `style`). Plain `View`/`Text`, no touchable, so `flex`/`width`
- * passed through `style` sizes it reliably either way. */
-export function DayHeaderCell({ date, isToday, taskCount = 0, style }: DayHeaderCellProps) {
+ * passed via `style`). Plain `View`/`Text`, no touchable of its own — the
+ * tap gesture lives on DayColumnHeader.tsx, one level up, same split as
+ * MonthLayout.tsx's own single shared grid-tap gesture vs. its per-cell
+ * rendering. */
+export function DayHeaderCell({ date, isToday, isSelected = false, taskCount = 0, style }: DayHeaderCellProps) {
   const { day, weekday } = parseIso(date);
 
   return (
     <View style={[styles.column, style]}>
       <Text style={styles.dayInitial}>{DAY_INITIALS[weekday]}</Text>
-      <View style={[styles.dateBubble, isToday && styles.dateBubbleActive]}>
+      <View
+        style={[
+          styles.dateBubble,
+          isSelected && !isToday && styles.dateBubbleSelected,
+          isToday && styles.dateBubbleActive,
+        ]}
+      >
         <Text style={[styles.dateNumber, isToday && styles.dateNumberActive]}>{day}</Text>
       </View>
       {/* ALWAYS rendered, even at taskCount=0 (just empty) — reserves this
@@ -77,6 +92,10 @@ const styles = StyleSheet.create({
   },
   dateBubbleActive: {
     backgroundColor: colors.accent,
+  },
+  dateBubbleSelected: {
+    borderWidth: 2,
+    borderColor: colors.accent,
   },
   dateNumber: {
     color: colors.textPrimary,

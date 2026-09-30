@@ -86,6 +86,21 @@ verified showing up in Google Calendar itself, 2026-09-30.
 
 ## Done
 
+### Month overflow-date tap did nothing / Week-Work Week day-preview bottom sheet
+
+Not pre-listed backlog items — two live requests, fixed/shipped together and
+logged here per this file's own convention (see PROJECT_STATE_HANDOFF.md's
+Build 55 section for the full writeup). Month: tapping a leading/trailing
+overflow-month date was silently a no-op, root-caused to an always-true
+disabled check (overflow dates can never have items in that page's strict-
+month-filtered set) — fixed, now navigates to and selects that date like
+Google Calendar's own month view. Week/Work Week: tapping a day header now
+springs open a real draggable bottom sheet (spring-up, drag-handle-to-
+dismiss, scrollable) showing that day's reminders — deliberately NOT Month's
+always-visible inline panel, per explicit request, reusing the same
+`@gorhom/bottom-sheet` mechanics already used elsewhere in the app for a
+consistent feel. Confirmed working on-device 2026-09-30.
+
 ### Gold Standard Waveform
 
 Raised 2026-09-29, shipped 2026-09-30 after a long multi-round on-device

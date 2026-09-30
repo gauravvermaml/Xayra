@@ -1,4 +1,5 @@
 import { StyleSheet, View } from "react-native";
+import { TouchableOpacity } from "react-native-gesture-handler";
 
 import { colors } from "../../../constants/theme";
 import { DayHeaderCell } from "./DayHeaderCell";
@@ -7,8 +8,10 @@ export type DayColumnHeaderProps = {
   date: string;
   isToday: boolean;
   width: number;
-  /** Passed straight through to DayHeaderCell's own dot indicator — see its
-   * doc comment. */
+  /** Passed straight through to DayHeaderCell's own selected-ring/dot
+   * indicators — see that file's own doc comments. */
+  isSelected?: boolean;
+  onPress?: (date: string) => void;
   taskCount?: number;
   showRightBorder?: boolean;
 };
@@ -32,10 +35,26 @@ export type DayColumnHeaderProps = {
  * `notificationTime` regardless of what that value is (see
  * DayColumnTimeline.tsx).
  */
-export function DayColumnHeader({ date, isToday, width, taskCount = 0, showRightBorder = true }: DayColumnHeaderProps) {
+export function DayColumnHeader({
+  date,
+  isToday,
+  width,
+  isSelected = false,
+  onPress,
+  taskCount = 0,
+  showRightBorder = true,
+}: DayColumnHeaderProps) {
+  const content = <DayHeaderCell date={date} isToday={isToday} isSelected={isSelected} taskCount={taskCount} />;
+
   return (
     <View style={[styles.column, { width }, showRightBorder && styles.rightBorder]}>
-      <DayHeaderCell date={date} isToday={isToday} taskCount={taskCount} />
+      {onPress ? (
+        <TouchableOpacity onPress={() => onPress(date)} activeOpacity={0.6} hitSlop={4}>
+          {content}
+        </TouchableOpacity>
+      ) : (
+        content
+      )}
     </View>
   );
 }

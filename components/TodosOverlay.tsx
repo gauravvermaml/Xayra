@@ -388,6 +388,10 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
           // selected, so they open straight to edit — the preview-card step
           // only applies to Week/Work Week's own inline grid chips.
           onOpenTask={searchQuery.trim().length > 0 ? handleEditDetails : handleGridOpenTask}
+          // WeekDayPreviewSheet's cards are the same full-size card search
+          // results use, not a grid chip — same "straight to edit" reasoning
+          // as the comment above, always, regardless of search state.
+          onOpenTaskFromDayPreview={handleEditDetails}
           onCheckTask={handleCheck}
           onOpenSourceNote={setViewingNoteId}
           onLongPressDelete={handleLongPressDelete}

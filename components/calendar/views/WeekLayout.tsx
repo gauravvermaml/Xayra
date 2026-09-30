@@ -5,6 +5,8 @@ import { WeekGridLayout } from "./WeekGridLayout";
 export type WeekLayoutProps = {
   range: DateRange;
   todos: ToDo[];
+  selectedDate: string | null;
+  onSelectDate: (date: string) => void;
   onOpenTask: (item: ToDo) => void;
   onCheckTask: (item: ToDo) => void;
   onLongPressDelete: (item: ToDo) => void;
