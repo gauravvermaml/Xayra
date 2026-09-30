@@ -30,7 +30,7 @@ function toBarePath(uriOrPath: string): string {
 }
 
 /**
- * `drive.appdata` is deliberately the only scope ever requested. Files
+ * `drive.appdata` is deliberately the only Drive scope ever requested. Files
  * created under it live in a hidden per-app folder that isn't visible in the
  * user's normal Drive UI and isn't readable by any other app or Drive client
  * — it's the narrowest scope Google offers for "let this app keep its own
@@ -38,6 +38,23 @@ function toBarePath(uriOrPath: string): string {
  * (no access to the user's other Drive files, ever).
  */
 const DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
+
+/**
+ * `calendar.events` (not the broader `calendar` scope) — narrowest scope
+ * that permits creating/updating/deleting events, matching this same file's
+ * "narrowest scope that does the job" philosophy above. Declared here (this
+ * file is the one and only place `GoogleSignin.configure()` is called, and
+ * already the de facto shared Google Sign-In owner — see `getGreetingFirstName`
+ * for an existing example of another feature piggybacking on this same
+ * signed-in session) even though it's consumed by services/sync/calendarSync.ts,
+ * not this file's own Drive logic — a real, actionable interactive consent
+ * prompt for this scope is never triggered just by including it here (that
+ * needs an explicit `GoogleSignin.addScopes` call, which calendarSync.ts
+ * makes lazily, only the first time a user actually taps "Send to
+ * Calendar") — see the exported `ensureConfigured`/`requireAccessToken`
+ * below.
+ */
+export const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
 
 const DRIVE_FILES_ENDPOINT = "https://www.googleapis.com/drive/v3/files";
 const DRIVE_UPLOAD_ENDPOINT = "https://www.googleapis.com/upload/drive/v3/files";
@@ -112,7 +129,13 @@ const WEB_CLIENT_ID = "275985105011-2rr1beo5b1j34fc8vh181rtvuhjs8mb6.apps.google
  * with a native `DEVELOPER_ERROR`/`SIGN_IN_REQUIRED`-style error, not a bug
  * in this file.
  */
-function ensureConfigured(): void {
+/** Exported so services/sync/calendarSync.ts can ensure the shared
+ * GoogleSignin SDK state is initialized before its own `addScopes`/
+ * `getTokens` calls — this file remains the one and only place
+ * `GoogleSignin.configure()` itself is ever called, avoiding two files each
+ * configuring the SDK independently (which risks one silently clobbering
+ * the other's scopes list). */
+export function ensureConfigured(): void {
   if (configured) {
     return;
   }
@@ -124,7 +147,14 @@ function ensureConfigured(): void {
     );
   }
   GoogleSignin.configure({
-    scopes: [DRIVE_APPDATA_SCOPE],
+    // Both scopes declared upfront — this alone triggers no interactive UI
+    // (only `signIn()`/`addScopes()` do that); it just tells the SDK what's
+    // available to request later. Drive's own `signInWithGoogle()` below
+    // still only ever calls `addScopes` with `DRIVE_APPDATA_SCOPE`, and
+    // calendarSync.ts's own equivalent only ever calls it with
+    // `CALENDAR_EVENTS_SCOPE` — a user who never touches "Send to Calendar"
+    // is never prompted for it.
+    scopes: [DRIVE_APPDATA_SCOPE, CALENDAR_EVENTS_SCOPE],
     webClientId: WEB_CLIENT_ID,
     // Requests a server auth code alongside the normal sign-in so a refresh
     // token is available — without this, some Play Services versions only
@@ -226,8 +256,13 @@ function isDeveloperError(err: unknown): boolean {
  * than the SDK's bare, unhelpful native error. An expected, already-clear
  * `DriveSyncError` (e.g. "sign-in was cancelled") passes through untouched;
  * diagnostics are only appended to genuine unexpected native failures.
+ *
+ * Exported so services/sync/calendarSync.ts's own scope-request call gets
+ * the same `DEVELOPER_ERROR` diagnostics instead of a bare native error —
+ * it's the identical failure mode (a SHA-1/OAuth-client mismatch), just
+ * possibly hit for the first time by a user who already had Drive working.
  */
-async function withDeveloperErrorHandling<T>(action: () => Promise<T>): Promise<T> {
+export async function withDeveloperErrorHandling<T>(action: () => Promise<T>): Promise<T> {
   try {
     return await action();
   } catch (err) {
@@ -369,7 +404,11 @@ export async function setAutoSyncOnWifi(enabled: boolean): Promise<void> {
   await AsyncStorage.setItem(AUTO_SYNC_WIFI_STORAGE_KEY, enabled ? "true" : "false");
 }
 
-async function requireAccessToken(): Promise<string> {
+/** Exported for services/sync/calendarSync.ts — `getTokens()` returns a
+ * single access token valid for whatever scopes have actually been granted
+ * on this signed-in session, Drive and Calendar alike, so there's no
+ * separate per-scope token-fetch mechanism needed. */
+export async function requireAccessToken(): Promise<string> {
   if (!GoogleSignin.getCurrentUser()) {
     throw new NotSignedInError();
   }

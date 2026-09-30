@@ -3,6 +3,7 @@ import * as Crypto from "expo-crypto";
 import { getRawDatabase } from "../../db/client";
 import { DEFAULT_NOTIFICATION_TIME, type Recurrence } from "../../db/schema";
 import { cancelToDoNotification, scheduleToDoNotification } from "../notifications/todoNotifications";
+import { createCalendarEvent, deleteCalendarEvent, updateCalendarEvent } from "../sync/calendarSync";
 
 export type ToDo = {
   id: string;
@@ -23,6 +24,9 @@ export type ToDo = {
   /** The note this was auto-extracted from — see db/schema.ts's `noteId`
    * doc comment. Null for a to-do entered directly via the Add modal. */
   noteId: string | null;
+  /** See db/schema.ts's `googleCalendarEventId` doc comment. Null unless
+   * this to-do has been explicitly sent to Google Calendar. */
+  googleCalendarEventId: string | null;
 };
 
 function rowToToDo(row: Record<string, unknown>): ToDo {
@@ -46,6 +50,7 @@ function rowToToDo(row: Record<string, unknown>): ToDo {
     recurrenceInterval: Number.isFinite(interval) && interval >= 1 ? interval : 1,
     createdAt: row.created_at as string,
     noteId: (row.note_id as string | null) ?? null,
+    googleCalendarEventId: (row.google_calendar_event_id as string | null) ?? null,
   };
 }
 
@@ -148,6 +153,7 @@ export async function addToDo(input: AddToDoInput): Promise<ToDo> {
     recurrenceInterval: interval,
     createdAt,
     noteId,
+    googleCalendarEventId: null,
   };
   void scheduleToDoNotification(toDo);
   return toDo;
@@ -160,7 +166,7 @@ export async function getPendingToDos(): Promise<ToDo[]> {
 
   const result = await db.execute(
     `
-      SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id
+      SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id, google_calendar_event_id
       FROM todos
       WHERE is_completed = 0
       ORDER BY action_date ASC, created_at ASC
@@ -179,7 +185,7 @@ export async function listAllToDos(): Promise<ToDo[]> {
 
   const result = await db.execute(
     `
-      SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id
+      SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id, google_calendar_event_id
       FROM todos
       ORDER BY created_at ASC
     `
@@ -205,7 +211,7 @@ export async function getPendingCount(): Promise<number> {
 async function getToDoById(id: string): Promise<ToDo | null> {
   const db = await getRawDatabase();
   const result = await db.execute(
-    "SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id FROM todos WHERE id = ?",
+    "SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id, google_calendar_event_id FROM todos WHERE id = ?",
     [id]
   );
   const row = result.rows[0];
@@ -273,6 +279,18 @@ export async function updateToDo(id: string, fields: ToDoUpdateFields): Promise<
   if (updated && !updated.isCompleted) {
     void scheduleToDoNotification(updated);
   }
+  // One-way sync: an edit here should propagate to the linked Calendar
+  // event (if this to-do has ever been sent there) without the user having
+  // to re-press "Send to Calendar" — an edit made directly in Google
+  // Calendar itself is never pulled back the other way. Fire-and-forget and
+  // failure-tolerant on purpose, same as the notification reschedule just
+  // above: a Calendar API hiccup (offline, revoked access) must never make
+  // an otherwise-successful local edit look like it failed.
+  if (updated?.googleCalendarEventId) {
+    void updateCalendarEvent(updated).catch((err) => {
+      console.warn("[todoManager] Failed to propagate edit to Google Calendar —", err);
+    });
+  }
 }
 
 /**
@@ -286,9 +304,78 @@ export async function updateToDo(id: string, fields: ToDoUpdateFields): Promise<
  */
 export async function deleteToDo(id: string): Promise<void> {
   const db = await getRawDatabase();
+  // Read the Calendar link BEFORE deleting the row — it's gone from here
+  // after the DELETE below, and per the explicit "deleting in Xayra also
+  // deletes the Calendar event" product decision, this is the one place
+  // that cascade has to happen.
+  const existing = await db.execute("SELECT google_calendar_event_id FROM todos WHERE id = ?", [id]);
+  const eventId = (existing.rows[0]?.google_calendar_event_id as string | null) ?? null;
+
   await db.execute("DELETE FROM todos WHERE id = ?", [id]);
   notifyToDosChanged();
   void cancelToDoNotification(id);
+  if (eventId) {
+    // Fire-and-forget, failure-tolerant — the local delete must succeed
+    // regardless of whether the Calendar API call does (offline, revoked
+    // access). A stray leftover Calendar event in that rare case is a far
+    // better failure mode than blocking/failing the delete itself.
+    void deleteCalendarEvent(eventId).catch((err) => {
+      console.warn("[todoManager] Failed to delete linked Google Calendar event —", err);
+    });
+  }
+}
+
+/**
+ * Explicit "Send to Calendar" action (components/calendar/CalendarTaskCard.tsx's
+ * new calendar-icon button) — creates a real Google Calendar event for this
+ * to-do and stores its id so `updateToDo`/`deleteToDo` above can keep it in
+ * sync one-way going forward. A no-op (returns the to-do unchanged) if it's
+ * already linked — this is the "send" half of the explicit toggle described
+ * in BACKLOG.md; re-sending an already-sent to-do is `removeToDoFromCalendar`
+ * followed by this again, not a silent double-create. Throws whatever
+ * `createCalendarEvent` throws (a `CalendarSyncError`) — the caller (the UI
+ * action handler) is responsible for surfacing that to the user; this
+ * function itself does not swallow it, unlike the fire-and-forget
+ * propagation in `updateToDo`/`deleteToDo` above, because THIS call is the
+ * one the user is actively waiting on the result of.
+ */
+export async function sendToDoToCalendar(id: string): Promise<ToDo> {
+  const existing = await getToDoById(id);
+  if (!existing) {
+    throw new Error("This to-do no longer exists.");
+  }
+  if (existing.googleCalendarEventId) {
+    return existing;
+  }
+
+  const eventId = await createCalendarEvent(existing);
+  const db = await getRawDatabase();
+  await db.execute("UPDATE todos SET google_calendar_event_id = ? WHERE id = ?", [eventId, id]);
+  notifyToDosChanged();
+
+  return { ...existing, googleCalendarEventId: eventId };
+}
+
+/**
+ * The reverse of `sendToDoToCalendar` — deletes the linked Calendar event
+ * and clears the stored link, so the calendar-icon button can act as a
+ * clean on/off toggle. A no-op if it isn't currently linked.
+ */
+export async function removeToDoFromCalendar(id: string): Promise<ToDo> {
+  const existing = await getToDoById(id);
+  if (!existing) {
+    throw new Error("This to-do no longer exists.");
+  }
+  if (!existing.googleCalendarEventId) {
+    return existing;
+  }
+
+  await deleteCalendarEvent(existing.googleCalendarEventId);
+  const db = await getRawDatabase();
+  await db.execute("UPDATE todos SET google_calendar_event_id = NULL WHERE id = ?", [id]);
+  notifyToDosChanged();
+
+  return { ...existing, googleCalendarEventId: null };
 }
 
 /** A to-do as read out of a downloaded Google Drive backup database — see
@@ -382,6 +469,9 @@ export async function mergeMissingToDos(cloudToDos: CloudToDoRecord[]): Promise<
       recurrenceInterval: todo.recurrenceInterval,
       createdAt: todo.createdAt,
       noteId: todo.noteId,
+      // Restored to-dos never carry a Calendar link across accounts/devices
+      // — see db/schema.ts's `googleCalendarEventId` doc comment.
+      googleCalendarEventId: null,
     });
   }
 
@@ -528,6 +618,10 @@ export async function completeToDo(id: string): Promise<void> {
         recurrenceInterval,
         createdAt,
         noteId,
+        // A freshly-spawned occurrence never inherits the completed row's
+        // own Calendar link (if any) — that event belongs to the FINISHED
+        // occurrence, not a new one starting over.
+        googleCalendarEventId: null,
       };
     }
   });

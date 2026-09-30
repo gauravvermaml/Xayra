@@ -179,6 +179,16 @@ export const todos = sqliteTable("todos", {
    * NoteDetailModal's own "this note could not be found" handling, which
    * already covers exactly that case for other stale-note-id references. */
   noteId: text("note_id"),
+  /** The linked Google Calendar event's own id, once a user has explicitly
+   * sent this to-do there via services/sync/calendarSync.ts — null until
+   * then, and set back to null if it's ever removed from Calendar again
+   * (see `sendToDoToCalendar`/`removeToDoFromCalendar`). One-way sync only:
+   * an edit made directly in Google Calendar is never pulled back into this
+   * row. Deliberately NOT carried through `CloudToDoRecord`/Drive backup —
+   * an event id is tied to a specific Google account/session's Calendar,
+   * not portable data a restore on a different device (or a different
+   * signed-in account on this one) could meaningfully reuse. */
+  googleCalendarEventId: text("google_calendar_event_id"),
 });
 
 /**

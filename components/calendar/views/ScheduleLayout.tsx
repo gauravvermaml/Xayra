@@ -39,6 +39,7 @@ export type ScheduleLayoutProps = {
   onCheckTask: (item: ToDo) => void;
   onOpenSourceNote: (noteId: string) => void;
   onLongPressDelete: (item: ToDo) => void;
+  onSendToCalendar: (item: ToDo) => void;
 };
 
 /**
@@ -84,6 +85,7 @@ export function ScheduleLayout({
   onCheckTask,
   onOpenSourceNote,
   onLongPressDelete,
+  onSendToCalendar,
 }: ScheduleLayoutProps) {
   const rows = useMemo(() => {
     const flat: FlatRow[] = [];
@@ -116,6 +118,7 @@ export function ScheduleLayout({
               onCheck={onCheckTask}
               onOpenSourceNote={onOpenSourceNote}
               onLongPressDelete={onLongPressDelete}
+              onSendToCalendar={onSendToCalendar}
             />
           </View>
         )

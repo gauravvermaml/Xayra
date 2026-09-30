@@ -44,6 +44,7 @@ export type CalendarBodyProps = {
   onCheckTask: (item: ToDo) => void;
   onOpenSourceNote: (noteId: string) => void;
   onLongPressDelete: (item: ToDo) => void;
+  onSendToCalendar: (item: ToDo) => void;
 };
 
 /**
@@ -93,6 +94,7 @@ export function CalendarBody({
   onCheckTask,
   onOpenSourceNote,
   onLongPressDelete,
+  onSendToCalendar,
 }: CalendarBodyProps) {
   const rangeFilteredTodos = filterToDosByRange(calendarTodos, activeRange);
 
@@ -203,11 +205,12 @@ export function CalendarBody({
             onCheckTask={onCheckTask}
             onOpenSourceNote={onOpenSourceNote}
             onLongPressDelete={onLongPressDelete}
+            onSendToCalendar={onSendToCalendar}
           />
         )}
       </View>
     );
-  }, [mode, calendarTodos, onOpenTask, onCheckTask, onLongPressDelete, onOpenSourceNote, onSelectDate]);
+  }, [mode, calendarTodos, onOpenTask, onCheckTask, onLongPressDelete, onOpenSourceNote, onSendToCalendar, onSelectDate]);
 
   if (isSearching) {
     return (
@@ -219,6 +222,7 @@ export function CalendarBody({
             onCheckTask={onCheckTask}
             onOpenSourceNote={onOpenSourceNote}
             onLongPressDelete={onLongPressDelete}
+            onSendToCalendar={onSendToCalendar}
           />
         </View>
       </View>
@@ -246,6 +250,7 @@ export function CalendarBody({
             onCheckTask={onCheckTask}
             onOpenSourceNote={onOpenSourceNote}
             onLongPressDelete={onLongPressDelete}
+            onSendToCalendar={onSendToCalendar}
           />
         </View>
       ) : (

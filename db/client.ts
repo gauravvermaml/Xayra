@@ -230,6 +230,17 @@ async function createCoreTables(db: DB): Promise<void> {
       throw err;
     }
   }
+  // Push-to-Google-Calendar — see db/schema.ts's `googleCalendarEventId` doc
+  // comment. Nullable with no default, same idempotent migration pattern as
+  // `note_id` above.
+  try {
+    await db.execute("ALTER TABLE todos ADD COLUMN google_calendar_event_id TEXT;");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/duplicate column/i.test(message)) {
+      throw err;
+    }
+  }
 
   // Generic key/value flag store — see db/schema.ts's `appSettings` doc
   // comment. No column migrations possible/needed for a key/value table.

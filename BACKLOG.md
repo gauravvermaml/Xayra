@@ -33,25 +33,56 @@ this should also accept `ACTION_SEND` for non-text mime types later
 
 Raised 2026-09-24.
 
+## Done
+
 ### Push to-dos to Google Calendar
 
-Let a user send a to-do (one, or all of them) to their real Google Calendar
-— not just keep it inside Xayra's own calendar view.
+Raised 2026-09-29, shipped 2026-09-30. Explicit per-to-do "Send to
+Calendar" action (decided over auto-push-on-every-edit), one-way sync
+(Xayra → Calendar; edits in Xayra propagate, edits made directly in
+Calendar are never pulled back), deleting the to-do deletes the linked
+event too.
 
-**Why parked, not just implemented**: needs Google Calendar API scope/
-consent added on top of whatever Google Sign-In access this app already
-has for Drive backup (`services/` — check what scopes the existing
-Google Sign-In flow requests before assuming a re-consent prompt is
-avoidable), a real API client for creating/updating events, and a mapping
-decision for recurrence (`db/schema.ts`'s `Recurrence` type) onto Google
-Calendar's own RRULE format, which don't obviously line up one-to-one.
+New `services/sync/calendarSync.ts` reuses driveSync.ts's existing Google
+Sign-In session rather than standing up a second one — `driveSync.ts` is
+now the de facto shared Google-auth owner (its `ensureConfigured`,
+`requireAccessToken`, `withDeveloperErrorHandling`, `DriveSyncError`, and
+new `CALENDAR_EVENTS_SCOPE` are all exported for this reuse). The narrower
+`calendar.events` scope (not full `calendar` access) is requested
+incrementally, only the first time a user actually taps the button — never
+upfront, so someone who never uses the feature is never prompted for it.
+`db/schema.ts` gained a nullable `google_calendar_event_id` column
+(same idempotent `ALTER TABLE` migration pattern as every other column in
+this table), deliberately excluded from Drive backup/restore — a linked
+event id is tied to a specific Google account/session, not portable data.
+`Recurrence` + `recurrenceInterval` mapped directly to RRULE FREQ+INTERVAL
+(already the same shape, see db/schema.ts's own doc comment) with no
+COUNT/UNTIL, matching this app's own unbounded-recurrence model. A to-do
+with a date range (`toDate` set) becomes a genuine multi-day Calendar
+event instead of a fixed 30-minute block.
 
-**Open questions to resolve when picked up**: push automatically on
-create/edit, or an explicit "Send to Calendar" action per to-do; one-way
-push only, or does an edit/completion in Xayra need to update the Calendar
-event too; does deleting a to-do in Xayra delete the Calendar event.
+UI: a calendar icon next to delete on every full-size to-do card
+(Schedule, Month's day panel, Week/Work Week's preview sheet) — outline
+when not linked, filled once it is, tap toggles either way. Two rounds of
+live-requested polish after the core feature worked: (1) a success toast
+("Sent to Google Calendar"/"Removed...") — the icon's own state change
+alone wasn't a confident enough signal that the action had actually
+happened; (2) a confirm dialog before acting either direction, matching
+the existing delete-confirmation pattern — doubles as inline education
+for what the icon does, no separate onboarding needed. The delete
+confirmation's own wording now also says "This will also remove it from
+your Google Calendar" when the to-do being deleted is linked.
 
-Raised 2026-09-29.
+One real external-setup snag hit and resolved live: a `DEVELOPER_ERROR`
+(SHA-1/package mismatch) on first real interactive sign-in attempt on this
+specific dev-client (debug-signed) build — Drive backup's Android OAuth
+client in Google Cloud Console had apparently only ever been registered
+with a release-build SHA-1, never tested via a real interactive sign-in on
+a debug build before. Fixed by registering a second Android OAuth client
+(same package name, debug SHA-1) alongside the existing one — not by
+replacing it, which would have broken the release build's own Drive sign-
+in. Confirmed working end-to-end on-device: a real Calendar event
+verified showing up in Google Calendar itself, 2026-09-30.
 
 ## Done
 

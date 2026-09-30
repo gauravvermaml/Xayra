@@ -10,6 +10,7 @@ import { CalendarBody } from "./calendar/CalendarBody";
 import { CalendarViewSelector } from "./calendar/CalendarViewSelector";
 import { TaskPreviewSheet } from "./calendar/TaskPreviewSheet";
 import { NoteDetailModal } from "./NoteDetailModal";
+import { showToast } from "./Toast";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import type { Recurrence } from "../db/schema";
 import { useCalendarViewStore } from "../hooks/useCalendarViewStore";
@@ -55,7 +56,17 @@ export type TodosOverlayProps = {
  */
 export function TodosOverlay({ onClose }: TodosOverlayProps) {
   const insets = useSafeAreaInsets();
-  const { todos, allTodos, pendingCount, addToDo, updateToDo, completeToDo, deleteToDo } = useToDos();
+  const {
+    todos,
+    allTodos,
+    pendingCount,
+    addToDo,
+    updateToDo,
+    completeToDo,
+    deleteToDo,
+    sendToDoToCalendar,
+    removeToDoFromCalendar,
+  } = useToDos();
   const {
     layoutMode,
     setLayoutMode,
@@ -143,12 +154,69 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
 
   const handleLongPressDelete = useCallback(
     (item: ToDo) => {
-      Alert.alert("Delete this to-do?", `"${item.text}"`, [
+      // `deleteToDo` (todoManager.ts) cascades to the linked Calendar event
+      // too, if this to-do was ever sent there — the message says so up
+      // front, live-requested, rather than deleting it silently as a side
+      // effect the user only discovers later.
+      const message = item.googleCalendarEventId
+        ? `"${item.text}"\n\nThis will also remove it from your Google Calendar.`
+        : `"${item.text}"`;
+      Alert.alert("Delete this to-do?", message, [
         { text: "Cancel", style: "cancel" },
         { text: "Delete", style: "destructive", onPress: () => void deleteToDo(item.id) },
       ]);
     },
     [deleteToDo]
+  );
+
+  // The calendar-icon button's on/off toggle (CalendarTaskCard.tsx) — same
+  // confirm-then-act shape as `handleLongPressDelete` above, added per
+  // explicit request: besides the standard "don't act on an accidental tap"
+  // reason every other destructive/state-changing action here already gets,
+  // the confirm dialog's own wording doubles as inline education for anyone
+  // who doesn't already know what a plain calendar icon means — no separate
+  // onboarding/tooltip needed.
+  //
+  // Unlike every other action in this file, the actual network call
+  // (`sendToDoToCalendar`/`removeToDoFromCalendar`) can throw — a real
+  // network/auth request, not just a local DB write — so this still needs
+  // its own try/catch on top of the confirm step, surfaced via the same
+  // `Alert.alert` pattern the rest of this screen already uses for
+  // user-facing errors. `showToast` on success (the same mechanism Settings
+  // already uses for Drive backup/restore results) closes a separate gap a
+  // live on-device report caught: with only the icon's own outline->filled
+  // change as feedback, a user genuinely couldn't tell the action had
+  // worked at all without leaving the app to check Google Calendar
+  // directly.
+  const handleSendToCalendar = useCallback(
+    (item: ToDo) => {
+      const wasLinked = Boolean(item.googleCalendarEventId);
+      const runAction = () => {
+        const action = wasLinked ? removeToDoFromCalendar(item.id) : sendToDoToCalendar(item.id);
+        action
+          .then(() => {
+            showToast(wasLinked ? "Removed from Google Calendar" : "Sent to Google Calendar");
+          })
+          .catch((err) => {
+            Alert.alert(
+              wasLinked ? "Couldn't remove from Calendar" : "Couldn't send to Calendar",
+              err instanceof Error ? err.message : String(err)
+            );
+          });
+      };
+
+      Alert.alert(
+        wasLinked ? "Remove from Google Calendar?" : "Add to Google Calendar?",
+        wasLinked
+          ? `"${item.text}" will be removed from your Google Calendar. This won't delete the to-do itself.`
+          : `"${item.text}" will be added as an event on your Google Calendar.`,
+        [
+          { text: "Cancel", style: "cancel" },
+          { text: wasLinked ? "Remove" : "Add", style: wasLinked ? "destructive" : "default", onPress: runAction },
+        ]
+      );
+    },
+    [sendToDoToCalendar, removeToDoFromCalendar]
   );
 
   const handleEditDetails = useCallback((item: ToDo) => {
@@ -186,6 +254,18 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
       handleLongPressDelete(item);
     },
     [handleLongPressDelete]
+  );
+
+  // Closes the preview too, same as check/delete above — its `item` prop is
+  // a snapshot taken when the preview opened, so it wouldn't otherwise pick
+  // up the fresh `googleCalendarEventId` this action just changed, leaving
+  // the icon showing the wrong state until the sheet were closed anyway.
+  const handleSendToCalendarFromPreview = useCallback(
+    (item: ToDo) => {
+      setPreviewTodo(null);
+      handleSendToCalendar(item);
+    },
+    [handleSendToCalendar]
   );
 
   // The four grid layouts all receive the SAME `onOpenTask` from
@@ -310,6 +390,7 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
           onCheckTask={handleCheck}
           onOpenSourceNote={setViewingNoteId}
           onLongPressDelete={handleLongPressDelete}
+          onSendToCalendar={handleSendToCalendar}
         />
 
         <TaskPreviewSheet
@@ -319,6 +400,7 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
           onCheckTask={handleCheckFromPreview}
           onOpenSourceNote={setViewingNoteId}
           onLongPressDelete={handleDeleteFromPreview}
+          onSendToCalendar={handleSendToCalendarFromPreview}
         />
 
         {pendingId && (

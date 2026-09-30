@@ -73,6 +73,7 @@ export type MonthLayoutProps = {
   onCheckTask: (item: ToDo) => void;
   onOpenSourceNote: (noteId: string) => void;
   onLongPressDelete: (item: ToDo) => void;
+  onSendToCalendar: (item: ToDo) => void;
 };
 
 /**
@@ -105,6 +106,7 @@ export function MonthLayout({
   onCheckTask,
   onOpenSourceNote,
   onLongPressDelete,
+  onSendToCalendar,
 }: MonthLayoutProps) {
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
@@ -265,6 +267,7 @@ export function MonthLayout({
                 onCheck={onCheckTask}
                 onOpenSourceNote={onOpenSourceNote}
                 onLongPressDelete={onLongPressDelete}
+                onSendToCalendar={onSendToCalendar}
               />
             ))}
           </View>

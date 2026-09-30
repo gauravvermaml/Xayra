@@ -30,6 +30,13 @@ export type CalendarTaskCardProps = {
    * chips (Day/Week columns) don't have room for either. */
   onOpenSourceNote?: (noteId: string) => void;
   onLongPressDelete?: (item: ToDo) => void;
+  /** Explicit "Send to Calendar" toggle (BACKLOG.md's "Push to-dos to Google
+   * Calendar") — omitted the same way `onOpenSourceNote`/`onLongPressDelete`
+   * are for "compact"/"micro" variants, which have no room for it. Fires
+   * regardless of whether `item.googleCalendarEventId` is already set —
+   * the button itself is the on/off toggle (see its own render below), not
+   * a one-shot "send" action. */
+  onSendToCalendar?: (item: ToDo) => void;
   /** "compact" — Day view's floating chips only, which have real width to
    * spare: checkbox + title + time chip + recurrence icon. "full" —
    * Schedule view and Month's day panel: the fuller treatment (recurrence
@@ -86,6 +93,7 @@ export function CalendarTaskCard({
   onCheck,
   onOpenSourceNote,
   onLongPressDelete,
+  onSendToCalendar,
   variant = "compact",
   style,
 }: CalendarTaskCardProps) {
@@ -159,6 +167,27 @@ export function CalendarTaskCard({
           </TouchableOpacity>
         )}
       </View>
+      {variant === "full" && onSendToCalendar && (
+        // On/off toggle, not a one-shot "send" — tapping again once linked
+        // removes it from Calendar (BACKLOG.md's own recorded decision).
+        // 🗓️ (outline-reading emoji) vs 📅 (filled) is the only signal for
+        // which state it's in; dimmed further via `opacity` when linked so
+        // the two are distinguishable even for someone who can't tell the
+        // two calendar emoji apart at a glance.
+        <TouchableOpacity
+          onPress={() => onSendToCalendar(item)}
+          hitSlop={10}
+          style={styles.calendarButton}
+          accessibilityRole="button"
+          accessibilityLabel={
+            item.googleCalendarEventId ? `Remove "${item.text}" from Google Calendar` : `Send "${item.text}" to Google Calendar`
+          }
+        >
+          <Text style={[styles.calendarIcon, item.googleCalendarEventId && styles.calendarIconActive]}>
+            {item.googleCalendarEventId ? "📅" : "🗓️"}
+          </Text>
+        </TouchableOpacity>
+      )}
       {variant === "full" && onLongPressDelete && (
         // Explicit, visible delete affordance — long-press-to-delete (the
         // card's own onLongPress above) still works too, but it's a hidden
@@ -262,6 +291,18 @@ const styles = StyleSheet.create({
     color: colors.accent,
     fontSize: 11,
     fontWeight: "600",
+  },
+  calendarButton: {
+    alignSelf: "flex-start",
+    marginLeft: spacing.xs,
+    padding: 2,
+  },
+  calendarIcon: {
+    fontSize: 14,
+    opacity: 0.6,
+  },
+  calendarIconActive: {
+    opacity: 1,
   },
   deleteButton: {
     alignSelf: "flex-start",

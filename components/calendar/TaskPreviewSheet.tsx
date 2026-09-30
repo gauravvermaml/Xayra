@@ -20,6 +20,7 @@ export type TaskPreviewSheetProps = {
   onCheckTask: (item: ToDo) => void;
   onOpenSourceNote: (noteId: string) => void;
   onLongPressDelete: (item: ToDo) => void;
+  onSendToCalendar: (item: ToDo) => void;
 };
 
 /**
@@ -59,6 +60,7 @@ export function TaskPreviewSheet({
   onCheckTask,
   onOpenSourceNote,
   onLongPressDelete,
+  onSendToCalendar,
 }: TaskPreviewSheetProps) {
   const insets = useSafeAreaInsets();
   const sheetRef = useRef<BottomSheet>(null);
@@ -97,6 +99,7 @@ export function TaskPreviewSheet({
             onCheck={onCheckTask}
             onOpenSourceNote={onOpenSourceNote}
             onLongPressDelete={onLongPressDelete}
+            onSendToCalendar={onSendToCalendar}
           />
         )}
       </BottomSheetView>

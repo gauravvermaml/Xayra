@@ -7,6 +7,8 @@ import {
   deleteToDo as deleteToDoRecord,
   getPendingToDos,
   listAllToDos,
+  removeToDoFromCalendar as removeToDoFromCalendarRecord,
+  sendToDoToCalendar as sendToDoToCalendarRecord,
   subscribeToToDosChanged,
   updateToDo as updateToDoRecord,
   type AddToDoInput,
@@ -33,6 +35,12 @@ export type UseToDosResult = {
   updateToDo: (id: string, fields: ToDoUpdateFields) => Promise<void>;
   completeToDo: (id: string) => Promise<void>;
   deleteToDo: (id: string) => Promise<void>;
+  /** Throws (a `CalendarSyncError`, see services/sync/calendarSync.ts) on
+   * failure, unlike every other action here — the caller is expected to
+   * catch and surface it, since this is a user-initiated action they're
+   * actively waiting on the result of, not a background sync. */
+  sendToDoToCalendar: (id: string) => Promise<void>;
+  removeToDoFromCalendar: (id: string) => Promise<void>;
 };
 
 /**
@@ -128,6 +136,22 @@ export function useToDos(): UseToDosResult {
     [refreshToDos]
   );
 
+  const sendToDoToCalendar = useCallback(
+    async (id: string) => {
+      await sendToDoToCalendarRecord(id);
+      await refreshToDos();
+    },
+    [refreshToDos]
+  );
+
+  const removeToDoFromCalendar = useCallback(
+    async (id: string) => {
+      await removeToDoFromCalendarRecord(id);
+      await refreshToDos();
+    },
+    [refreshToDos]
+  );
+
   return {
     todos,
     allTodos,
@@ -137,5 +161,7 @@ export function useToDos(): UseToDosResult {
     updateToDo,
     completeToDo,
     deleteToDo,
+    sendToDoToCalendar,
+    removeToDoFromCalendar,
   };
 }
