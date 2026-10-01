@@ -124,12 +124,31 @@ export const FEW_SHOT_ANSWER =
  * narrow and blunt — its ONLY job is demonstrating that exact conversion,
  * unlike FEW_SHOT_ANSWER above (format/bullets), which minimal mode still
  * skips as redundant with the trained weights.
+ *
+ * Rewritten after a live bug: the ORIGINAL version of this fake note read as
+ * entirely plausible real content ("bought milk and eggs... call the
+ * dentist"), and its own fake "answer" only ever demonstrated converting the
+ * FIRST clause, never the second. On a real, unrelated query, the model was
+ * caught reaching back into this fake example and splicing its own
+ * first-person second clause ("...and I need to call the dentist tomorrow")
+ * raw, unconverted, onto the real answer — fabricating cited content that
+ * existed nowhere in any real note. Two changes address both halves of that
+ * failure: the fake note's content is now deliberately offbeat (nobody
+ * actually logs "fed the office goldfish" as a real personal note) so it
+ * reads unmistakably as a formatting example rather than plausible
+ * memorizable content, and the demonstrated answer now converts BOTH
+ * clauses, leaving no partially-done pattern for the model to copy forward.
+ * `rag.ts`'s own post-generation grounding check (`isAnswerGroundedInContext`)
+ * is the actual backstop against this failure mode regardless of what this
+ * example says — this rewrite reduces how often that backstop has to fire,
+ * it doesn't replace it.
  */
 export const MINIMAL_PERSON_VOICE_EXAMPLE_CONTEXT =
   "--- NOTE 1 [Recorded: Monday, 01 Jan 2026 at 08:00] ---\n" +
-  "I bought milk and eggs this morning, and I need to call the dentist tomorrow.";
-export const MINIMAL_PERSON_VOICE_EXAMPLE_QUERY = "What did I buy this morning?";
-export const MINIMAL_PERSON_VOICE_EXAMPLE_ANSWER = "You bought milk and eggs this morning.";
+  "I fed the office goldfish this morning, and I need to water the lobby cactus tomorrow.";
+export const MINIMAL_PERSON_VOICE_EXAMPLE_QUERY = "What did I do this morning?";
+export const MINIMAL_PERSON_VOICE_EXAMPLE_ANSWER =
+  "You fed the office goldfish this morning, and you need to water the lobby cactus tomorrow.";
 
 export const WEEKDAY_NAMES = [
   "Sunday",
@@ -203,7 +222,9 @@ export function buildSystemPromptWithDate(): string {
     // is that rule's minimal-mode equivalent.
     return (
       `${MINIMAL_RAG_SYSTEM_PROMPT}\n\nToday is ${today}. Always refer to the user in the second person ` +
-      '("you"), never as "I" — the notes are written in the user\'s own first-person voice, but your answer must address them, not speak as them.'
+      '("you"), never as "I" — the notes are written in the user\'s own first-person voice, but your answer must address them, not speak as them. ' +
+      'A note\'s own text is normalized to spell out real dates already, but if any relative time word like ' +
+      '"today"/"yesterday"/"tomorrow" still appears in a note, it refers to THAT note\'s own recorded date, never the date above.'
     );
   }
 

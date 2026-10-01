@@ -39,7 +39,14 @@ import {
   preFilterZeroTaskNotes,
   resolveDateAndTime,
 } from "../services/ai/transformationEngine";
-import { formatNoteContext, sanitizeLLMResponse, truncateForContext } from "../services/ai/ragFormatting";
+import {
+  formatNoteContext,
+  isAnswerGroundedInContext,
+  normalizeRelativeTimeInNoteText,
+  sanitizeLLMResponse,
+  truncateForContext,
+} from "../services/ai/ragFormatting";
+import { detectQueryDateRange } from "../services/ai/queryDateRange";
 
 const TODAY = "2026-09-20"; // Sunday
 // Used wherever a test exercises the "no date/time info at all" default
@@ -492,7 +499,65 @@ describe("note context formatting", () => {
   it("returns an empty string for no notes", () => {
     expect(formatNoteContext([])).toBe("");
   });
+});
 
+describe("normalizeRelativeTimeInNoteText", () => {
+  // Local-time construction, not a raw epoch literal — a fixed number of
+  // seconds would land on a different LOCAL calendar day depending on the
+  // machine's timezone (exactly the UTC-off-by-one trap this function itself
+  // exists to avoid), making the test flaky across environments.
+  const RECORDED_AT = Math.floor(new Date(2026, 8, 20, 12, 0, 0).getTime() / 1000); // Sunday, 20 Sep 2026
+
+  it("converts today/yesterday/tomorrow into the note's own recorded date", () => {
+    expect(normalizeRelativeTimeInNoteText("Today I did some app building.", RECORDED_AT)).toBe(
+      "On Sunday, September 20 2026 I did some app building."
+    );
+    expect(normalizeRelativeTimeInNoteText("I met Vishwa yesterday.", RECORDED_AT)).toBe(
+      "I met Vishwa on Saturday, September 19 2026."
+    );
+    expect(normalizeRelativeTimeInNoteText("I'll call tomorrow.", RECORDED_AT)).toBe(
+      "I'll call on Monday, September 21 2026."
+    );
+  });
+
+  it("leaves text with no relative-time words unchanged", () => {
+    expect(normalizeRelativeTimeInNoteText("Buy milk and eggs.", RECORDED_AT)).toBe("Buy milk and eggs.");
+  });
+
+  it('annotates "last year"/"this year" with the note\'s own recorded year, WITHOUT replacing the original word', () => {
+    // Deliberately keeps "Last year"/"This year" intact and appends the
+    // resolved value in parentheses, rather than replacing it outright —
+    // see this function's own "ANNOTATE, DON'T REPLACE" doc comment for the
+    // live bug a bare-number replacement caused (two similar-looking bare
+    // years colliding in the same note, which the model then swapped).
+    expect(normalizeRelativeTimeInNoteText("Last year it was better.", RECORDED_AT)).toBe(
+      "Last year (2025) it was better."
+    );
+    expect(normalizeRelativeTimeInNoteText("This year has been busy.", RECORDED_AT)).toBe(
+      "This year (2026) has been busy."
+    );
+  });
+
+  it('annotates "this month" with the note\'s own recorded month and year, without replacing it', () => {
+    expect(normalizeRelativeTimeInNoteText("Unusual for this month.", RECORDED_AT)).toBe(
+      "Unusual for this month (September 2026)."
+    );
+  });
+
+  it("resolves the real end-to-end scenario: a hot-day note's own temporal self-references all become absolute, without colliding bare numbers", () => {
+    const note =
+      "It was a very hot day today perhaps 40degrees +. Quite unusual for this month. " +
+      "Last year same time it was so much better. Glad we had a plunge pool to cool ourselves " +
+      "off, which we didn't have last year.";
+    const result = normalizeRelativeTimeInNoteText(note, RECORDED_AT);
+    expect(result).toContain("on Sunday, September 20 2026");
+    expect(result).toContain("this month (September 2026)");
+    expect(result).toContain("Last year (2025) same time");
+    expect(result).toContain("last year (2025).");
+  });
+});
+
+describe("truncateForContext", () => {
   it("truncates an over-long note and marks it", () => {
     const long = Array.from({ length: 250 }, (_, i) => `w${i}`).join(" ");
     const truncated = truncateForContext(long);
@@ -502,6 +567,325 @@ describe("note context formatting", () => {
 
   it("leaves a short note untouched", () => {
     expect(truncateForContext("Buy milk")).toBe("Buy milk");
+  });
+});
+
+describe("isAnswerGroundedInContext", () => {
+  const CONTEXT =
+    "--- NOTE 1 [Recorded: Sunday, 27 Sep 2026 at 09:00] ---\n" +
+    "On Sunday, September 27 2026 we started really slow, woke up around half past seven, did some app building.";
+  const QUERY = "What did I do on 27th September Sunday?";
+
+  it("passes an answer whose content words all appear in the context", () => {
+    expect(
+      isAnswerGroundedInContext("You woke up around half past seven and did some app building.", CONTEXT, QUERY)
+    ).toBe(true);
+  });
+
+  it("rejects an answer referencing content absent from both the context and the query", () => {
+    // The exact live bug this guards against: a leaked few-shot demo
+    // fabricating facts (milk, eggs, a dentist) that exist nowhere in the
+    // real cited note OR in anything the user actually asked.
+    expect(
+      isAnswerGroundedInContext("You bought milk and eggs and need to call the dentist tomorrow.", CONTEXT, QUERY)
+    ).toBe(false);
+  });
+
+  it("trivially passes the model's own known refusal line", () => {
+    // Deliberately NOT a "zero content words" case — "information"/"notes"
+    // are both real 4+ letter words that won't appear in most contexts,
+    // which would otherwise wrongly flag a legitimate refusal.
+    expect(isAnswerGroundedInContext("No information found in your notes.", CONTEXT, QUERY)).toBe(true);
+  });
+
+  it("passes an answer that echoes the user's OWN question phrasing, even when that phrasing was normalized out of the note context", () => {
+    // Real live bug: "was it this hot LAST YEAR AROUND THE SAME TIME"
+    // answered as "it was not this hot last year around the same time" is a
+    // perfectly correct, grounded answer — but normalizeRelativeTimeInNoteText
+    // had already rewritten "last year"/"this month" OUT of the note context
+    // into absolute dates, so those exact words (legitimately reused from
+    // the user's own question) no longer existed anywhere this check was
+    // looking, and a genuinely correct answer was rejected as fabricated.
+    const hotDayContext =
+      "--- NOTE 1 [Recorded: Wednesday, 15 Oct 2025 at 12:00] ---\n" +
+      "It was a very hot day on Wednesday, October 15 2025, perhaps 40 degrees plus. " +
+      "Quite unusual for in October 2025. In 2024 same time it was so much better.";
+    const hotDayQuery = "Was it this hot last year around the same time?";
+    expect(
+      isAnswerGroundedInContext("It was not this hot last year around the same time.", hotDayContext, hotDayQuery)
+    ).toBe(true);
+  });
+
+  it("integration: the real normalizer output (annotate, not replace) still grounds a correct comparison answer", () => {
+    // Chains the actual normalizeRelativeTimeInNoteText output (not a
+    // hand-built string) into the grounding check, confirming the two
+    // fixes compose correctly under the CURRENT "last year (2024)" format.
+    const recordedAt = Math.floor(new Date(2025, 9, 15, 12, 0, 0).getTime() / 1000); // 15 Oct 2025
+    const rawNote =
+      "It was a very hot day today, perhaps 40 degrees plus. Quite unusual for this month. " +
+      "Last year same time it was so much better.";
+    const normalized = normalizeRelativeTimeInNoteText(rawNote, recordedAt);
+    const context = `--- NOTE 1 [Recorded: Wednesday, 15 Oct 2025 at 12:00] ---\n${normalized}`;
+    const query = "Was it this hot last year around the same time?";
+    expect(isAnswerGroundedInContext("It was not this hot last year around the same time.", context, query)).toBe(
+      true
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectQueryDateRange — locks in real chrono-node behavior verified live
+// against actual on-device bug reports, not assumed. Reference date fixed at
+// Thursday 1 Oct 2026 throughout (matches this file's own TODAY/Sunday-20-Sep
+// anchor one week later), so every expectation below is a concrete,
+// hand-verified date, not a relative computation that could mask a
+// regression by shifting alongside a bug.
+// ---------------------------------------------------------------------------
+
+describe("detectQueryDateRange", () => {
+  const REFERENCE = new Date(2026, 9, 1, 12, 0, 0); // Thursday, 1 Oct 2026
+
+  it("resolves a specific day, preferring it over a secondary bare-weekday match", () => {
+    // Live bug input verbatim: chrono independently also matches "Sunday"
+    // alone (-> the NEXT Sunday, Oct 4) — the day+month match must win.
+    expect(detectQueryDateRange("What did I do on 27th September Sunday?", REFERENCE)).toEqual({
+      start: "2026-09-27",
+      end: "2026-09-27",
+    });
+  });
+
+  it("resolves yesterday to a single day", () => {
+    expect(detectQueryDateRange("What did I do yesterday?", REFERENCE)).toEqual({
+      start: "2026-09-30",
+      end: "2026-09-30",
+    });
+  });
+
+  it('narrows "last year" to a single day when "same day" is explicit', () => {
+    // Live bug: this query previously got answered from THIS year's recent
+    // notes instead of anything from Oct 2025.
+    expect(detectQueryDateRange("Where was I last year same day?", REFERENCE)).toEqual({
+      start: "2025-10-01",
+      end: "2025-10-01",
+    });
+  });
+
+  it('widens bare "last year" (no "same day") to the full calendar year', () => {
+    expect(detectQueryDateRange("What did I do last year?", REFERENCE)).toEqual({
+      start: "2025-01-01",
+      end: "2025-12-31",
+    });
+  });
+
+  it('combines a bare month name with "last year" into that month in that year', () => {
+    // Live bug: chrono resolves "October" and "last year" as two
+    // independent, each-half-wrong matches (October-this-year,
+    // today's-day-last-year) — the real intent (October 2025) requires
+    // combining them explicitly.
+    expect(detectQueryDateRange("What did I do in October last year?", REFERENCE)).toEqual({
+      start: "2025-10-01",
+      end: "2025-10-31",
+    });
+  });
+
+  it('resolves "early this year" to the first third of the year', () => {
+    expect(
+      detectQueryDateRange("Who did I see early this year in Sutherland leisure centre?", REFERENCE)
+    ).toEqual({ start: "2026-01-01", end: "2026-04-30" });
+  });
+
+  it('expands "last week" to a full Sunday-Saturday week, not a single day', () => {
+    expect(detectQueryDateRange("What did I do last week?", REFERENCE)).toEqual({
+      start: "2026-09-20",
+      end: "2026-09-26",
+    });
+  });
+
+  it('expands "this week" to the current Sunday-Saturday week', () => {
+    expect(detectQueryDateRange("What did I do this week?", REFERENCE)).toEqual({
+      start: "2026-09-27",
+      end: "2026-10-03",
+    });
+  });
+
+  it('expands "last month" to the full calendar month', () => {
+    expect(detectQueryDateRange("What happened last month?", REFERENCE)).toEqual({
+      start: "2026-09-01",
+      end: "2026-09-30",
+    });
+  });
+
+  it("returns null for a recency phrase with no real date reference", () => {
+    // This is deliberately NOT handled here — rag.ts's own separate
+    // isRecentNotesQuery bypass covers "latest/recent", which chrono does
+    // not and should not parse as a date.
+    expect(detectQueryDateRange("Summarise my latest notes", REFERENCE)).toBeNull();
+  });
+
+  it("returns null for a query with no date/time reference at all", () => {
+    expect(detectQueryDateRange("What did Vishwa say about the app?", REFERENCE)).toBeNull();
+  });
+
+  // Follow-up audit (live user request, after the above already shipped):
+  // chrono resolves ANY ambiguous bare date to the next FUTURE occurrence
+  // once the same-cycle date has passed, confirmed identical under
+  // forwardDate true/false/omitted — backwards for a retrospective notes
+  // app. These lock in the clamp-to-past fix and its deliberate exceptions.
+
+  it("clamps a bare month+day with no year to the most recent PAST occurrence", () => {
+    // Real bug: chrono alone resolved this to 5 Mar 2027, not the nearer,
+    // already-past 5 Mar 2026.
+    expect(detectQueryDateRange("What did I do on March 5th?", REFERENCE)).toEqual({
+      start: "2026-03-05",
+      end: "2026-03-05",
+    });
+  });
+
+  it("does not clamp when the query states an explicit year", () => {
+    expect(detectQueryDateRange("What did I note on 15th March 2025?", REFERENCE)).toEqual({
+      start: "2025-03-15",
+      end: "2025-03-15",
+    });
+  });
+
+  it("does not clamp when the query has an explicit forward word", () => {
+    expect(detectQueryDateRange("What am I doing next Monday?", REFERENCE)).toEqual({
+      start: "2026-10-05",
+      end: "2026-10-05",
+    });
+  });
+
+  it('clamps a bare weekday ("on Sunday") to the most recent past occurrence', () => {
+    // Real bug: bare "on Sunday"/"this Sunday" resolved to the NEXT Sunday
+    // (Oct 4) instead of the one just passed (Sep 27).
+    expect(detectQueryDateRange("What did I do on Sunday?", REFERENCE)).toEqual({
+      start: "2026-09-27",
+      end: "2026-09-27",
+    });
+  });
+
+  it('distinguishes "last <Month>" (clamps into the past) from "this <Month>" (stays current year even if still ahead)', () => {
+    // Both raw-resolve identically from chrono (verified live) — the word
+    // itself has to be read, not inferred from the resolved date.
+    expect(detectQueryDateRange("What did I do last December?", REFERENCE)).toEqual({
+      start: "2025-12-01",
+      end: "2025-12-31",
+    });
+    expect(detectQueryDateRange("What happened this December?", REFERENCE)).toEqual({
+      start: "2026-12-01",
+      end: "2026-12-31",
+    });
+  });
+
+  it('resolves "quarter" to a real 3-month range instead of chrono\'s own nonsensical single day', () => {
+    // chrono has no concept of a quarter at all and returns a single
+    // nonsensical day for it (verified live) — real quarter arithmetic
+    // added below (see the dedicated "last quarter"/"this quarter" tests
+    // further down) rather than leaving this suppressed to null forever.
+    expect(detectQueryDateRange("What did I do last quarter?", REFERENCE)).toEqual({
+      start: "2026-07-01",
+      end: "2026-09-30",
+    });
+  });
+
+  it('resolves "earlier"/"later" (comparative) the same as "early"/"late" (adjective)', () => {
+    expect(detectQueryDateRange("What did I do earlier this year?", REFERENCE)).toEqual({
+      start: "2026-01-01",
+      end: "2026-04-30",
+    });
+    expect(detectQueryDateRange("What did I do later this year?", REFERENCE)).toEqual({
+      start: "2026-09-01",
+      end: "2026-12-31",
+    });
+  });
+
+  // Live request: "between <Month> and <Month>", "last/this quarter", and a
+  // real anniversary scenario (a note's own recorded date can land weeks
+  // away from a strict one-year-back calendar point).
+
+  it("combines a month range into one real start-to-end span", () => {
+    // Live bug: chrono only ever captures the FIRST month as its own
+    // independent match, silently dropping the second entirely.
+    expect(detectQueryDateRange("What did I do between March and May?", REFERENCE)).toEqual({
+      start: "2026-03-01",
+      end: "2026-05-31",
+    });
+    expect(detectQueryDateRange("What did I do from June to August?", REFERENCE)).toEqual({
+      start: "2026-06-01",
+      end: "2026-08-31",
+    });
+  });
+
+  it("applies a year modifier to a month range", () => {
+    expect(detectQueryDateRange("What did I do between March and May last year?", REFERENCE)).toEqual({
+      start: "2025-03-01",
+      end: "2025-05-31",
+    });
+  });
+
+  it('resolves "last quarter"/"this quarter" relative to the reference date\'s own quarter', () => {
+    // Reference (1 Oct) sits in Q4 2026, so "last quarter" is Q3 2026.
+    expect(detectQueryDateRange("What did I do last quarter?", REFERENCE)).toEqual({
+      start: "2026-07-01",
+      end: "2026-09-30",
+    });
+    expect(detectQueryDateRange("What did I do this quarter?", REFERENCE)).toEqual({
+      start: "2026-10-01",
+      end: "2026-12-31",
+    });
+  });
+
+  it('wraps "last quarter" from Q1 back to Q4 of the previous year', () => {
+    const q1Reference = new Date(2026, 1, 15, 12, 0, 0); // mid-February, Q1
+    expect(detectQueryDateRange("What did I do last quarter?", q1Reference)).toEqual({
+      start: "2025-10-01",
+      end: "2025-12-31",
+    });
+  });
+
+  it('gives "this time last year"/"around the same time last year" a wide window, not a single day', () => {
+    // Live scenario: a note's own temporal self-reference ("today", "last
+    // year") is anchored to WHEN IT WAS RECORDED, which can land weeks away
+    // from a strict one-year-back calendar point a later query implies.
+    // A single-day match would miss it entirely; the full year is too wide.
+    const expected = { start: "2025-08-20", end: "2025-11-12" }; // +-42 days around 1 Oct 2025
+    expect(detectQueryDateRange("What did I do this time last year?", REFERENCE)).toEqual(expected);
+    expect(detectQueryDateRange("What did I do around the same time last year?", REFERENCE)).toEqual(expected);
+    expect(detectQueryDateRange("What did I do the same time last year?", REFERENCE)).toEqual(expected);
+  });
+
+  it('keeps "same day"/"this day" + "last year" an EXACT single day, not fuzzy', () => {
+    expect(detectQueryDateRange("Where was I last year same day?", REFERENCE)).toEqual({
+      start: "2025-10-01",
+      end: "2025-10-01",
+    });
+  });
+
+  it('resolves "this day last year" correctly regardless of word order', () => {
+    // Live bug: chrono parses this exact word order as ONE combined match
+    // resolved to TODAY with zero certainty, silently losing the "last
+    // year" part — unlike "last year same day" (different order), which it
+    // already resolves correctly as two separate matches. Fixed by
+    // detecting the day/time qualifier and "last year" independently rather
+    // than depending on chrono parsing their combination consistently.
+    expect(detectQueryDateRange("What did I do this day last year?", REFERENCE)).toEqual({
+      start: "2025-10-01",
+      end: "2025-10-01",
+    });
+  });
+
+  it("a real end-to-end anniversary scenario: a January note is found by a December 'around the same time last year' query", () => {
+    // Exact live scenario: a note recorded in January (e.g. about a hot
+    // summer day) asked about from December, 11 months later, as "was it
+    // this hot last year around the same time." A strict "last year" =
+    // that nominal calendar year would search ~December of the prior year
+    // and miss the January note entirely, despite it being exactly what
+    // the question means.
+    const decemberQuery = new Date(2027, 11, 10, 12, 0, 0); // 10 Dec 2027
+    const range = detectQueryDateRange("Was it this hot last year around the same time?", decemberQuery);
+    expect(range).not.toBeNull();
+    const noteRecordedDate = "2027-01-15";
+    expect(noteRecordedDate >= range!.start && noteRecordedDate <= range!.end).toBe(true);
   });
 });
 

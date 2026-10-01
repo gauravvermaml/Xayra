@@ -195,24 +195,51 @@ export const LLAMA_MODEL_MISSING_ERROR_PREFIX = "No local Llama model found.";
  * bullet branch as a real prior turn, which steers format far more reliably
  * at this model size than the instruction alone.
  */
-/** A 1B RAG model needs to stay a consistent read of the retrieved notes,
- * not creative writing — at the library's default temperature this model
- * gave contradictory answers to near-identical rephrasings of the same
- * question against the same note (observed on-device: "you didn't mention
- * AirPods" vs "yes, you mentioned AirPods" back to back). 0.4 is a
- * deliberate middle ground: warm enough to stop sounding flatly robotic
- * (the earlier 0.1 read as terse/stilted on longer answers) while staying
- * well short of the range that reintroduced that contradiction bug in
- * testing. Most of the requested "conversational feel" comes from the
- * system prompt rewrite above, not from temperature — temperature is
- * chosen for the smallest bump that still helps, not for warmth on its own. */
-const GENERATION_TEMPERATURE = 0.4;
+/**
+ * Set to 0 (greedy decoding) as of this build — a deliberate product
+ * decision, not a default. A RAG answer for a personal-notes app is a
+ * grounding task, not creative writing: the same question against the same
+ * note should give the same answer, every time. 0.4 (this constant's
+ * previous value) was a compromise aimed at a different, now-superseded
+ * problem — "the library's default temperature" (higher than 0.4) gave
+ * contradictory answers to near-identical rephrasings of the same question
+ * against the same note (observed on-device: "you didn't mention AirPods"
+ * vs "yes, you mentioned AirPods" back to back) — but 0.4 only ever reduced
+ * that risk, it never eliminated it: a harder comparative question
+ * ("was it this hot last year around the same time") was confirmed live,
+ * at 0.4, to non-deterministically produce a correct comparison answer on
+ * one attempt and an incorrect "no information found" refusal on an
+ * identical repeat.
+ *
+ * IMPORTANT, deliberately accepted trade-off: 0 buys CONSISTENCY, not
+ * CORRECTNESS. Greedy decoding always picks the model's single highest-
+ * probability next token — if that path happens to be wrong for a given
+ * question, 0 makes that wrong answer the PERMANENT result for that exact
+ * question, with no more random re-rolls that might have landed on a
+ * correct answer instead. It also means a model this size doing genuinely
+ * difficult multi-step reasoning (comparing two time periods pulled from the
+ * same note, for instance) is riskier at 0 than at a value with some
+ * randomness, specifically BECAUSE a retry-based mitigation (re-running the
+ * same prompt hoping for a different, correct sample) stops being possible —
+ * there is nothing left to vary between attempts. This codebase's own prior
+ * testing also found a low temperature (0.1) made longer answers read as
+ * "terse/stilted"; 0 is expected to be at least as pronounced in that same
+ * direction. Both of these are accepted consciously here, not overlooked —
+ * for this app, a consistent, predictable answer (even an occasionally
+ * blunt-sounding one) is judged more valuable than a warmer-sounding one
+ * that might silently vary between identical questions.
+ */
+const GENERATION_TEMPERATURE = 0;
 
-/** Nucleus sampling: only sample from the smallest set of tokens whose
- * cumulative probability reaches 0.9, trimming the model's low-probability
- * "long tail" (which is where a lot of stilted/odd word choices come from)
- * without flattening the distribution the way a temperature-only change
- * would. Paired with the moderate temperature above rather than used alone. */
+/** Nucleus sampling cutoff — now a no-op in practice: with
+ * `GENERATION_TEMPERATURE` at 0 (greedy decoding), llama.cpp always takes
+ * the single highest-probability token and never samples from a
+ * distribution at all, so this value never gets consulted. Left in place,
+ * unused, rather than removed — if `GENERATION_TEMPERATURE` is ever raised
+ * again, this is already tuned from the era when it was: trims the model's
+ * low-probability "long tail" (where a lot of stilted/odd word choices come
+ * from) without flattening the distribution the way a temperature-only
+ * change would. */
 const TOP_P = 0.9;
 
 /** llama.cpp's classic `repeat_penalty` CLI flag is exposed by llama.rn as

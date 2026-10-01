@@ -585,6 +585,95 @@ export async function listNotes(): Promise<Note[]> {
 }
 
 /**
+ * The top `limit` notes by REAL recorded timestamp — `listNotes()`'s own
+ * `created_at DESC` order, filtered through the same `isUsableNoteRow` noise
+ * check `hybridSearchNotes` applies (so a Whisper silence-hallucination
+ * "Thank you." row can't occupy one of only `limit` slots), then sliced.
+ *
+ * Exists specifically for rag.ts's "summarise my latest notes" bypass — see
+ * that file's own doc comment for why a request like that must NOT go
+ * through `hybridSearchNotes` below: that function treats every word in the
+ * query (including "latest"/"recent") as a semantic/keyword signal against
+ * note CONTENT, which is fundamentally the wrong axis for a request that's
+ * actually about recency, not relevance. This function is the "real
+ * timestamp" side of that fix — the exact same ordering already proven
+ * correct by the Notes tab's own default view.
+ *
+ * Reuses `listNotes()` rather than a second `ORDER BY created_at DESC`
+ * query — that function is already exactly this ordering; duplicating the
+ * SQL here would just be a second copy to keep in sync.
+ */
+export async function getRecentNotes(limit: number): Promise<HybridSearchResult[]> {
+  const notes = await listNotes();
+  return notes
+    .filter((note) => isUsableNoteRow(note))
+    .slice(0, limit)
+    .map((note) => ({
+      id: note.id,
+      content: note.content,
+      transcript: note.transcript,
+      audioUri: note.audioUri,
+      transcriptionModel: note.transcriptionModel,
+      createdAt: note.createdAt,
+      // Not a real relevance score — this path is timestamp-ordered, not
+      // ranked. Present only so this satisfies the same `HybridSearchResult`
+      // shape `formatNoteContext`/rag.ts already consume from the other path.
+      score: 1,
+    }));
+}
+
+/**
+ * Notes whose own recorded timestamp falls within `[startIso, endIso]`
+ * (inclusive, local calendar days), oldest first — a chronological narrative
+ * reads more naturally for "what did I do in October" than newest-first
+ * would. Reuses `listNotes()` rather than a second raw SQL query, same
+ * reasoning as `getRecentNotes` above — this app's own documented scale
+ * (tens of notes per user, not thousands, per `FTS_STOPWORDS`'s own doc
+ * comment) makes an in-memory filter over the full list perfectly
+ * reasonable, and avoids a second row-mapping implementation to keep in
+ * sync with this one.
+ *
+ * Exists for `services/ai/queryDateRange.ts`'s `detectQueryDateRange` —
+ * see that file's own doc comment and `rag.ts`'s for the live bug this
+ * closes: a chat question naming a specific past date/month/year was being
+ * answered via `hybridSearchNotes` below, which can retrieve a note that
+ * merely MENTIONS a matching word (a Sept-2026 note saying "due the first
+ * week of October") for a question asking about a completely different
+ * October (last year's). Real timestamp filtering fixes this by
+ * construction, the same way `getRecentNotes` already fixed "latest notes."
+ *
+ * Local-time day boundaries, not UTC — same discipline
+ * `services/calendar/dateRange.ts` documents and follows throughout; a
+ * UTC-midnight boundary would silently drop or include notes recorded near
+ * either edge of the range depending on the device's timezone.
+ */
+export async function getNotesInDateRange(startIso: string, endIso: string, limit: number): Promise<HybridSearchResult[]> {
+  const [startYear, startMonth, startDay] = startIso.split("-").map(Number);
+  const [endYear, endMonth, endDay] = endIso.split("-").map(Number);
+  const startEpoch = Math.floor(new Date(startYear, startMonth - 1, startDay, 0, 0, 0).getTime() / 1000);
+  const endEpoch = Math.floor(new Date(endYear, endMonth - 1, endDay, 23, 59, 59).getTime() / 1000);
+
+  const notes = await listNotes();
+  return notes
+    .filter((note) => note.createdAt >= startEpoch && note.createdAt <= endEpoch)
+    .filter((note) => isUsableNoteRow(note))
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .slice(0, limit)
+    .map((note) => ({
+      id: note.id,
+      content: note.content,
+      transcript: note.transcript,
+      audioUri: note.audioUri,
+      transcriptionModel: note.transcriptionModel,
+      createdAt: note.createdAt,
+      // Not a real relevance score — this path is timestamp-filtered, not
+      // ranked. Present only so this satisfies the same `HybridSearchResult`
+      // shape `formatNoteContext`/rag.ts already consume from other paths.
+      score: 1,
+    }));
+}
+
+/**
  * How many notes exist (same "not failed" filter as `listNotes`), without
  * paying to load every note's own content — used by app/index.tsx's
  * Archive quick-menu entry, which only needs the count, not the notes
@@ -762,6 +851,17 @@ const FTS_STOPWORDS = new Set([
   "up",
   "was", "we", "were", "what", "when", "where", "which", "who", "why", "will", "with", "would",
   "yes", "you", "your",
+  // Recency words — added after a live bug: a note recorded Sep 20 whose own
+  // transcript happened to literally contain "yesterday" got FTS-matched
+  // for the query "summarise my latest notes", since "latest" was never
+  // stripped. rag.ts's own recency-intent bypass (see its doc comment) is
+  // the PRIMARY fix for that exact phrasing; stripping these here is
+  // defense-in-depth for any other query that mentions recency without
+  // matching that bypass's pattern — stripping only ever affects the FTS
+  // keyword side, never the vector embedding (built from the full,
+  // unfiltered query text), so a note that's genuinely ABOUT "the latest
+  // phone model" is still findable semantically.
+  "latest", "recent", "newest",
 ]);
 
 /**

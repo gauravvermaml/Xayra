@@ -56,6 +56,128 @@ export function formatNoteDate(createdAt: number): string {
 }
 
 /**
+ * A note is transcribed in the user's own voice AT RECORDING TIME, so "today"
+ * in its text means the day it was recorded — not "today" relative to
+ * whenever the chat question is actually asked, which can be days or weeks
+ * later. Live bug this fixes: a note recorded Sunday 27 Sep ("Today it's
+ * Sunday and we started really slow...") was retrieved for a later query
+ * asking specifically about 27 Sep, and the model's answer just echoed the
+ * note's own "Today it's Sunday" framing verbatim — technically true THAT
+ * day, nonsensical read back later, and doubly confusing since the system
+ * prompt separately injects the CURRENT date as "today" for its own
+ * relative-time reasoning (see ragPrompt.ts's `buildSystemPromptWithDate`) —
+ * two different "today"s colliding in the same context.
+ *
+ * Fixed deterministically, at the formatting layer, rather than by
+ * instructing the model to do this conversion itself: ragPrompt.ts's own
+ * `buildCalendarBaseline` doc comment already documents that a model this
+ * size "reliably gets [date arithmetic] wrong" purely from a prompt
+ * instruction. Rewriting the actual words before the model ever sees them
+ * removes the ambiguity by construction instead of hoping a 1.5B model
+ * resolves it correctly every time. A short instruction is still added to
+ * the minimal prompt as a defense-in-depth backup for any relative-time
+ * phrasing this pattern doesn't catch (e.g. "this morning", "last night").
+ *
+ * Deliberately applied only to the text that reaches the LLM's context
+ * (`formatNoteContext` below), never to `RagCitation.content` in rag.ts —
+ * citations show the user their own note back verbatim; this rewrite is
+ * purely to ground the model's own answer correctly.
+ */
+const RELATIVE_DAY_OFFSETS: Record<string, number> = {
+  today: 0,
+  yesterday: -1,
+  tomorrow: 1,
+};
+
+const RELATIVE_DAY_PATTERN = /\b(today|yesterday|tomorrow)\b/gi;
+
+/** Local-time year/month/day arithmetic, never `new Date(isoString)` — same
+ * UTC-off-by-one-day discipline `services/calendar/dateRange.ts` documents
+ * and follows for the identical reason. */
+function formatAbsoluteDayPhrase(createdAt: number, dayOffset: number): string {
+  const recorded = new Date(createdAt * 1000);
+  const target = new Date(recorded.getFullYear(), recorded.getMonth(), recorded.getDate() + dayOffset);
+  const weekday = target.toLocaleDateString("en-US", { weekday: "long" });
+  const monthDay = target.toLocaleDateString("en-US", { month: "long", day: "numeric" });
+  return `${weekday}, ${monthDay} ${target.getFullYear()}`;
+}
+
+/**
+ * Extension of the day-level rewrite above to year/month-grain relative
+ * phrases — same root cause, same fix philosophy, added after a live
+ * scenario exposed the gap: a note recorded Jan 2027 saying "last year same
+ * time it was so much better" and "unusual for this month" was asked about
+ * from December 2027, 11 months later, via "was it this hot last year
+ * around the same time." The QUERY's own "last year" (~Dec 2026) and the
+ * NOTE's own "last year" (~Jan 2026, one year before ITS OWN recording date)
+ * use the identical two words but anchor to completely different periods —
+ * a small model has to silently disambiguate that collision with no help
+ * unless the words are resolved before it ever sees them, same reasoning as
+ * `RELATIVE_DAY_PATTERN` above. "these days"/"this week" are deliberately
+ * NOT covered — "these days" in particular is already vague even to a human
+ * reader (it doesn't pin to a specific period the way "last year" or "this
+ * month" do), so there's no single unambiguous absolute phrase to rewrite it
+ * to; leaving it as-is is honest rather than inventing false precision.
+ *
+ * ANNOTATE, DON'T REPLACE — deliberately different from the day-level
+ * rewrite above, after a second live bug this exact extension caused: the
+ * first version REPLACED "last year" outright with a bare number ("In
+ * 2024"), which fixed the word-ambiguity problem above but created a worse
+ * one — a note mentioning its own main year ("October 15 2025") alongside a
+ * comparison year ("last year") now had TWO bare, visually-identical-shaped
+ * 4-digit numbers sitting close together with nothing to tell the model
+ * which one was the main fact and which was the aside, and the model
+ * (confirmed live) swapped them, attaching the comparison year to the main
+ * event. "Last year"/"this month" are themselves a stronger, more distinct
+ * token than a second bare number — keeping the original word and
+ * appending its resolved value in parentheses ("last year (2024)") preserves
+ * that word's own "this is a comparison, not the main fact" signal instead
+ * of erasing it, while still giving the exact number the grounding check and
+ * the model's own date math need. Not a guarantee a small model never
+ * confuses two related numbers again, but it removes the specific
+ * bare-number-collision shape that caused the observed failure, applied
+ * generically to every note with this pattern — not a fix for one note.
+ */
+const RELATIVE_YEAR_OFFSETS: Record<string, number> = {
+  "last year": -1,
+  "this year": 0,
+};
+
+const RELATIVE_YEAR_PATTERN = /\b(last year|this year)\b/gi;
+const RELATIVE_MONTH_PATTERN = /\bthis month\b/gi;
+
+function formatAbsoluteYearPhrase(createdAt: number, yearOffset: number): string {
+  const recorded = new Date(createdAt * 1000);
+  return `${recorded.getFullYear() + yearOffset}`;
+}
+
+function formatAbsoluteMonthPhrase(createdAt: number): string {
+  const recorded = new Date(createdAt * 1000);
+  const month = recorded.toLocaleDateString("en-US", { month: "long" });
+  return `${month} ${recorded.getFullYear()}`;
+}
+
+export function normalizeRelativeTimeInNoteText(text: string, createdAt: number): string {
+  const withDaysResolved = text.replace(RELATIVE_DAY_PATTERN, (match) => {
+    const offset = RELATIVE_DAY_OFFSETS[match.toLowerCase()];
+    const datePhrase = formatAbsoluteDayPhrase(createdAt, offset);
+    const isCapitalized = match[0] === match[0].toUpperCase();
+    return isCapitalized ? `On ${datePhrase}` : `on ${datePhrase}`;
+  });
+
+  const withYearsResolved = withDaysResolved.replace(RELATIVE_YEAR_PATTERN, (match) => {
+    const offset = RELATIVE_YEAR_OFFSETS[match.toLowerCase()];
+    const yearPhrase = formatAbsoluteYearPhrase(createdAt, offset);
+    return `${match} (${yearPhrase})`;
+  });
+
+  return withYearsResolved.replace(RELATIVE_MONTH_PATTERN, (match) => {
+    const monthPhrase = formatAbsoluteMonthPhrase(createdAt);
+    return `${match} (${monthPhrase})`;
+  });
+}
+
+/**
  * Caps how much of a single note's text reaches the model. Time-to-first-token
  * (prompt processing), not decode speed, dominates a query's wall clock on
  * this device class, and that scales with context length.
@@ -83,10 +205,10 @@ export function truncateForContext(text: string): string {
  */
 export function formatNoteContext(notes: FormattableNote[]): string {
   return notes
-    .map(
-      (note, i) =>
-        `--- NOTE ${i + 1} [Recorded: ${formatNoteDate(note.createdAt)}] ---\n${truncateForContext(resolveNoteText(note))}`
-    )
+    .map((note, i) => {
+      const normalized = normalizeRelativeTimeInNoteText(resolveNoteText(note), note.createdAt);
+      return `--- NOTE ${i + 1} [Recorded: ${formatNoteDate(note.createdAt)}] ---\n${truncateForContext(normalized)}`;
+    })
     .join("\n\n");
 }
 
@@ -166,4 +288,95 @@ export function sanitizeLLMResponse(text: string): string {
   const withoutSpecialTokens = text.replace(SPECIAL_TOKEN_PATTERN, "");
   const withoutTags = withoutSpecialTokens.replace(/<\/?[a-zA-Z!][^>]*>/g, "").trim();
   return stripDuplicatedTail(withoutTags);
+}
+
+/** Fixed refusal line this file's grounding check falls back to — same
+ * wording `MINIMAL_RAG_SYSTEM_PROMPT` (ragPrompt.ts) already instructs the
+ * model to produce verbatim when it genuinely has nothing, so a rejected
+ * answer is indistinguishable from a model-issued refusal rather than
+ * reading as a different, unexplained failure mode. */
+export const UNGROUNDED_ANSWER_FALLBACK = "No information found in your notes.";
+
+/** Below this length a word is almost always a function word ("the", "and",
+ * "this") rather than real content — skipping them without needing a
+ * dedicated stopword list keeps this function self-contained (see this
+ * file's own top doc comment on why it imports nothing from noteManager,
+ * which is where the app's real stopword list already lives). */
+const MIN_CONTENT_WORD_LENGTH = 4;
+
+/** Below this fraction of an answer's own content words actually appearing
+ * somewhere in the context it was grounded in, the answer is treated as
+ * likely fabricated rather than a legitimate paraphrase. A real summary
+ * naturally reuses most of its source's specific nouns/terms even while
+ * rephrasing connective language around them; an answer inventing unrelated
+ * facts (the failure this exists to catch) will have most of its specific
+ * content words matching nothing in the source at all. Starting value, not
+ * empirically tuned yet — see this function's own doc comment. */
+const MIN_GROUNDED_WORD_RATIO = 0.5;
+
+function extractContentWords(text: string): string[] {
+  return text
+    .toLowerCase()
+    .split(/[^a-z0-9']+/)
+    .filter((word) => word.length >= MIN_CONTENT_WORD_LENGTH);
+}
+
+/**
+ * Post-generation grounding check — catches a model answer that references
+ * something with no basis anywhere in the note context it was actually given,
+ * independent of why that happened (the specific bug this was added for was
+ * `MINIMAL_PERSON_VOICE_EXAMPLE_CONTEXT`'s own fake demo note leaking into a
+ * real answer, but this check doesn't care about the cause, only the
+ * symptom). Mirrors `transformationEngine.ts`'s existing "hallucinated
+ * date_phrase" check for to-do extraction (drops any extracted date phrase
+ * not found verbatim in the source note) — same principle, applied here to a
+ * full RAG answer instead of a single extracted field.
+ *
+ * Checked against `contextText` — the EXACT context block string the model
+ * was actually shown (already including `normalizeRelativeTimeInNoteText`'s
+ * rewritten dates, via `formatNoteContext`) — not a fresh re-derivation from
+ * the raw notes. Rebuilding it separately here would let a correctly
+ * date-converted answer ("On Sunday, 27 September...") get wrongly flagged,
+ * since that exact phrase only exists in the NORMALIZED text, never in a
+ * note's own raw, un-rewritten words.
+ *
+ * ALSO checked against `userQuery` (a live bug, caught after the anniversary
+ * window + relative-time-phrase normalization both shipped): a correct
+ * answer naturally echoes the user's own question phrasing — "was it this
+ * hot LAST YEAR AROUND THE SAME TIME" answered as "it was not this hot last
+ * year around the same time" is a perfectly grounded, correct answer — but
+ * `normalizeRelativeTimeInNoteText` had already rewritten "last year"/"this
+ * month" OUT of the note context into absolute dates, so those exact words
+ * no longer existed anywhere this function was checking, and a genuinely
+ * correct answer was rejected as "fabricated" for reusing the question's own
+ * words. Words the user themselves already used are definitionally not
+ * something the model could be hallucinating, so they count as grounded too.
+ * Confirmed this doesn't reopen the original leak bug: the fabricated
+ * "milk/eggs/dentist" content from that bug report appeared in neither the
+ * real note context NOR that query's own text, so it still fails correctly.
+ *
+ * The model's own fixed refusal lines ("No information found in your
+ * notes.", and the "full"-prompt-mode equivalent) trivially pass without
+ * running the ratio check at all — checked explicitly, NOT inferred from
+ * "zero content words," since both actually contain real words 4+ letters
+ * long ("information", "notes", "details") that legitimately won't appear in
+ * most note context, which would otherwise flag the model correctly
+ * refusing as if it were the fabrication this function exists to catch.
+ */
+const KNOWN_REFUSAL_LINES = new Set([
+  UNGROUNDED_ANSWER_FALLBACK,
+  "I couldn't find any details about that in your notes.",
+]);
+
+export function isAnswerGroundedInContext(answerText: string, contextText: string, userQuery: string): boolean {
+  if (KNOWN_REFUSAL_LINES.has(answerText.trim())) {
+    return true;
+  }
+  const contentWords = extractContentWords(answerText);
+  if (contentWords.length === 0) {
+    return true;
+  }
+  const searchableLower = `${contextText} ${userQuery}`.toLowerCase();
+  const groundedCount = contentWords.filter((word) => searchableLower.includes(word)).length;
+  return groundedCount / contentWords.length >= MIN_GROUNDED_WORD_RATIO;
 }

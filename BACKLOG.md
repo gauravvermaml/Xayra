@@ -35,6 +35,25 @@ Raised 2026-09-24.
 
 ## Done
 
+### RAG retrieval & grounding overhaul (accurate date/time questions, no fabricated content)
+
+Not a pre-listed backlog item — a live, high-stakes debugging arc (user's
+own bar: "100 of 100 user questions" must retrieve correctly), logged here
+per this file's own convention. Full writeup in PROJECT_STATE_HANDOFF.md's
+Build 56 section. Six connected fixes: "latest notes" now uses real
+timestamps instead of word matching; a note's own "today"/"last year"/"this
+month" now resolve to ITS real recorded date instead of colliding with
+whatever "today" means when the question is asked; a real bug where the
+model leaked its own internal training example into answers; a new
+post-generation check that discards an answer referencing anything not
+actually in its source notes or the user's own question; a full date-range
+engine (`services/ai/queryDateRange.ts`) so questions like "October last
+year," "last quarter," or "around the same time last year" search REAL
+timestamps instead of generic keyword similarity; and generation temperature
+set to 0 for consistent (not just occasionally-correct) answers. Confirmed
+on-device via a dedicated backdated test note and direct log inspection at
+every step, 2026-10-01.
+
 ### Push to-dos to Google Calendar
 
 Raised 2026-09-29, shipped 2026-09-30. Explicit per-to-do "Send to

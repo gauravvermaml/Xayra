@@ -73,6 +73,35 @@ const SECONDS_PER_DAY = 86_400;
 const ATTRIBUTION_PROBE_NOTE =
   "Eli recommended the book The Overstory. His brother Elias is moving to Perth in January.";
 
+/**
+ * Probes the ANNIVERSARY-WINDOW fix in `queryDateRange.ts` plus the
+ * extended `normalizeRelativeTimeInNoteText` (today/yesterday/tomorrow AND
+ * now last year/this year/this month) — live-requested test scenario, not a
+ * hypothetical. Backdated 11+ months before whenever this is run (a fixed
+ * calendar date, not `daysAgo`, since the whole point is landing the note
+ * roughly a year before "today" regardless of which day this button is
+ * actually pressed on) so a question like "was it this hot last year around
+ * the same time" has to reach across a MONTH boundary (this note's own
+ * October vs. a query asked in a different month) to find it — the exact
+ * gap a strict calendar-year "last year" search would miss and the fuzzy
+ * ±6-week anniversary window exists to catch.
+ */
+const HOT_DAY_PROBE_NOTE =
+  "It was a very hot day today, perhaps 40 degrees plus. Quite unusual for this month. " +
+  "Last year same time it was so much better. Glad we had a plunge pool to cool ourselves off, " +
+  "which we didn't have last year. We caught up with a bunch of friends, had a few beers and " +
+  "called it a day. I am reading an interesting history book these days, it's called Why West " +
+  "Rules for Now.";
+
+/** 15 October of the PREVIOUS calendar year, local time, at noon — a fixed
+ * calendar date rather than `daysAgo` so this lands "about a year ago" no
+ * matter which actual day this probe is run on. */
+function hotDayProbeTimestamp(): number {
+  const now = new Date();
+  const target = new Date(now.getFullYear() - 1, 9, 15, 12, 0, 0); // month 9 = October
+  return Math.floor(target.getTime() / 1000);
+}
+
 export default function DevSeedScreen() {
   const router = useRouter();
   const [log, setLog] = useState<string[]>([]);
@@ -113,6 +142,31 @@ export default function DevSeedScreen() {
       append('PASS = a to-do for "Read The Overstory" only (or nothing at all).');
       append('FAIL = any to-do about moving to Perth — that is Elias\'s life, not a user task.');
       append("Extraction takes ~2 min on this device; check Your To-Dos after.");
+    } catch (err) {
+      append(`FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [append]);
+
+  const handleHotDayProbe = useCallback(async () => {
+    setBusy(true);
+    setLog([]);
+    try {
+      const note = await createTextNote(HOT_DAY_PROBE_NOTE);
+      const db = await getRawDatabase();
+      const backdatedTo = hotDayProbeTimestamp();
+      await db.execute("UPDATE notes SET created_at = ? WHERE id = ?", [backdatedTo, note.id]);
+      const backdatedDate = new Date(backdatedTo * 1000).toLocaleDateString("en-US", {
+        weekday: "long",
+        year: "numeric",
+        month: "long",
+        day: "numeric",
+      });
+      append(`Added hot-day note, backdated to ${backdatedDate}.`);
+      append('Try asking: "Was it this hot last year around the same time?"');
+      append("Should retrieve this note (anniversary window) and answer from its real content,");
+      append("not say \"today\"/\"last year\" ambiguously — both get resolved to absolute dates.");
     } catch (err) {
       append(`FAILED: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -180,6 +234,10 @@ export default function DevSeedScreen() {
 
       <Pressable accessibilityRole="button" onPress={handleProbe} disabled={busy} style={styles.secondaryButton}>
         <Text style={styles.secondaryLabel}>Add 1 attribution probe note</Text>
+      </Pressable>
+
+      <Pressable accessibilityRole="button" onPress={handleHotDayProbe} disabled={busy} style={styles.secondaryButton}>
+        <Text style={styles.secondaryLabel}>Add hot-day note (backdated ~1 year, anniversary probe)</Text>
       </Pressable>
 
       <Pressable accessibilityRole="button" onPress={goHome} disabled={busy} style={styles.secondaryButton}>
