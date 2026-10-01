@@ -13,7 +13,31 @@ import { runOnJS, useSharedValue, withSpring, type SharedValue } from "react-nat
  * is that dragging past 50% should feel like the SAME gesture as dragging
  * from 0% to 50%, not a different one. */
 const SETTLE_SPRING = { damping: 24, stiffness: 260, mass: 0.9, overshootClamping: false };
-const FLICK_VELOCITY_THRESHOLD = 500;
+
+/**
+ * The exact constant `@gorhom/bottom-sheet`'s own internal `snapPoint`
+ * utility uses (`src/utilities/snapPoint.ts`: `value + 0.2 * velocity`) for
+ * the sheet's own native 0%→50% commit decision — not re-derived or
+ * approximated, copied verbatim, since the whole point of matching it here
+ * is a mechanically identical feel, not just a similarly-shaped one.
+ *
+ * Live product finding: an EARLIER version of this file's own
+ * `handleOnEnd` used a simple binary rule instead (`flickOpen ||
+ * settledProgress >= 0.5`) — a flick past a fixed, fairly high absolute
+ * velocity, OR having already dragged formally past the halfway point, with
+ * no blending between the two. The native path's `snapPoint`, by contrast,
+ * PROJECTS the released position forward by a velocity-proportional amount
+ * before deciding which point is closer — so a fast flick completes the
+ * native 0%→50% transition even over a SHORT physical drag, while this
+ * file's old binary rule gave a fast flick credit only above its own fixed
+ * threshold, with nothing in between. Confirmed as the root cause of a real,
+ * reported asymmetry: "0-50 needs a mild finger swipe; 50-100 takes a
+ * harder, more concentrated drag almost all the way up." `snapPoint` is not
+ * exported from the library's public API (only `enableLogging` is, per its
+ * own `src/index.ts`), so the formula is reproduced here rather than
+ * imported from an unsupported internal path.
+ */
+const SNAP_VELOCITY_WEIGHT = 0.2;
 
 export type ExpandOverdragGestureHandlersParams = {
   /** Shared 0..1 progress this drives — see SwipeableTrayHandle.tsx's own
@@ -107,6 +131,16 @@ export function createExpandOverdragGestureHandlersHook({
     // and safer than trying to reach into that private state.
     const dragStartPosition = useSharedValue(0);
 
+    // The UNCLAMPED overdrag distance in pixels — `expandProgress` itself is
+    // clamped to a max of 1 (see `handleOnChange` below), which loses exactly
+    // how far past full expansion the user actually dragged. That precision
+    // matters for the velocity-projected commit decision in `handleOnEnd`:
+    // reconstructing an approximate raw distance from the already-clamped
+    // progress (`expandProgress.value * expandDragDistance`) would
+    // underestimate it for any drag that overshot the full range, so it's
+    // tracked here separately instead.
+    const rawOverdragPx = useSharedValue(0);
+
     const handleOnStart: GestureEventHandlerCallbackType = useCallback(
       (source, payload) => {
         "worklet";
@@ -127,11 +161,12 @@ export function createExpandOverdragGestureHandlersHook({
           if (highestSnapPoint !== undefined) {
             const rawDraggedPosition = dragStartPosition.value + payload.translationY;
             const overdragPx = Math.max(0, highestSnapPoint - rawDraggedPosition);
+            rawOverdragPx.value = overdragPx;
             expandProgress.value = Math.min(1, overdragPx / expandDragDistance);
           }
         }
       },
-      [defaultOnChange, animatedDetentsState, dragStartPosition, expandProgress]
+      [defaultOnChange, animatedDetentsState, dragStartPosition, expandProgress, rawOverdragPx]
     );
 
     const handleOnEnd: GestureEventHandlerCallbackType = useCallback(
@@ -144,15 +179,26 @@ export function createExpandOverdragGestureHandlersHook({
           // still exactly 0) leaves `expandProgress`/`onExpandSettle`
           // untouched, since there's nothing to settle.
           if (settledProgress > 0) {
-            const flickOpen = payload.velocityY <= -FLICK_VELOCITY_THRESHOLD;
-            const shouldExpand = flickOpen || settledProgress >= 0.5;
+            // Same projection the native 0%→50% commit uses (see
+            // `SNAP_VELOCITY_WEIGHT`'s own doc comment): project the raw
+            // overdrag distance forward by a velocity-proportional amount,
+            // then check which of the two endpoints (0 = collapsed back to
+            // the tray, `expandDragDistance` = fully expanded) that
+            // projected position is closer to — equivalent to the library's
+            // own `snapPoint` reduced to a two-point choice, where "closer
+            // to the farther point" is exactly "past the midpoint."
+            // `velocityY` is negative for an upward flick (same convention
+            // the library itself uses), so subtracting it increases the
+            // projected overdrag distance for a fast upward flick.
+            const projectedOverdragPx = rawOverdragPx.value - SNAP_VELOCITY_WEIGHT * payload.velocityY;
+            const shouldExpand = projectedOverdragPx >= expandDragDistance / 2;
             expandProgress.value = withSpring(shouldExpand ? 1 : 0, SETTLE_SPRING);
             runOnJS(onExpandSettle)(shouldExpand);
           }
         }
         defaultOnEnd(source, payload);
       },
-      [defaultOnEnd, expandProgress]
+      [defaultOnEnd, expandProgress, rawOverdragPx]
     );
 
     const handleOnFinalize: GestureEventHandlerCallbackType = useCallback(

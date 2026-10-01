@@ -35,6 +35,21 @@ Raised 2026-09-24.
 
 ## Done
 
+### Record/Ask tray expand-gesture asymmetry (0-50 mild swipe, 50-100 needed a hard drag)
+
+Not a pre-listed backlog item — a live, precisely-diagnosed UX report, logged
+here per this file's own convention. The two halves of the tray's single
+continuous drag handle used genuinely different commit rules: the native
+0%-50% half benefits from `@gorhom/bottom-sheet`'s own velocity-projected
+`snapPoint` formula (a fast flick completes it even over a short drag); the
+custom 50%-100% overdrag extension used a simpler binary flick-or-halfway
+rule with no such blending, making it feel like it needed a much more
+deliberate drag. Fixed by reproducing the library's own formula (exact same
+constant) for the custom half too. A follow-up "works in Record, not Ask"
+report turned out to be a stale-reload artifact, not a real difference —
+both trays share the identical handle/gesture code. Confirmed fixed
+on-device in both trays, 2026-10-01.
+
 ### RAG retrieval & grounding overhaul (accurate date/time questions, no fabricated content)
 
 Not a pre-listed backlog item — a live, high-stakes debugging arc (user's

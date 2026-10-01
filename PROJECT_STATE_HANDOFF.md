@@ -2,7 +2,21 @@
 
 *(The app was originally built and shipped internally as "Silent Confidant," then briefly "Remi," before the full rebrand to **Xayra** documented below. Historical sections further down in this file predate the rename and refer to the app by whichever name was current at the time — that's intentional, not an inconsistency to fix; each section is an accurate record of what was true when it was written.)*
 
-**Last updated:** Build 56 (not yet built — see its own section below: a major RAG-accuracy overhaul — real date-range understanding for chat questions, a fixed model-content-leak bug, a post-generation grounding check, and a switch to deterministic generation). Build 49 (Handsfree cancel-tap latency chain, splash sizing) and Build 48 + the Hybrid Extraction Architecture (fine-tuned model wired in) already shipped together in production 1.0.37; Build 50 through 56 are not yet built or shipped.
+**Last updated:** Build 57 (not yet built — see its own section below: fixed an asymmetric drag-commit threshold in the Record/Ask tray's 50%→100% expand gesture). Build 49 (Handsfree cancel-tap latency chain, splash sizing) and Build 48 + the Hybrid Extraction Architecture (fine-tuned model wired in) already shipped together in production 1.0.37; Build 50 through 57 are not yet built or shipped.
+
+## Build 57 — Expand-Gesture Commit Threshold Fix (not yet built)
+
+Live user report, investigated and fixed in one pass: "0→50 needs a mild finger swipe; 50→100 takes a harder, more concentrated drag almost all the way up" — on the Record/Ask tray's single continuous drag handle (`components/useExpandOverdragGestureHandlers.ts`, from Build 51's unified-handle work).
+
+**Root cause, confirmed by reading both the library's own source and this app's custom extension, not assumed**: the native 0%→50% commit (`@gorhom/bottom-sheet`'s own `handleOnEnd`) uses its internal `snapPoint` utility, which projects the released position forward by a velocity-proportional amount (`position + 0.2 × velocity`) before deciding which snap point is closer — so a fast, light flick completes the transition even over a short physical drag. This app's own custom 50%→100% overdrag logic, by contrast, used a simple binary rule (`flickOpen || settledProgress >= 0.5`) — a flick past a fixed, fairly high absolute velocity, OR having already dragged formally past the halfway point, with no blending between the two. The two halves were never actually using an equivalent commit rule, despite the file's own doc comment stating the explicit goal that they should feel identical.
+
+**Fix**: reproduced the native `snapPoint` formula verbatim (same `0.2` constant — not exported from the library's public API, so copied rather than imported) and applied it to the overdrag's own commit decision, replacing the old binary flick-or-halfway rule entirely. Required tracking the overdrag distance in an additional unclamped shared value (`rawOverdragPx`), since `expandProgress` itself is clamped to a max of 1 and would otherwise lose precision for a drag that overshot the full range.
+
+**A real but ultimately false alarm along the way**: after shipping the fix, a live report said it worked in the Record tray but not the Ask tray. Investigated thoroughly (confirmed both tabs share the exact same `<HistorySheet>` instance, same handle, same gesture hook — no mode-specific branching exists anywhere in the relevant code) before concluding this was a stale-reload artifact rather than a genuine code difference — Reanimated worklets are already known, from this project's own prior history, not to always hot-reload cleanly. A full process restart (force-stop + relaunch) resolved it; confirmed the fix is identical and correct in both tabs.
+
+### Verification
+
+`npx tsc --noEmit` clean. Confirmed working live on-device (Redmi) in both Record and Ask trays after a clean process restart.
 
 ## Build 56 — RAG Retrieval & Grounding Overhaul (not yet built)
 
