@@ -14,6 +14,31 @@
  * function. They no longer do, and neither will the Tier 2 harness.
  */
 
+import {
+  checkAffirmativeAnswer,
+  checkVerificationAnswer,
+  validateRelationships,
+  verificationAddendum,
+  type EvidenceSentence,
+  type RelationshipCheck,
+} from "./relationshipGrounding";
+import {
+  checkAnswerDates,
+  describePeriod,
+  describeQueriedDate,
+  establishedPeriods,
+  relatePeriods,
+  resolveMemory,
+  selectTemporalSentences,
+  type DateCheckResult,
+  type EventEvidence,
+  type MemoryClause,
+  type Period,
+  type QueryTemporalTarget,
+  type ResolvedMemory,
+  type TemporalReference,
+} from "./temporalResolver";
+
 /**
  * The shape this module needs from a retrieved note, declared structurally
  * rather than imported. `HybridSearchResult` satisfies it, but depending on
@@ -21,6 +46,8 @@
  * avoid.
  */
 export type FormattableNote = {
+  /** Carried into relationship-grounding provenance when present. */
+  id?: string;
   content: string | null;
   transcript: string | null;
   createdAt: number;
@@ -56,128 +83,6 @@ export function formatNoteDate(createdAt: number): string {
 }
 
 /**
- * A note is transcribed in the user's own voice AT RECORDING TIME, so "today"
- * in its text means the day it was recorded — not "today" relative to
- * whenever the chat question is actually asked, which can be days or weeks
- * later. Live bug this fixes: a note recorded Sunday 27 Sep ("Today it's
- * Sunday and we started really slow...") was retrieved for a later query
- * asking specifically about 27 Sep, and the model's answer just echoed the
- * note's own "Today it's Sunday" framing verbatim — technically true THAT
- * day, nonsensical read back later, and doubly confusing since the system
- * prompt separately injects the CURRENT date as "today" for its own
- * relative-time reasoning (see ragPrompt.ts's `buildSystemPromptWithDate`) —
- * two different "today"s colliding in the same context.
- *
- * Fixed deterministically, at the formatting layer, rather than by
- * instructing the model to do this conversion itself: ragPrompt.ts's own
- * `buildCalendarBaseline` doc comment already documents that a model this
- * size "reliably gets [date arithmetic] wrong" purely from a prompt
- * instruction. Rewriting the actual words before the model ever sees them
- * removes the ambiguity by construction instead of hoping a 1.5B model
- * resolves it correctly every time. A short instruction is still added to
- * the minimal prompt as a defense-in-depth backup for any relative-time
- * phrasing this pattern doesn't catch (e.g. "this morning", "last night").
- *
- * Deliberately applied only to the text that reaches the LLM's context
- * (`formatNoteContext` below), never to `RagCitation.content` in rag.ts —
- * citations show the user their own note back verbatim; this rewrite is
- * purely to ground the model's own answer correctly.
- */
-const RELATIVE_DAY_OFFSETS: Record<string, number> = {
-  today: 0,
-  yesterday: -1,
-  tomorrow: 1,
-};
-
-const RELATIVE_DAY_PATTERN = /\b(today|yesterday|tomorrow)\b/gi;
-
-/** Local-time year/month/day arithmetic, never `new Date(isoString)` — same
- * UTC-off-by-one-day discipline `services/calendar/dateRange.ts` documents
- * and follows for the identical reason. */
-function formatAbsoluteDayPhrase(createdAt: number, dayOffset: number): string {
-  const recorded = new Date(createdAt * 1000);
-  const target = new Date(recorded.getFullYear(), recorded.getMonth(), recorded.getDate() + dayOffset);
-  const weekday = target.toLocaleDateString("en-US", { weekday: "long" });
-  const monthDay = target.toLocaleDateString("en-US", { month: "long", day: "numeric" });
-  return `${weekday}, ${monthDay} ${target.getFullYear()}`;
-}
-
-/**
- * Extension of the day-level rewrite above to year/month-grain relative
- * phrases — same root cause, same fix philosophy, added after a live
- * scenario exposed the gap: a note recorded Jan 2027 saying "last year same
- * time it was so much better" and "unusual for this month" was asked about
- * from December 2027, 11 months later, via "was it this hot last year
- * around the same time." The QUERY's own "last year" (~Dec 2026) and the
- * NOTE's own "last year" (~Jan 2026, one year before ITS OWN recording date)
- * use the identical two words but anchor to completely different periods —
- * a small model has to silently disambiguate that collision with no help
- * unless the words are resolved before it ever sees them, same reasoning as
- * `RELATIVE_DAY_PATTERN` above. "these days"/"this week" are deliberately
- * NOT covered — "these days" in particular is already vague even to a human
- * reader (it doesn't pin to a specific period the way "last year" or "this
- * month" do), so there's no single unambiguous absolute phrase to rewrite it
- * to; leaving it as-is is honest rather than inventing false precision.
- *
- * ANNOTATE, DON'T REPLACE — deliberately different from the day-level
- * rewrite above, after a second live bug this exact extension caused: the
- * first version REPLACED "last year" outright with a bare number ("In
- * 2024"), which fixed the word-ambiguity problem above but created a worse
- * one — a note mentioning its own main year ("October 15 2025") alongside a
- * comparison year ("last year") now had TWO bare, visually-identical-shaped
- * 4-digit numbers sitting close together with nothing to tell the model
- * which one was the main fact and which was the aside, and the model
- * (confirmed live) swapped them, attaching the comparison year to the main
- * event. "Last year"/"this month" are themselves a stronger, more distinct
- * token than a second bare number — keeping the original word and
- * appending its resolved value in parentheses ("last year (2024)") preserves
- * that word's own "this is a comparison, not the main fact" signal instead
- * of erasing it, while still giving the exact number the grounding check and
- * the model's own date math need. Not a guarantee a small model never
- * confuses two related numbers again, but it removes the specific
- * bare-number-collision shape that caused the observed failure, applied
- * generically to every note with this pattern — not a fix for one note.
- */
-const RELATIVE_YEAR_OFFSETS: Record<string, number> = {
-  "last year": -1,
-  "this year": 0,
-};
-
-const RELATIVE_YEAR_PATTERN = /\b(last year|this year)\b/gi;
-const RELATIVE_MONTH_PATTERN = /\bthis month\b/gi;
-
-function formatAbsoluteYearPhrase(createdAt: number, yearOffset: number): string {
-  const recorded = new Date(createdAt * 1000);
-  return `${recorded.getFullYear() + yearOffset}`;
-}
-
-function formatAbsoluteMonthPhrase(createdAt: number): string {
-  const recorded = new Date(createdAt * 1000);
-  const month = recorded.toLocaleDateString("en-US", { month: "long" });
-  return `${month} ${recorded.getFullYear()}`;
-}
-
-export function normalizeRelativeTimeInNoteText(text: string, createdAt: number): string {
-  const withDaysResolved = text.replace(RELATIVE_DAY_PATTERN, (match) => {
-    const offset = RELATIVE_DAY_OFFSETS[match.toLowerCase()];
-    const datePhrase = formatAbsoluteDayPhrase(createdAt, offset);
-    const isCapitalized = match[0] === match[0].toUpperCase();
-    return isCapitalized ? `On ${datePhrase}` : `on ${datePhrase}`;
-  });
-
-  const withYearsResolved = withDaysResolved.replace(RELATIVE_YEAR_PATTERN, (match) => {
-    const offset = RELATIVE_YEAR_OFFSETS[match.toLowerCase()];
-    const yearPhrase = formatAbsoluteYearPhrase(createdAt, offset);
-    return `${match} (${yearPhrase})`;
-  });
-
-  return withYearsResolved.replace(RELATIVE_MONTH_PATTERN, (match) => {
-    const monthPhrase = formatAbsoluteMonthPhrase(createdAt);
-    return `${match} (${monthPhrase})`;
-  });
-}
-
-/**
  * Caps how much of a single note's text reaches the model. Time-to-first-token
  * (prompt processing), not decode speed, dominates a query's wall clock on
  * this device class, and that scales with context length.
@@ -192,9 +97,123 @@ export function truncateForContext(text: string): string {
   return `${words.slice(0, MAX_NOTE_CONTEXT_WORDS).join(" ")}…`;
 }
 
+/** A preposition already sitting before the replaced phrase — "since
+ * yesterday" must become "since Wednesday, ...", not "since on Wednesday". */
+const PRECEDING_PREPOSITION = /\b(since|from|until|till|by|on|of|before|after)\s+$/i;
+const TIME_OF_DAY = /\b(morning|afternoon|evening|night|tonight)\b/i;
+const FOUR_DIGIT_YEAR = /\b(?:19|20)\d{2}\b/;
+/** Only a relative expression is rewritten. A bare time ("in the morning"),
+ * or a chrono match on "now" (e.g. inside a book title), names no other day
+ * and must stay as written. */
+const RELATIVE_DAY_WORD = /\b(last|next|this|ago|yesterday|today|tomorrow|tonight)\b/i;
+
+/**
+ * Inline resolution of a note's own relative-time expressions, against the
+ * note's OWN recorded date.
+ *
+ * Day-level ("today", "two days ago", "last night") is replaced with the
+ * absolute date — "On Wednesday, September 30 2026" — the form this pipeline
+ * has always used. Live bug the original version fixed: a note's own "Today
+ * it's Sunday" was echoed back weeks later as if "today" meant the question's
+ * day.
+ *
+ * Coarser ("last year", "this month") keeps the user's own words. With
+ * `annotate`, a coarse expression whose period does NOT contain the recording
+ * day gets its resolved period appended — "Last year (2024)" — while "this
+ * month" stays as written (the header already dates it). Annotation is safe
+ * only because temporal context construction (`renderTemporalSentences`) drops
+ * sentences explicitly about a different period from a focused question: the
+ * one confirmed live failure of "(2024)" was a "last year" question with both
+ * years' sentences side by side. Off for non-date questions, which keep the
+ * pre-existing format.
+ */
+function inlinePhrase(ref: TemporalReference, precedingText: string, recordedDay: Period, annotate: boolean): string | null {
+  if (ref.resolution.status !== "resolved" || FOUR_DIGIT_YEAR.test(ref.text) || !RELATIVE_DAY_WORD.test(ref.text)) {
+    return null;
+  }
+  const { period } = ref.resolution;
+  if (period.precision !== "day") {
+    return annotate && relatePeriods(recordedDay, period) === "outside" ? `${ref.text} (${describePeriod(period)})` : null;
+  }
+  const date = describePeriod(period);
+  const timeOfDay = ref.text.match(TIME_OF_DAY)?.[1].toLowerCase();
+  const core = timeOfDay ? `the ${timeOfDay === "tonight" ? "night" : timeOfDay} of ${date}` : date;
+  if (PRECEDING_PREPOSITION.test(precedingText)) {
+    return core;
+  }
+  return /^[A-Z]/.test(ref.text) ? `On ${core}` : `on ${core}`;
+}
+
+/** Renders `text[start, end)` with every reference inside it resolved
+ * inline. References carry offsets into the full note text. */
+function renderSpan(text: string, memory: ResolvedMemory, start: number, end: number, annotate: boolean): string {
+  let rendered = text.slice(start, end);
+  const inSpan = memory.references
+    .filter((ref) => ref.index >= start && ref.index + ref.text.length <= end)
+    .sort((a, b) => b.index - a.index);
+  for (const ref of inSpan) {
+    const replacement = inlinePhrase(ref, text.slice(Math.max(0, ref.index - 12), ref.index), memory.recordedDay, annotate);
+    if (replacement) {
+      const offset = ref.index - start;
+      rendered = rendered.slice(0, offset) + replacement + rendered.slice(offset + ref.text.length);
+    }
+  }
+  return rendered;
+}
+
+/**
+ * The paragraph a note contributes to a temporal question: the sentences
+ * temporalResolver.ts's `selectTemporalSentences` keeps — the SAME function
+ * retrieval ranks with, so the two can never disagree — rendered in note
+ * order with dates resolved inline. Paragraph form, not one labeled line per
+ * clause: confirmed live that the labeled layout made this fine-tuned model
+ * copy single lines (it was trained on paragraphs).
+ */
+type RenderedSentence = { sentenceIndex: number; text: string; clauses: MemoryClause[] };
+
+function renderTemporalSentences(text: string, memory: ResolvedMemory, target: QueryTemporalTarget, eventTerms: string[]): RenderedSentence[] {
+  return selectTemporalSentences(memory, target, eventTerms).map(({ sentenceIndex, clauses }) => ({
+    sentenceIndex,
+    clauses,
+    text: clauses.map((c) => renderSpan(text, memory, c.index, c.index + c.text.length, true)).join(" ").replace(/,$/, "."),
+  }));
+}
+
+/** Every sentence of a note, rendered the way the non-date body renders the
+ * whole note — evidence for questions that name no date. */
+function renderAllSentences(text: string, memory: ResolvedMemory): RenderedSentence[] {
+  return memory.sentences.map(({ index, clauseIndices }) => {
+    const clauses = clauseIndices.map((i) => memory.clauses[i]);
+    const last = clauses[clauses.length - 1];
+    return { sentenceIndex: index, clauses, text: renderSpan(text, memory, clauses[0].index, last.index + last.text.length, false) };
+  });
+}
+
+export type NoteContextBuild = {
+  /** The exact context block the model is shown. */
+  contextText: string;
+  /** The resolver's output for each input note, in input order. */
+  memories: ResolvedMemory[];
+  /** Input-note indices that contributed at least one line to the context.
+   * A note whose every clause was filtered out is absent — rag.ts drops its
+   * citation too, rather than citing a note the model never saw. */
+  includedIndices: number[];
+  /** Every sentence the model was shown, with note and sentence provenance —
+   * what relationship grounding validates against. */
+  evidence: EvidenceSentence[];
+};
+
 /**
  * Notes arrive already ordered by reciprocal-rank-fusion score (descending);
  * that order is preserved, so "NOTE 1" is always the strongest match.
+ *
+ * With no `target` (the question names no date), each note renders as one
+ * paragraph exactly as before — header plus text with day-level references
+ * resolved inline — so non-date questions see an unchanged format.
+ *
+ * With a `target`, each note is still one paragraph, but only the sentences
+ * `renderTemporalSentences` selects, with coarse dates resolved inline — decided
+ * deterministically by temporalResolver.ts against the note's own anchor.
  *
  * Plain-text `--- NOTE N [Recorded: ...] ---` headers rather than XML tags: a
  * small instruct model given XML-tagged context has been observed echoing a
@@ -202,14 +221,42 @@ export function truncateForContext(text: string): string {
  * to imitate. The note's own id is deliberately omitted — the model has no
  * legitimate reason to surface an internal id, and the UI attaches citation
  * chips structurally rather than parsing them out of the answer text.
+ *
+ * Applied only to the text that reaches the model, never to
+ * `RagCitation.content` — citations show the user their own note verbatim.
  */
-export function formatNoteContext(notes: FormattableNote[]): string {
-  return notes
-    .map((note, i) => {
-      const normalized = normalizeRelativeTimeInNoteText(resolveNoteText(note), note.createdAt);
-      return `--- NOTE ${i + 1} [Recorded: ${formatNoteDate(note.createdAt)}] ---\n${truncateForContext(normalized)}`;
-    })
-    .join("\n\n");
+export function buildNoteContext(
+  notes: FormattableNote[],
+  target: QueryTemporalTarget | null,
+  options: { eventTerms?: string[] } = {}
+): NoteContextBuild {
+  const memories: ResolvedMemory[] = [];
+  const includedIndices: number[] = [];
+  const blocks: string[] = [];
+  const evidence: EvidenceSentence[] = [];
+  notes.forEach((note, i) => {
+    const text = truncateForContext(resolveNoteText(note));
+    const memory = resolveMemory(text, note.createdAt, target);
+    memories.push(memory);
+    const shown = target ? renderTemporalSentences(text, memory, target, options.eventTerms ?? []) : renderAllSentences(text, memory);
+    // The non-date body stays one span of the whole note, exactly as before.
+    const body = target ? shown.map((s) => s.text).join(" ") : renderSpan(text, memory, 0, text.length, false);
+    if (body) {
+      includedIndices.push(i);
+      blocks.push(`--- NOTE ${blocks.length + 1} [Recorded: ${formatNoteDate(note.createdAt)}] ---\n${body}`);
+      for (const s of shown) {
+        evidence.push({
+          noteId: note.id ?? null,
+          noteIndex: i,
+          sentenceIndex: s.sentenceIndex,
+          createdAt: note.createdAt,
+          text: s.text,
+          dates: s.clauses.flatMap((c) => c.periods.map((period) => ({ period, explicit: c.source === "explicit" }))),
+        });
+      }
+    }
+  });
+  return { contextText: blocks.join("\n\n"), memories, includedIndices, evidence };
 }
 
 /** Matches a residual instruct-template special token, e.g. `<|im_end|>` or
@@ -290,12 +337,17 @@ export function sanitizeLLMResponse(text: string): string {
   return stripDuplicatedTail(withoutTags);
 }
 
-/** Fixed refusal line this file's grounding check falls back to — same
- * wording `MINIMAL_RAG_SYSTEM_PROMPT` (ragPrompt.ts) already instructs the
- * model to produce verbatim when it genuinely has nothing, so a rejected
- * answer is indistinguishable from a model-issued refusal rather than
- * reading as a different, unexplained failure mode. */
-export const UNGROUNDED_ANSWER_FALLBACK = "No information found in your notes.";
+/** Shown when retrieval found no relevant notes at all. Same wording
+ * `MINIMAL_RAG_SYSTEM_PROMPT` (ragPrompt.ts) trains the model to produce for
+ * an empty context, so this case reads identically whether the model or the
+ * app says it. */
+export const NO_RELEVANT_NOTES_MESSAGE = "No information found in your notes.";
+
+/** Shown when relevant notes WERE retrieved but the generated answer failed
+ * the date check or the grounding check. Deliberately distinct from
+ * NO_RELEVANT_NOTES_MESSAGE: telling the user nothing was found would be
+ * false here — notes exist, the app just couldn't verify an answer from them. */
+export const UNVERIFIED_ANSWER_MESSAGE = "I found related notes, but couldn't verify an accurate answer from them.";
 
 /** Below this length a word is almost always a function word ("the", "and",
  * "this") rather than real content — skipping them without needing a
@@ -333,8 +385,8 @@ function extractContentWords(text: string): string[] {
  * full RAG answer instead of a single extracted field.
  *
  * Checked against `contextText` — the EXACT context block string the model
- * was actually shown (already including `normalizeRelativeTimeInNoteText`'s
- * rewritten dates, via `formatNoteContext`) — not a fresh re-derivation from
+ * was actually shown (already including `buildNoteContext`'s inline-resolved
+ * dates and clause labels) — not a fresh re-derivation from
  * the raw notes. Rebuilding it separately here would let a correctly
  * date-converted answer ("On Sunday, 27 September...") get wrongly flagged,
  * since that exact phrase only exists in the NORMALIZED text, never in a
@@ -345,8 +397,8 @@ function extractContentWords(text: string): string[] {
  * answer naturally echoes the user's own question phrasing — "was it this
  * hot LAST YEAR AROUND THE SAME TIME" answered as "it was not this hot last
  * year around the same time" is a perfectly grounded, correct answer — but
- * `normalizeRelativeTimeInNoteText` had already rewritten "last year"/"this
- * month" OUT of the note context into absolute dates, so those exact words
+ * the note context's relative-time words had been rewritten into absolute
+ * dates at the time, so those exact words
  * no longer existed anywhere this function was checking, and a genuinely
  * correct answer was rejected as "fabricated" for reusing the question's own
  * words. Words the user themselves already used are definitionally not
@@ -364,12 +416,19 @@ function extractContentWords(text: string): string[] {
  * refusing as if it were the fabrication this function exists to catch.
  */
 const KNOWN_REFUSAL_LINES = new Set([
-  UNGROUNDED_ANSWER_FALLBACK,
+  NO_RELEVANT_NOTES_MESSAGE,
   "I couldn't find any details about that in your notes.",
 ]);
 
+/** The model's own fixed refusal lines — minimal mode's trained "No
+ * information found in your notes." and the "full"-prompt-mode equivalent.
+ * Exact match after trimming; deterministic. */
+export function isKnownRefusal(answerText: string): boolean {
+  return KNOWN_REFUSAL_LINES.has(answerText.trim());
+}
+
 export function isAnswerGroundedInContext(answerText: string, contextText: string, userQuery: string): boolean {
-  if (KNOWN_REFUSAL_LINES.has(answerText.trim())) {
+  if (isKnownRefusal(answerText)) {
     return true;
   }
   const contentWords = extractContentWords(answerText);
@@ -379,4 +438,83 @@ export function isAnswerGroundedInContext(answerText: string, contextText: strin
   const searchableLower = `${contextText} ${userQuery}`.toLowerCase();
   const groundedCount = contentWords.filter((word) => searchableLower.includes(word)).length;
   return groundedCount / contentWords.length >= MIN_GROUNDED_WORD_RATIO;
+}
+
+/** An answer that flatly denies the event ("No, …", "You didn't …"). */
+const BARE_NEGATION = /^\s*(?:no\b|you did(?:n['’]t| not)\b|there (?:was|is) no\b|nothing\b)/i;
+
+export type AnswerOutcome =
+  | "no-notes"
+  | "model-refusal"
+  | "date-rejected"
+  | "relationship-rejected"
+  | "verification-contradicted"
+  | "grounding-rejected"
+  | "unsupported-negation"
+  | "shown";
+
+/**
+ * The post-generation path, shared by rag.ts and the eval scripts so they can
+ * never drift apart. It validates; it never rewrites a generated claim. In
+ * order:
+ *  - nothing retrieved → NO_RELEVANT_NOTES_MESSAGE, whatever the model said;
+ *  - the model's own refusal despite retrieved notes → UNVERIFIED_ANSWER_MESSAGE
+ *    (saying "nothing found" would be false);
+ *  - a verification question whose notes hold NO evidence about the event,
+ *    answered with a flat denial → UNVERIFIED_ANSWER_MESSAGE: an absence of
+ *    notes is not proof the event didn't happen;
+ *  - a bare "Yes" to a verification question whose notes record the event on
+ *    a different date, or nowhere → rejected; and a "Yes" to any yes/no
+ *    question must confirm the subject/action actually asked about ("Is Eli
+ *    moving…?" is not confirmed by "Eli's brother Elias is moving");
+ *  - date check: every explicit-year date must be established, or the answer
+ *    is rejected (no year repair — dates are normalized BEFORE generation);
+ *  - relationship check (relationshipGrounding.ts): each statement's values
+ *    must be supported by one evidence sentence the model was shown;
+ *  - word-grounding check (against the grounded question the model saw);
+ *  - verification addendum: when the notes unambiguously date the event to
+ *    another day, one deterministic sentence saying so is appended.
+ * Citations are kept only for "shown".
+ */
+export function finalizeAnswer(input: {
+  raw: string;
+  notesIncluded: number;
+  contextText: string;
+  question: string;
+  memories: ResolvedMemory[];
+  evidence: EvidenceSentence[];
+  target: QueryTemporalTarget | null;
+  now: Date;
+  eventEvidence: EventEvidence | null;
+}): { text: string; outcome: AnswerOutcome; dateCheck?: DateCheckResult; relationships?: RelationshipCheck; reason?: string } {
+  const { raw, notesIncluded, contextText, question, memories, evidence, target, now, eventEvidence } = input;
+  if (notesIncluded === 0) {
+    return { text: NO_RELEVANT_NOTES_MESSAGE, outcome: "no-notes" };
+  }
+  const sanitized = sanitizeLLMResponse(raw);
+  if (isKnownRefusal(sanitized)) {
+    return { text: UNVERIFIED_ANSWER_MESSAGE, outcome: "model-refusal" };
+  }
+  if (eventEvidence?.kind === "none" && BARE_NEGATION.test(sanitized)) {
+    return { text: UNVERIFIED_ANSWER_MESSAGE, outcome: "unsupported-negation" };
+  }
+  const contradiction =
+    checkVerificationAnswer(sanitized, eventEvidence) ??
+    checkAffirmativeAnswer({ answer: sanitized, question, evidence, now, comparative: target?.comparative ?? false });
+  if (contradiction) {
+    return { text: UNVERIFIED_ANSWER_MESSAGE, outcome: "verification-contradicted", reason: contradiction };
+  }
+  const dateCheck = checkAnswerDates(sanitized, establishedPeriods(memories, target), now);
+  if (dateCheck.status === "rejected") {
+    return { text: UNVERIFIED_ANSWER_MESSAGE, outcome: "date-rejected", dateCheck };
+  }
+  const relationships = validateRelationships({ answer: sanitized, question, evidence, now, eventEvidence });
+  if (!relationships.ok) {
+    return { text: UNVERIFIED_ANSWER_MESSAGE, outcome: "relationship-rejected", dateCheck, relationships };
+  }
+  if (!isAnswerGroundedInContext(sanitized, contextText, question)) {
+    return { text: UNVERIFIED_ANSWER_MESSAGE, outcome: "grounding-rejected", dateCheck, relationships };
+  }
+  const addendum = eventEvidence ? verificationAddendum(sanitized, eventEvidence, describeQueriedDate(question, now, target), now) : null;
+  return { text: addendum ? `${sanitized} ${addendum}` : sanitized, outcome: "shown", dateCheck, relationships };
 }

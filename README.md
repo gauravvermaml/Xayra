@@ -47,17 +47,23 @@ Every stage of the pipeline below runs on-device. Nothing in it makes a network 
   │ 384-dim vector   │                │  top-K notes
   └─────────────────┘                 ▼
          │                  ┌───────────────────────────┐
-         ▼                  │  <context><note>…</note>  │
-  ┌─────────────────────┐   │  </context>  (XML block)  │
+         ▼                  │  Dated note context        │
+  ┌─────────────────────┐   │  (temporalResolver.ts)     │
   │ sqlite-vec (vec0)   │   └───────────────────────────┘
   │ + FTS5 keyword idx  │                │
   │ on op-sqlite/       │                ▼
   │ SQLCipher storage   │   ┌───────────────────────────┐
   └─────────────────────┘   │   Local Llama GGUF LLM     │  llama.rn (llama.cpp)
-                             │   Instruct-template prompt │  — streamed token-by-token
-                             │   Q4_K_XL quantized        │  — [Note N] citations
+                             │   Instruct-template prompt │  — temperature 0
+                             │   Q4_K_M quantized         │  — [Note N] citations
                              └───────────────────────────┘
-                                          │  streamed answer text
+                                          │  raw answer (never shown)
+                                          ▼
+                             ┌───────────────────────────┐
+                             │  Answer validation         │  dates, relationships,
+                             │  (finalizeAnswer)          │  grounding — or fallback
+                             └───────────────────────────┘
+                                          │  validated answer text
                                           ▼
                              ┌───────────────────────────┐
                              │  Native TTS (expo-speech)  │  — hands-free playback
@@ -74,7 +80,10 @@ Every stage of the pipeline below runs on-device. Nothing in it makes a network 
 Earlier builds (through Build 21) classified every submission automatically via a two-stage regex + Llama micro-prompt router (`services/ai/intentRouter.ts`). As of Build 22, that file — and its Llama-side half, `classifyIntentWithLlama()` in `services/ai/localLlama.ts` — is **deleted**, not just unused. Routing is now 100% deterministic: an explicit `[ Record | Ask ]` pill (floating above the drawer, synced with which drawer segment is showing) is the single source of truth for what a submission does, set only by the user's own tap. `RECORD` always saves a note (SQLite + vector index, zero RAG calls); `ASK` always runs retrieval + generation (zero note writes) — never both, never a guess. This is a deliberate product reversal, not a bug fix: automatic classification traded away the occasional wrong guess on ambiguous input (e.g. "do laundry" vs. "did I do laundry") for convenience; the explicit pill trades that convenience back for the user always knowing exactly what a submission will do before they make it.
 
 ### Vector RAG Storage
-[`@op-engineering/op-sqlite`](https://github.com/OP-Engineering/op-sqlite) (`op-sqlite.sqliteVec: true` / `op-sqlite.fts5: true` in `package.json`) provides an encrypted (SQLCipher) SQLite database with [`sqlite-vec`](https://github.com/asg017/sqlite-vec) compiled in as a `vec0` virtual table alongside an FTS5 virtual table (`db/schema.ts`). `services/notes/noteManager.ts` fuses vector cosine similarity and FTS5 bm25 keyword results via reciprocal rank fusion for hybrid retrieval — the top-K notes are injected into the Llama prompt as an XML `<context>` block, with `[Note N]` citations enforced by the system prompt.
+[`@op-engineering/op-sqlite`](https://github.com/OP-Engineering/op-sqlite) (`op-sqlite.sqliteVec: true` / `op-sqlite.fts5: true` in `package.json`) provides an encrypted (SQLCipher) SQLite database with [`sqlite-vec`](https://github.com/asg017/sqlite-vec) compiled in as a `vec0` virtual table alongside an FTS5 virtual table (`db/schema.ts`). `services/notes/noteManager.ts` fuses vector cosine similarity and FTS5 bm25 keyword results via reciprocal rank fusion for hybrid retrieval — the top notes are injected into the prompt as plain-text `--- NOTE N [Recorded: …] ---` blocks; citations are attached structurally by the UI, not parsed from the answer.
+
+### Answer validation (RAG Grounding v1)
+Questions that name a time ("yesterday", "in 2024", "last week") are resolved deterministically before generation (`services/ai/temporalResolver.ts`): each note's own relative dates are resolved against when it was recorded, notes are ranked for the asked period, and only the relevant sentences — with dates written inline — reach the model. After generation, `finalizeAnswer` (`services/ai/ragFormatting.ts`) checks every answer before it is shown: explicit dates must be ones the notes establish, each statement's amounts/names/dates must be supported by one sentence the model was shown (`services/ai/relationshipGrounding.ts`), a "Yes" must confirm what was actually asked, and the answer's words must be grounded in the context. Anything that fails is replaced with "I found related notes, but couldn't verify an accurate answer from them." — answers are validated, never rewritten. The raw generation is never streamed to the screen; the chat bubble shows an "answering" stage until the validated answer is ready, and text-to-speech reads only that validated answer.
 
 ## High-Performance Infrastructure
 
@@ -209,7 +218,7 @@ npx expo export --platform android     # bundle safety
 
 These two checks validate TypeScript and JS bundling only — they don't prove native code still links. After touching any native dependency, a real native build (`expo prebuild --clean --no-install && expo run:android`) is required; see `CLAUDE.md`.
 
-Then record a voice note or type a note, wait for it to reach "embedded" status, and ask about it — the answer should stream in, cite `[Note N]`, and be read aloud, all without the device touching a network.
+Then record a voice note or type a note, wait for it to reach "embedded" status, and ask about it — the answer should appear once validated, cite `[Note N]`, and be read aloud, all without the device touching a network.
 
 ## Further reading
 

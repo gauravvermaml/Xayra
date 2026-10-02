@@ -33,6 +33,40 @@ this should also accept `ACTION_SEND` for non-text mime types later
 
 Raised 2026-09-24.
 
+### Eval harness double-wraps prompts in a second chat turn (`llama-cli -st`)
+
+`scripts/eval/llamaRunner.ts` runs the desktop `llama-cli` with `-st`. In
+the installed llama.cpp build (winget `ggml.llamacpp`), `llama-cli` is
+conversation-only: it treats the prompt file as a USER MESSAGE and applies
+the model's own chat template around it. But every prompt this app builds
+(`buildPrompt` in ragPrompt.ts, extraction's `buildPrompt`) is already a
+complete ChatML string — so the harness actually sends system/user/
+assistant turns nested inside another user turn. Observed directly
+2026-10-02: the run printed llama-cli's interactive banner and echoed
+`> <|im_start|>system…` before answering.
+
+**Impact**: Tier 2 eval scores (including the 94.2% extraction figure in
+`PROJECT_STATE_HANDOFF.md`) may have been measured on doubly-wrapped
+prompts the app never sends — not necessarily wrong, but not a faithful
+reproduction of on-device input.
+
+**FIXED 2026-10-02 (RC1 — Grounding v1):** the runner now uses
+`llama-completion -no-cnv -bf` — raw completion, prompt read byte-for-byte
+(`-f` turned out to strip the trailing newline every app prompt ends with,
+a second, smaller mismatch). Every eval run first proves the prompt reached
+the model exactly once (`verifyPromptPassedOnce`: tokenizer count ==
+tokens llama.cpp evaluated); the old path fed 28 extra template tokens per
+case. `__tests__/evalHarness-promptOnce.test.ts` pins the argument
+contract. Re-measured on the corrected harness: the fine-tuned model
+scores 93/103 (90.3%) on corpus-full.jsonl with `--no-trigger-gate`, not
+the recorded 94.2% — the gap is not yet attributed between the harness fix
+and extraction-code changes since that baseline. Also found: with the Build
+50 explicit-intent gate on, 82 of corpus-full's 91 extraction notes never
+reach a model (no "remind me"/"make a note" phrase) — the corpus predates
+the gate and needs trigger-bearing variants to measure the current pipeline.
+
+Raised 2026-10-02.
+
 ## Done
 
 ### Record/Ask tray expand-gesture asymmetry (0-50 mild swipe, 50-100 needed a hard drag)

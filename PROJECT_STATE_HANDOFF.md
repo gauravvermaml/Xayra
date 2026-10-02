@@ -2,7 +2,42 @@
 
 *(The app was originally built and shipped internally as "Silent Confidant," then briefly "Remi," before the full rebrand to **Xayra** documented below. Historical sections further down in this file predate the rename and refer to the app by whichever name was current at the time — that's intentional, not an inconsistency to fix; each section is an accurate record of what was true when it was written.)*
 
-**Last updated:** Build 57 (not yet built — see its own section below: fixed an asymmetric drag-commit threshold in the Record/Ask tray's 50%→100% expand gesture). Build 49 (Handsfree cancel-tap latency chain, splash sizing) and Build 48 + the Hybrid Extraction Architecture (fine-tuned model wired in) already shipped together in production 1.0.37; Build 50 through 57 are not yet built or shipped.
+**Last updated:** RC1 — Grounding v1 (release candidate, not yet built — see its own section below: deterministic temporal resolution, relationship-aware answer validation, no unvalidated text on screen; release-candidate freeze in effect). Previously: Build 57 (not yet built — see its own section below: fixed an asymmetric drag-commit threshold in the Record/Ask tray's 50%→100% expand gesture). Build 49 (Handsfree cancel-tap latency chain, splash sizing) and Build 48 + the Hybrid Extraction Architecture (fine-tuned model wired in) already shipped together in production 1.0.37; Build 50 through 57 are not yet built or shipped.
+
+## RC1 — Grounding v1 (release candidate; not yet built)
+
+**Status:** accepted as the RAG Grounding v1 engineering baseline on 2026-10-02 after a Redmi smoke test (7/8 checks PASS; the Varun different-date scenario was not reproducible in the tester's real vault and is covered by automated regressions instead). Target: an Internal Testing AAB installed on Pixel 9 through the existing Play tester link. Production model unchanged (`qwen-task-extractor-q4_k_m.gguf`, fine-tuned Qwen2.5-1.5B). **Release-candidate freeze in effect** — see "Freeze" below.
+
+### Why
+Build 56 gave the RAG pipeline real dates, but two failure classes remained: (1) dates — the model bound a note's facts to the wrong year, and a post-generation "year repair" silently rewrote those claims; (2) relationships — word-overlap grounding passed answers whose words all existed in the notes but in the wrong combination ("The plumber charged $480" from a car-service note; "Eli is moving to Perth" when his brother Elias is).
+
+### Architecture (all deterministic, all on-device, no model calls)
+1. **Temporal resolution before generation** — `services/ai/temporalResolver.ts` (new). Every time expression in a note is resolved against that note's own `createdAt`, every question expression against the query time (chrono-node, with deictic vs anaphoric and direction-ambiguous expressions left unresolved rather than guessed). Notes are ranked for the asked period BEFORE the 3-note context limit (`rankNotesForTarget`, used by `noteManager.getNotesForTarget`); the context shows only the sentences relevant to the asked period (`selectTemporalSentences`, the one rule shared by ranking and rendering), with dates written inline. Event-verification questions ("Did I … yesterday?") get the resolved date written into the question the model sees (`buildGroundedQuestion` — the user's own question stays untouched for retrieval/history) and a three-state evidence classification (`on-queried-date` / `different-date` / `none`).
+2. **Post-generation validation** — `finalizeAnswer` (`ragFormatting.ts`), shared by `rag.ts` and every eval script. It validates and never rewrites a generated claim. Order: no notes → model refusal → unsupported denial (absence of notes is not proof) → "Yes" checks → explicit-year date check (unsupported date ⇒ reject; **the year repair was removed**) → relationship check → word-overlap grounding → verification addendum. Any rejection shows `UNVERIFIED_ANSWER_MESSAGE` and drops citations.
+3. **Relationship grounding** — `services/ai/relationshipGrounding.ts` (new). Each answer statement's values (amounts, numbers, names, dates) must be supported by ONE evidence sentence the model was actually shown (provenance: note id + sentence index), sharing the statement's other terms. Safeguards: the agent of a shared predicate must match (Eli ≠ Elias); a "the notes don't mention X" answer is accepted only when no on-subject sentence holds that kind of value; a "didn't happen" claim needs a negative sentence; amounts bind within conjunction-split segments; invented names are rejected; small number-word and currency grammar (no dictionaries).
+4. **"Yes" checks** — a "Yes" to a dated verification question needs the event on the queried date; a "Yes" to any non-comparative yes/no question must be supported by one non-negated clause with the question's own agent ("Is Eli moving to Perth?" is not confirmed by "Eli's brother Elias is moving"). Unsupported "Yes" answers are rejected, never turned into "No".
+5. **Verification addendum** — when the notes unambiguously date the asked event to another day, deterministic text adds only what the answer is missing (full clarification / just the contrast — "That was the day before yesterday, not yesterday." / just the event date / nothing). It never claims nothing else happened.
+6. **No unvalidated text on screen** — `rag.ts` no longer forwards raw tokens to the chat bubble; the "answering" stage label stays up through generation and validation, and the validated text replaces it in one step. TTS was already final-text-only. Trade-off: no progressive display.
+7. **Diagnostics** — `rag.ts`'s pipeline trace (periods, retrieval reasons, context, raw output, violations, support links) is `__DEV__`-only; private note text never reaches a release build's logs.
+
+Also in this change: the desktop eval harness was fixed to feed prompts byte-for-byte (`llama-completion -no-cnv -bf`, see BACKLOG) and new tools were added — `scripts/eval/runRagComparison.ts` (50-question production-mirroring comparison over `ragComparisonCorpus.ts`), `runTemporalRegression.ts` (the six hot-day questions), `runRelationshipSweep.ts` (replays stored answers through `finalizeAnswer`, no model calls).
+
+### Validation (desktop, production model, temperature 0, repeat penalty 1.0 and 1.15)
+- `npx tsc --noEmit` clean; 398/398 unit tests; Android bundle export OK.
+- Ten temporal regressions: 8 correct; Q2 ("weather in 2024") and Q5 ("two years ago") are model year-binding failures, correctly rejected as `date-rejected` (shown as the fallback, never as a wrong fact).
+- Six relationship regressions (plumber, Eli/Elias, Tokyo dates, hotel, hot weather, Varun): reach the user only as correct answers or the fallback.
+- 132-answer sweep (stored answers, both models, both penalties): 5/114 rubric-correct answers rejected; 12/18 rubric-wrong answers not shown. ~1 ms validation per answer.
+- Redmi smoke test: answering indicator, no transient raw text, validated answer + citations, cancellation, TTS on final text only, rejection fallback without flashing, recovery after cancel/rejection — all PASS.
+
+### Known limitations (documented evaluation limitations, not triggers for another phase)
+- **False rejections (5/114):** F17 (correct two-sentence synthesis — v1 requires single-sentence support); F9 ("Perth, Australia" — no world-knowledge exceptions in v1, by decision); F13 ×2 and U6 (pre-existing word-overlap check, unchanged).
+- **Incomplete / off-topic answers still shown (6):** F19, M1, M2, M4, U6 (fine-tuned), U5 (Qwen3) — completeness and relevance problems, not misattributions.
+- **Model failures caught, not fixed:** Q2/Q5 year binding — the user sees the fallback.
+- **Model refusals map to the fallback** ("I found related notes, but couldn't verify…") rather than "No information found" when notes were retrieved — deliberate (saying nothing was found would be false).
+- **Varun on-device scenario not manually verified** (no matching ground-truth note in the tester's vault); automated coverage only.
+
+### Freeze
+Release-candidate validation is in progress: no new reasoning features, retrieval heuristics, prompt experiments or model changes without an explicitly identified release-blocking failure. Next: versioned RC1 baseline, then held-out model evaluation (Qwen3 is NOT introduced in RC1).
 
 ## Build 57 — Expand-Gesture Commit Threshold Fix (not yet built)
 

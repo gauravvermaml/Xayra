@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,8 +19,8 @@ import {
   CHAT_TEMPLATE_STOP_TOKENS,
   setRagPromptMode,
 } from "../../services/ai/ragPrompt";
-import { formatNoteContext, sanitizeLLMResponse } from "../../services/ai/ragFormatting";
-import { runCompletion } from "./llamaRunner";
+import { buildNoteContext, sanitizeLLMResponse } from "../../services/ai/ragFormatting";
+import { runCompletion, verifyPromptPassedOnce } from "./llamaRunner";
 import { renderReport } from "./report";
 import { aggregate, scoreCase, scoreRagCase, type EvalCase, type CaseScore } from "./scoring";
 
@@ -40,6 +40,14 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, "..", "..");
 
 const DEFAULT_MODEL = join(repoRoot, "models", "qwen2.5-1.5b-instruct-q4_k_m.gguf");
+
+/** Qwen3's own chat template switches reasoning off (enable_thinking=False)
+ * by pre-filling an empty think block after the assistant marker. Only for
+ * evaluating a stock Qwen3 checkpoint via `--no-think`; the app's own model
+ * is Qwen2.5 and never sees this. */
+const QWEN3_NO_THINK_SUFFIX = "<think>\n\n</think>\n\n";
+let noThink = false;
+const finalizePrompt = (prompt: string) => (noThink ? prompt + QWEN3_NO_THINK_SUFFIX : prompt);
 
 async function loadCorpus(path: string): Promise<EvalCase[]> {
   const raw = await readFile(path, "utf8");
@@ -74,12 +82,25 @@ function evalCaseNow(evalCase: EvalCase): Date {
   return new Date(year, month - 1, day, 9, 0);
 }
 
+/**
+ * Evaluation-only: skip the Build 50 explicit-intent gate. Most of
+ * corpus-full.jsonl predates that gate — 82 of its 91 extraction notes carry
+ * no "remind me"/"make a note" phrase, so with the gate on, 56 cases that
+ * expect tasks fail before any model runs and the score measures the gate,
+ * not the model. `--no-trigger-gate` reproduces the pipeline the 94.2%
+ * baseline was measured on, so models can be compared on extraction itself.
+ * Production extraction is unaffected.
+ */
+let triggerGate = true;
+
 function parseAndReconcile(rawOutput: string, evalCase: EvalCase, detectedPhrases: string[]): ExtractedToDo[] | null {
   try {
     const parsed = parseExtractionOutput(rawOutput);
-    // `true`: runCase only reaches this point after containsExtractionTrigger
-    // has already passed, mirroring extractToDosFromText's own call.
-    return normalizeExtracted(parsed, evalCase.today, evalCase.note, detectedPhrases, true, evalCaseNow(evalCase));
+    // Mirrors extractToDosFromText: auto-fill widening only applies when the
+    // note really carries a trigger phrase (always true when the gate is on,
+    // since runCase only reaches here past it; the pre-gate default, false,
+    // for gate-less notes when --no-trigger-gate is used).
+    return normalizeExtracted(parsed, evalCase.today, evalCase.note, detectedPhrases, containsExtractionTrigger(evalCase.note), evalCaseNow(evalCase));
   } catch {
     return null;
   }
@@ -98,10 +119,13 @@ async function runRagCase(evalCase: EvalCase, modelPath: string): Promise<CaseSc
   const contexts = evalCase.contexts ?? [];
   const noteContext =
     contexts.length > 0
-      ? formatNoteContext(contexts.map((c) => ({ content: c.content, transcript: null, createdAt: c.createdAt })))
+      ? buildNoteContext(
+          contexts.map((c) => ({ content: c.content, transcript: null, createdAt: c.createdAt })),
+          null
+        ).contextText
       : "--- NOTE CONTEXT ---\nNo relevant voice notes were found.";
 
-  const prompt = buildRagPrompt(evalCase.query ?? "", noteContext);
+  const prompt = finalizePrompt(buildRagPrompt(evalCase.query ?? "", noteContext));
   const completion = await runCompletion({
     modelPath,
     prompt,
@@ -123,7 +147,7 @@ async function runCase(evalCase: EvalCase, modelPath: string): Promise<CaseScore
   // case with no "remind me"/"make a note" trigger phrase now correctly
   // extracts nothing in the real app, so the harness must score that as the
   // expected `[]` too, not run it through the model anyway.
-  if (!containsExtractionTrigger(evalCase.note)) {
+  if (triggerGate && !containsExtractionTrigger(evalCase.note)) {
     return scoreCase(evalCase, [], "[]", 0, 0);
   }
 
@@ -136,7 +160,7 @@ async function runCase(evalCase: EvalCase, modelPath: string): Promise<CaseScore
   }
 
   const detectedPhrases = detectDatePhrases(evalCase.note, evalCase.today);
-  const prompt = buildPrompt(evalCase.note, evalCase.today, detectedPhrases);
+  const prompt = finalizePrompt(buildPrompt(evalCase.note, evalCase.today, detectedPhrases));
 
   const completion = await runCompletion({
     modelPath,
@@ -174,6 +198,11 @@ async function main(): Promise<void> {
   const filterArg = args.indexOf("--filter");
   const filter = filterArg !== -1 ? args[filterArg + 1] : null;
 
+  noThink = args.includes("--no-think");
+  triggerGate = !args.includes("--no-trigger-gate");
+  const jsonArg = args.indexOf("--json");
+  const jsonPath = jsonArg !== -1 ? args[jsonArg + 1] : null;
+
   if (!existsSync(modelPath)) {
     console.error(`\n  Model not found: ${modelPath}`);
     console.error("  Download it with:");
@@ -193,6 +222,16 @@ async function main(): Promise<void> {
     process.exit(2);
   }
 
+  // Refuse to score anything unless the model provably receives each prompt
+  // exactly once, as built — see verifyPromptPassedOnce. Probed with a real
+  // extraction prompt (and the Qwen3 suffix when --no-think is on), so the
+  // check covers the exact transform every case goes through.
+  const probeNote = "Remind me to call the dentist tomorrow at 10am.";
+  const probeToday = "2026-10-02";
+  const probe = finalizePrompt(buildPrompt(probeNote, probeToday, detectDatePhrases(probeNote, probeToday)));
+  const check = await verifyPromptPassedOnce(modelPath, probe);
+  console.log(`\n  Prompt passed exactly once: ${check.tokenized} tokens built = ${check.evaluated} tokens evaluated`);
+
   process.stdout.write(`\n  Running ${corpus.length} case${corpus.length === 1 ? "" : "s"}`);
 
   const scores: CaseScore[] = [];
@@ -205,8 +244,11 @@ async function main(): Promise<void> {
   process.stdout.write("\n");
 
   const summary = aggregate(scores);
-  const label = `${modelPath.split(/[\\/]/).pop() ?? modelPath}  [prompt: ${promptMode ?? "full"}]`;
+  const label = `${modelPath.split(/[\\/]/).pop() ?? modelPath}  [prompt: ${promptMode ?? "full"}${noThink ? ", no-think" : ""}${triggerGate ? "" : ", no trigger gate"}]`;
   console.log(renderReport(scores, summary, label));
+  if (jsonPath) {
+    await writeFile(jsonPath, JSON.stringify({ label, summary, scores }, null, 2), "utf8");
+  }
 
   // Non-zero exit on any failure so this can gate a commit or CI step.
   process.exit(summary.passed === summary.total ? 0 : 1);

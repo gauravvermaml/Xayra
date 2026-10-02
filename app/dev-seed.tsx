@@ -74,9 +74,9 @@ const ATTRIBUTION_PROBE_NOTE =
   "Eli recommended the book The Overstory. His brother Elias is moving to Perth in January.";
 
 /**
- * Probes the ANNIVERSARY-WINDOW fix in `queryDateRange.ts` plus the
- * extended `normalizeRelativeTimeInNoteText` (today/yesterday/tomorrow AND
- * now last year/this year/this month) — live-requested test scenario, not a
+ * Probes the ANNIVERSARY-WINDOW fix in `queryDateRange.ts` plus
+ * `temporalResolver.ts`'s anchor-aware resolution of the note's own
+ * "today" and "last year" — live-requested test scenario, not a
  * hypothetical. Backdated 11+ months before whenever this is run (a fixed
  * calendar date, not `daysAgo`, since the whole point is landing the note
  * roughly a year before "today" regardless of which day this button is

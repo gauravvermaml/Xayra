@@ -40,13 +40,17 @@ import {
   resolveDateAndTime,
 } from "../services/ai/transformationEngine";
 import {
-  formatNoteContext,
+  buildNoteContext,
   isAnswerGroundedInContext,
-  normalizeRelativeTimeInNoteText,
   sanitizeLLMResponse,
   truncateForContext,
+  type FormattableNote,
 } from "../services/ai/ragFormatting";
+
+/** No question period — the paragraph format every non-date question gets. */
+const formatNoteContext = (notes: FormattableNote[]) => buildNoteContext(notes, null).contextText;
 import { detectQueryDateRange } from "../services/ai/queryDateRange";
+import { resolveQueryTemporalTarget } from "../services/ai/temporalResolver";
 
 const TODAY = "2026-09-20"; // Sunday
 // Used wherever a test exercises the "no date/time info at all" default
@@ -501,59 +505,37 @@ describe("note context formatting", () => {
   });
 });
 
-describe("normalizeRelativeTimeInNoteText", () => {
+describe("inline day-level resolution in note context (no question period)", () => {
   // Local-time construction, not a raw epoch literal — a fixed number of
   // seconds would land on a different LOCAL calendar day depending on the
-  // machine's timezone (exactly the UTC-off-by-one trap this function itself
-  // exists to avoid), making the test flaky across environments.
+  // machine's timezone, making the test flaky across environments.
   const RECORDED_AT = Math.floor(new Date(2026, 8, 20, 12, 0, 0).getTime() / 1000); // Sunday, 20 Sep 2026
+  const body = (text: string) =>
+    formatNoteContext([{ content: text, transcript: null, createdAt: RECORDED_AT }]).split("\n").slice(1).join("\n");
 
   it("converts today/yesterday/tomorrow into the note's own recorded date", () => {
-    expect(normalizeRelativeTimeInNoteText("Today I did some app building.", RECORDED_AT)).toBe(
-      "On Sunday, September 20 2026 I did some app building."
-    );
-    expect(normalizeRelativeTimeInNoteText("I met Vishwa yesterday.", RECORDED_AT)).toBe(
-      "I met Vishwa on Saturday, September 19 2026."
-    );
-    expect(normalizeRelativeTimeInNoteText("I'll call tomorrow.", RECORDED_AT)).toBe(
-      "I'll call on Monday, September 21 2026."
-    );
+    expect(body("Today I did some app building.")).toBe("On Sunday, September 20 2026 I did some app building.");
+    expect(body("I met Vishwa yesterday.")).toBe("I met Vishwa on Saturday, September 19 2026.");
+    expect(body("I'll call tomorrow.")).toBe("I'll call on Monday, September 21 2026.");
+  });
+
+  it("generalizes to any expression the resolver pins to a single day", () => {
+    expect(body("We met two days ago.")).toBe("We met on Friday, September 18 2026.");
+    expect(body("Last night we watched a film.")).toBe("On the night of Saturday, September 19 2026 we watched a film.");
+    expect(body("It has rained since yesterday.")).toBe("It has rained since Saturday, September 19 2026.");
   });
 
   it("leaves text with no relative-time words unchanged", () => {
-    expect(normalizeRelativeTimeInNoteText("Buy milk and eggs.", RECORDED_AT)).toBe("Buy milk and eggs.");
+    expect(body("Buy milk and eggs.")).toBe("Buy milk and eggs.");
   });
 
-  it('annotates "last year"/"this year" with the note\'s own recorded year, WITHOUT replacing the original word', () => {
-    // Deliberately keeps "Last year"/"This year" intact and appends the
-    // resolved value in parentheses, rather than replacing it outright —
-    // see this function's own "ANNOTATE, DON'T REPLACE" doc comment for the
-    // live bug a bare-number replacement caused (two similar-looking bare
-    // years colliding in the same note, which the model then swapped).
-    expect(normalizeRelativeTimeInNoteText("Last year it was better.", RECORDED_AT)).toBe(
-      "Last year (2025) it was better."
-    );
-    expect(normalizeRelativeTimeInNoteText("This year has been busy.", RECORDED_AT)).toBe(
-      "This year (2026) has been busy."
-    );
-  });
-
-  it('annotates "this month" with the note\'s own recorded month and year, without replacing it', () => {
-    expect(normalizeRelativeTimeInNoteText("Unusual for this month.", RECORDED_AT)).toBe(
-      "Unusual for this month (September 2026)."
-    );
-  });
-
-  it("resolves the real end-to-end scenario: a hot-day note's own temporal self-references all become absolute, without colliding bare numbers", () => {
-    const note =
-      "It was a very hot day today perhaps 40degrees +. Quite unusual for this month. " +
-      "Last year same time it was so much better. Glad we had a plunge pool to cool ourselves " +
-      "off, which we didn't have last year.";
-    const result = normalizeRelativeTimeInNoteText(note, RECORDED_AT);
-    expect(result).toContain("on Sunday, September 20 2026");
-    expect(result).toContain("this month (September 2026)");
-    expect(result).toContain("Last year (2025) same time");
-    expect(result).toContain("last year (2025).");
+  it('leaves "last year"/"this year"/"this month" as the user\'s own words', () => {
+    // Replacing them with a bare year, and annotating them "(2024)", both
+    // backfired live — their period is carried by a clause label instead
+    // when the question names a period.
+    expect(body("Last year it was better.")).toBe("Last year it was better.");
+    expect(body("This year has been busy.")).toBe("This year has been busy.");
+    expect(body("Unusual for this month.")).toBe("Unusual for this month.");
   });
 });
 
@@ -598,35 +580,35 @@ describe("isAnswerGroundedInContext", () => {
     expect(isAnswerGroundedInContext("No information found in your notes.", CONTEXT, QUERY)).toBe(true);
   });
 
-  it("passes an answer that echoes the user's OWN question phrasing, even when that phrasing was normalized out of the note context", () => {
+  it("passes an answer that echoes the user's OWN question phrasing, even when that phrasing isn't resolved to an absolute date anywhere in context", () => {
     // Real live bug: "was it this hot LAST YEAR AROUND THE SAME TIME"
     // answered as "it was not this hot last year around the same time" is a
-    // perfectly correct, grounded answer — but normalizeRelativeTimeInNoteText
-    // had already rewritten "last year"/"this month" OUT of the note context
-    // into absolute dates, so those exact words (legitimately reused from
-    // the user's own question) no longer existed anywhere this check was
-    // looking, and a genuinely correct answer was rejected as fabricated.
+    // perfectly correct, grounded answer — but the day-level normalizer
+    // rewrites "today" out of the note context into an absolute date, so
+    // "last year" (legitimately reused from the user's own question) no
+    // longer existed anywhere this check was looking, and a genuinely
+    // correct answer was rejected as fabricated.
     const hotDayContext =
       "--- NOTE 1 [Recorded: Wednesday, 15 Oct 2025 at 12:00] ---\n" +
       "It was a very hot day on Wednesday, October 15 2025, perhaps 40 degrees plus. " +
-      "Quite unusual for in October 2025. In 2024 same time it was so much better.";
+      "Quite unusual for this month. Last year same time it was so much better.";
     const hotDayQuery = "Was it this hot last year around the same time?";
     expect(
       isAnswerGroundedInContext("It was not this hot last year around the same time.", hotDayContext, hotDayQuery)
     ).toBe(true);
   });
 
-  it("integration: the real normalizer output (annotate, not replace) still grounds a correct comparison answer", () => {
-    // Chains the actual normalizeRelativeTimeInNoteText output (not a
-    // hand-built string) into the grounding check, confirming the two
-    // fixes compose correctly under the CURRENT "last year (2024)" format.
+  it("integration: the real labeled context still grounds a correct comparison answer", () => {
+    // Chains the actual buildNoteContext output (not a hand-built string)
+    // into the grounding check, with the question's period resolved the way
+    // rag.ts does it.
     const recordedAt = Math.floor(new Date(2025, 9, 15, 12, 0, 0).getTime() / 1000); // 15 Oct 2025
     const rawNote =
       "It was a very hot day today, perhaps 40 degrees plus. Quite unusual for this month. " +
       "Last year same time it was so much better.";
-    const normalized = normalizeRelativeTimeInNoteText(rawNote, recordedAt);
-    const context = `--- NOTE 1 [Recorded: Wednesday, 15 Oct 2025 at 12:00] ---\n${normalized}`;
     const query = "Was it this hot last year around the same time?";
+    const target = resolveQueryTemporalTarget(query, new Date(2026, 9, 2, 12));
+    const context = buildNoteContext([{ content: rawNote, transcript: null, createdAt: recordedAt }], target).contextText;
     expect(isAnswerGroundedInContext("It was not this hot last year around the same time.", context, query)).toBe(
       true
     );

@@ -1,14 +1,29 @@
 import { generateLocalRAGAnswer } from "./localLlama";
 import { setPipelineStage } from "./pipelineStage";
+import { buildNoteContext, finalizeAnswer, resolveNoteText } from "./ragFormatting";
+import { getNotesForTarget, getRecentNotes, hybridSearchNotes, type HybridSearchResult } from "../notes/noteManager";
 import {
-  formatNoteContext,
-  isAnswerGroundedInContext,
-  resolveNoteText,
-  sanitizeLLMResponse,
-  UNGROUNDED_ANSWER_FALLBACK,
-} from "./ragFormatting";
-import { getNotesInDateRange, getRecentNotes, hybridSearchNotes, type HybridSearchResult } from "../notes/noteManager";
-import { detectQueryDateRange } from "./queryDateRange";
+  buildGroundedQuestion,
+  classifyEventEvidence,
+  detectEventVerification,
+  questionTerms,
+  resolveQueryTemporalTarget,
+} from "./temporalResolver";
+
+/**
+ * Development-only pipeline trace: question, resolved periods, retrieval
+ * decisions, final context, raw model output, validation outcomes. Every
+ * call is behind `__DEV__`, which is false in a release bundle (and the
+ * branch is stripped from it) — this prints private diary text, so it must
+ * never reach a real user's device. Security audit history: an earlier
+ * context log here printed unconditionally, in every build, exposing note
+ * content to anything with logcat access.
+ */
+function trace(label: string, data: unknown): void {
+  if (__DEV__) {
+    console.log(`[RAG_TRACE] ${label}`, typeof data === "string" ? data : JSON.stringify(data));
+  }
+}
 
 // Re-exported so existing importers (and the UI) keep their current import
 // path while the implementation lives in the dependency-free module.
@@ -61,28 +76,63 @@ export type RagAnswer = {
 /**
  * Retrieves the top matching notes via hybrid search (already RRF-ordered),
  * grounds a local on-device LLM completion in them as a plain-text context
- * block, and streams the answer token-by-token through `onChunk` as it's
- * generated. Resolves with the full, sanitized text plus the citation list
- * once generation ends.
+ * block, and resolves with the validated answer text plus the citation list
+ * once generation and every post-generation check have finished.
+ *
+ * `onChunk` is kept for the caller's signature but no longer receives raw
+ * tokens — unvalidated text is never shown (see the generation call below).
  */
 export async function generateRAGAnswer(
   userQuery: string,
   onChunk?: (chunk: string) => void
 ): Promise<RagAnswer> {
   setPipelineStage("chat", "retrieving");
+  trace("question", userQuery);
   // Priority: a real past-date/period reference ("27th September", "October
-  // last year", "last week") beats everything else — see
-  // queryDateRange.ts's own doc comment for why generic semantic/keyword
-  // search is the wrong tool for a question whose actual ask is "what's
-  // timestamped in this window," not "what's topically similar to these
-  // words." Falls through to the existing recency bypass, then to hybrid
-  // search, for queries that name no real date/period at all.
-  const dateRange = detectQueryDateRange(userQuery, new Date());
-  const notes = dateRange
-    ? await getNotesInDateRange(dateRange.start, dateRange.end, CONTEXT_NOTE_LIMIT)
-    : isRecentNotesQuery(userQuery)
-      ? await getRecentNotes(CONTEXT_NOTE_LIMIT)
-      : await hybridSearchNotes(userQuery, CONTEXT_NOTE_LIMIT);
+  // last year", "in 2024", "2025 compared with 2024") beats everything else —
+  // see queryDateRange.ts's own doc comment for why generic semantic/keyword
+  // search is the wrong tool for a question whose actual ask is "what's in
+  // this window," not "what's topically similar to these words." Falls
+  // through to the existing recency bypass, then to hybrid search, for
+  // queries that name no real date/period at all.
+  // One clock for the whole request: the query's own relative words and the
+  // post-generation date check must resolve against the same moment.
+  const now = new Date();
+  const target = resolveQueryTemporalTarget(userQuery, now);
+  // A yes/no question about whether an event happened in the asked period
+  // ("Did I celebrate Varun's birthday yesterday?") also needs evidence of
+  // the event on OTHER dates — see detectEventVerification.
+  const verification = detectEventVerification(userQuery, now, target);
+  const eventTerms = verification?.eventTerms ?? [];
+  const retrievalPath = target ? "temporal" : isRecentNotesQuery(userQuery) ? "recent" : "hybrid";
+  trace("resolved target", { target, retrievalPath, verification });
+  const retrieved =
+    retrievalPath === "temporal" && target
+      ? await getNotesForTarget(target, { question: questionTerms(userQuery, now), event: eventTerms }, CONTEXT_NOTE_LIMIT)
+      : retrievalPath === "recent"
+        ? await getRecentNotes(CONTEXT_NOTE_LIMIT)
+        : await hybridSearchNotes(userQuery, CONTEXT_NOTE_LIMIT);
+
+  // Every relative-time expression in each note is resolved against that
+  // note's own createdAt, and each clause is related to the question's
+  // periods — the model only verbalizes facts the app has already dated (see
+  // temporalResolver.ts). For a temporal question, a note can contribute no
+  // lines at all (everything in it is about another period); it is then
+  // dropped from the citations too.
+  const built = retrieved.length > 0 ? buildNoteContext(retrieved, target, { eventTerms }) : null;
+  const included = built ? built.includedIndices : [];
+  const notes = included.map((i) => retrieved[i]);
+  const memories = built ? included.map((i) => built.memories[i]) : [];
+  trace("notes in context", { retrieved: retrieved.length, included: notes.map((n) => n.id) });
+
+  // What the notes establish about the asked-about event: on the queried
+  // date, on a different date, or nothing at all — the last is not proof
+  // the event didn't happen (finalizeAnswer enforces that).
+  const eventEvidence = verification && target ? classifyEventEvidence(memories, target, eventTerms) : null;
+  // The question as the model sees it. `userQuery` itself stays untouched for
+  // retrieval, chat history and diagnostics.
+  const groundedQuestion = verification ? buildGroundedQuestion(userQuery, now) : userQuery;
+  trace("event evidence", { eventEvidence, groundedQuestion });
 
   const citations: RagCitation[] = notes.map((note, i) => ({
     index: i + 1,
@@ -97,57 +147,51 @@ export async function generateRAGAnswer(
   // "I couldn't find any details..." line instead of inventing something,
   // rather than leaving it to notice an unusual, unlabeled context string.
   const noteContext =
-    notes.length > 0 ? formatNoteContext(notes) : "--- NOTE CONTEXT ---\nNo relevant voice notes were found.";
+    built && notes.length > 0 ? built.contextText : "--- NOTE CONTEXT ---\nNo relevant voice notes were found.";
+  trace("context", noteContext);
 
-  // Security audit finding: this used to log unconditionally, in every
-  // build including release — printing the user's full private note content
-  // to logcat on every single query, where it's exposed to anything with
-  // device-debugging or (on older/rooted devices) READ_LOGS access. Gated
-  // behind `__DEV__` (false and dead in a release JS bundle) so it stays
-  // useful for local development without ever reaching a real user's device.
-  if (__DEV__) {
-    console.log("[RAG Prompt Context]", noteContext);
-  }
-
+  // Raw tokens are deliberately NOT forwarded to `onChunk`: an answer the
+  // checks below reject must never be visible, not even transiently. The
+  // bubble stays empty — so ChatSheetContent.tsx keeps showing the
+  // "answering" stage label — until the validated text replaces it.
   setPipelineStage("chat", "answering");
-  let firstTokenSeen = false;
   try {
-    const rawText = await generateLocalRAGAnswer(userQuery, noteContext, (token) => {
-      if (!firstTokenSeen) {
-        firstTokenSeen = true;
-        // The streaming answer itself takes over from here — see
-        // ChatSheetContent.tsx's own `item.isStreaming && item.text.length
-        // === 0` check, which this same first-token moment already governs.
-        setPipelineStage("chat", null);
-      }
-      onChunk?.(token);
+    const rawText = await generateLocalRAGAnswer(groundedQuestion, noteContext, () => {});
+    trace("raw model output", rawText);
+
+    // Shared with the eval scripts — see finalizeAnswer for the order of
+    // checks (no notes → refusal mapping → unsupported denial → verification
+    // contradiction → date check → relationship check → word grounding →
+    // verification addendum). Grounding is checked against the grounded question, since
+    // that is what the model actually answered; a correct answer echoing the
+    // user's own phrasing was a live bug once, and the inline date the app
+    // itself added is equally not something the model invented. Citations are
+    // cleared on any replacement: chips next to a rejected answer would imply
+    // they back content that was thrown out.
+    const result = finalizeAnswer({
+      raw: rawText,
+      notesIncluded: notes.length,
+      contextText: noteContext,
+      question: groundedQuestion,
+      memories,
+      evidence: built ? built.evidence : [],
+      target,
+      now,
+      eventEvidence,
     });
-    const sanitized = sanitizeLLMResponse(rawText);
-
-    // Grounding backstop — see `isAnswerGroundedInContext`'s own doc comment
-    // for the exact live bug this closes (the minimal-mode few-shot demo
-    // leaking fabricated content into a real answer), and its own note on
-    // why `userQuery` is ALSO passed in (a correct answer echoing the
-    // user's own question phrasing was a second live bug, caught after the
-    // first fix shipped). Only runs when there was real note context to
-    // ground against; `notes.length === 0` already has its own dedicated
-    // "no relevant voice notes" context block above and the model is
-    // separately instructed to refuse on that, so there's nothing
-    // meaningful to check in that case. On failure, citations are cleared
-    // too — showing citation chips next to a rejected, replaced answer
-    // would misleadingly imply they back content that was in fact thrown
-    // out.
-    if (notes.length > 0 && !isAnswerGroundedInContext(sanitized, noteContext, userQuery)) {
-      if (__DEV__) {
-        console.log("[RAG] Rejected ungrounded answer:", sanitized);
-      }
-      return { text: UNGROUNDED_ANSWER_FALLBACK, citations: [] };
-    }
-
-    return { text: sanitized, citations };
+    trace("validation", {
+      outcome: result.outcome,
+      reason: result.reason,
+      dateCheck: result.dateCheck,
+      violations: result.relationships?.violations,
+      support: result.relationships?.support,
+      final: result.text,
+    });
+    const keepCitations = result.outcome === "shown";
+    return { text: result.text, citations: keepCitations ? citations : [] };
   } finally {
-    // Safety net for a zero-token answer or a thrown error, where the
-    // onToken callback above never ran to clear this itself.
+    // Ends the answering stage on every path: a validated answer, a thrown
+    // error, or the user's cancel (LlamaCancelledError).
     setPipelineStage("chat", null);
   }
 }

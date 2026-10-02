@@ -2,6 +2,37 @@
 
 # Xayra — Project Context & Developer Guidelines
 
+## Target hardware (production vs. testing devices)
+
+- **The Redmi Note 8 Pro is strictly a development/testing device. It is NOT the production hardware target.**
+- The intended production release targets **higher-RAM Android devices** — potentially starting with the **Google Pixel 9 generation and newer**, or comparable devices. The exact minimum hardware specification is **not yet finalized**.
+- Architectural implications, applying to every recommendation:
+  1. Do not reject larger models or dual-model architectures solely because of the Redmi's RAM limits.
+  2. Treat Redmi performance as **stress-testing evidence**, not as the production acceptance threshold.
+  3. Evaluate model choices (e.g. Qwen3-1.7B, or separate extraction and chat models) against the intended higher-RAM device class.
+  4. In every recommendation, explicitly separate **testing-device limitations** (Redmi) from **genuine production architecture limitations**.
+
+## RAG Grounding v1 (release-candidate baseline — FROZEN)
+
+Accepted 2026-10-02 as the RC1 engineering baseline. Full write-up, validation numbers and known limitations: `PROJECT_STATE_HANDOFF.md` → "RC1 — Grounding v1".
+
+- **Freeze**: no new reasoning features, retrieval heuristics, prompt experiments or model changes without an explicitly identified **release-blocking** failure. The documented false rejections (F17, F9, F13, U6) and the six incomplete/off-topic answers are evaluation limitations, not triggers for another architecture phase. RC1 keeps the fine-tuned production model; Qwen3 is a later, separate evaluation.
+- **Pipeline**: dates are resolved deterministically BEFORE generation (`temporalResolver.ts`); after generation, `finalizeAnswer` (`ragFormatting.ts`) runs, in order: refusal mapping → unsupported denial → "Yes" checks → explicit-year date check → relationship check (`relationshipGrounding.ts`) → word-overlap grounding → verification addendum.
+- **Invariants — keep these when touching RAG code**:
+  - Validators **validate, never rewrite** a generated claim. An unsupported answer becomes `UNVERIFIED_ANSWER_MESSAGE` with no citations. (The old post-generation year repair was removed on purpose.)
+  - An unsupported "Yes" is rejected, never converted into "No". Absence of notes is never proof that something didn't happen.
+  - Relationship grounding validates against the sentences the model was actually shown (`buildNoteContext(...).evidence`), with note-id + sentence-index provenance, and requires single-sentence support (v1).
+  - Raw generation tokens are **never** shown: `rag.ts` doesn't forward them to `onChunk`; the bubble shows the "answering" stage until the validated text arrives. TTS speaks only the final validated text.
+  - `rag.ts`'s pipeline trace prints private note text, so it stays `__DEV__`-only.
+  - Never rely on the model to validate itself, and don't add large keyword dictionaries.
+  - `rag.ts` and every eval script share `finalizeAnswer`; keep them on the same path.
+- **Regression tools** (desktop llama.cpp, raw completion `-no-cnv -bf`, production model at `models/qwen-task-extractor-q4_k_m.gguf`):
+  ```
+  npx tsx scripts/eval/runTemporalRegression.ts                       # six hot-day questions
+  npx tsx scripts/eval/runRagComparison.ts --config fine-tuned --out <dir>   # 50-question comparison (--ids T7,T8 to subset)
+  npx tsx scripts/eval/runRelationshipSweep.ts <dir with rag-comparison.json> # replay stored answers, no model calls
+  ```
+
 ## Architecture
 
 - **Framework**: React Native via Expo (SDK 57), TypeScript (`strict: true`), Expo Router (file-based routing under `app/`).
@@ -16,7 +47,7 @@
 ## Directory layout
 
 - `app/` — Expo Router screens (`index.tsx` = Notes tab, `chat.tsx` = Chat/RAG tab).
-- `services/ai/` — local-first AI: `localWhisper.ts`, `localEmbeddings.ts`, `tokenizer.ts` (from-scratch BERT WordPiece), `localLlama.ts` (also owns the shared llama.cpp completion priority queue — `"interactive"` RAG answers jump ahead of any not-yet-started `"background"` extraction job — and the disk-persisted prompt-session cache, which restores the static prompt prefix's KV state in ~18ms instead of re-paying a ~14s prefill on every cold start and post-background reload), `rag.ts`, `transformationEngine.ts` (Llama-based To-Do extraction from note text, GBNF-grammar-constrained, with a `chrono-node` pre-pass and a thermal-status check that defers firing while the device reports itself hot — see its own doc comments for the extraction pipeline's history), `modelDownloadManager.ts` (onboarding downloads, retired-model cleanup, and the measured thread-escalation trial — the old adaptive 1B→3B *model* tier ladder was removed in Build 47's single-model cutover), `modelPerformanceTracker.ts` (rolling real-completion-throughput samples the thread-escalation decision reads). (The legacy OpenAI-backed `whisper.ts`/`embeddings.ts` and their `config/env.ts` — unreferenced by any live path and requiring an `EXPO_PUBLIC_`-prefixed key that Metro would have inlined into the client bundle — were deleted as a security cleanup; see git history if that reference implementation is ever needed again.)
+- `services/ai/` — local-first AI: `localWhisper.ts`, `localEmbeddings.ts`, `tokenizer.ts` (from-scratch BERT WordPiece), `localLlama.ts` (also owns the shared llama.cpp completion priority queue — `"interactive"` RAG answers jump ahead of any not-yet-started `"background"` extraction job — and the disk-persisted prompt-session cache, which restores the static prompt prefix's KV state in ~18ms instead of re-paying a ~14s prefill on every cold start and post-background reload), `rag.ts`, `temporalResolver.ts` (deterministic date resolution for questions and notes), `relationshipGrounding.ts` (post-generation check that each answer statement is supported by one evidence sentence the model was shown — validates, never rewrites), `transformationEngine.ts` (Llama-based To-Do extraction from note text, GBNF-grammar-constrained, with a `chrono-node` pre-pass and a thermal-status check that defers firing while the device reports itself hot — see its own doc comments for the extraction pipeline's history), `modelDownloadManager.ts` (onboarding downloads, retired-model cleanup, and the measured thread-escalation trial — the old adaptive 1B→3B *model* tier ladder was removed in Build 47's single-model cutover), `modelPerformanceTracker.ts` (rolling real-completion-throughput samples the thread-escalation decision reads). (The legacy OpenAI-backed `whisper.ts`/`embeddings.ts` and their `config/env.ts` — unreferenced by any live path and requiring an `EXPO_PUBLIC_`-prefixed key that Metro would have inlined into the client bundle — were deleted as a security cleanup; see git history if that reference implementation is ever needed again.)
 - `services/audio/` — recording (`recorder.ts`), playback (`player.ts`), TTS (`tts.ts`), each a single-instance singleton so only one audio source is ever active app-wide.
 - `services/notes/noteManager.ts` — note CRUD and hybrid (vector + FTS5, reciprocal-rank-fusion) search.
 - `services/todos/todoManager.ts` — "Your To-Dos" CRUD, recurrence/interval respawn logic (`completeToDo()`, `computeNextActionDate()`).

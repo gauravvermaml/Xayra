@@ -6,6 +6,8 @@ import type { NoteStatus } from "../../db/schema";
 import { isEmbeddingModelDownloaded } from "../ai/embeddingModel";
 import { generateEmbeddingLocal } from "../ai/localEmbeddings";
 import { logDuration, nowMs } from "../ai/perf";
+import { truncateForContext } from "../ai/ragFormatting";
+import { rankNotesForTarget, type QueryTemporalTarget } from "../ai/temporalResolver";
 import { setPipelineStage } from "../ai/pipelineStage";
 import { extractToDosFromText } from "../ai/transformationEngine";
 import { addToDo } from "../todos/todoManager";
@@ -623,42 +625,56 @@ export async function getRecentNotes(limit: number): Promise<HybridSearchResult[
 }
 
 /**
- * Notes whose own recorded timestamp falls within `[startIso, endIso]`
- * (inclusive, local calendar days), oldest first — a chronological narrative
- * reads more naturally for "what did I do in October" than newest-first
- * would. Reuses `listNotes()` rather than a second raw SQL query, same
- * reasoning as `getRecentNotes` above — this app's own documented scale
- * (tens of notes per user, not thousands, per `FTS_STOPWORDS`'s own doc
- * comment) makes an in-memory filter over the full list perfectly
- * reasonable, and avoids a second row-mapping implementation to keep in
- * sync with this one.
+ * Notes relevant to a temporal question: recorded during an asked period,
+ * recorded at some other time but referring to it ("last year it was so much
+ * better" in an October 2025 note is about 2024), or — for an
+ * event-verification question — describing the asked-about event on any
+ * date. Eligibility and ranking come from temporalResolver.ts's
+ * `rankNotesForTarget`, which resolves each note's own expressions against
+ * its own recording date — createdAt alone missed the second kind entirely
+ * (confirmed live: "How was the weather in 2024?" could never reach a 2025
+ * note describing 2024).
  *
- * Exists for `services/ai/queryDateRange.ts`'s `detectQueryDateRange` —
- * see that file's own doc comment and `rag.ts`'s for the live bug this
- * closes: a chat question naming a specific past date/month/year was being
- * answered via `hybridSearchNotes` below, which can retrieve a note that
- * merely MENTIONS a matching word (a Sept-2026 note saying "due the first
- * week of October") for a question asking about a completely different
- * October (last year's). Real timestamp filtering fixes this by
- * construction, the same way `getRecentNotes` already fixed "latest notes."
+ * Ranked before the limit (question-term overlap, then evidence specificity,
+ * then date), returned in chronological order. Reuses `listNotes()` and
+ * filters in memory, same reasoning as `getRecentNotes` above: this app's
+ * documented scale is tens of notes, not thousands. The resolver runs over
+ * every note per temporal question, so its cost is measured (`[Perf]` below).
  *
- * Local-time day boundaries, not UTC — same discipline
- * `services/calendar/dateRange.ts` documents and follows throughout; a
- * UTC-midnight boundary would silently drop or include notes recorded near
- * either edge of the range depending on the device's timezone.
+ * Why this exists at all, rather than hybrid search: a question naming a
+ * specific past period was being answered via `hybridSearchNotes`, which can
+ * retrieve a note that merely MENTIONS a matching word (a Sept-2026 note
+ * saying "due the first week of October") for a question about a different
+ * October (last year's).
  */
-export async function getNotesInDateRange(startIso: string, endIso: string, limit: number): Promise<HybridSearchResult[]> {
-  const [startYear, startMonth, startDay] = startIso.split("-").map(Number);
-  const [endYear, endMonth, endDay] = endIso.split("-").map(Number);
-  const startEpoch = Math.floor(new Date(startYear, startMonth - 1, startDay, 0, 0, 0).getTime() / 1000);
-  const endEpoch = Math.floor(new Date(endYear, endMonth - 1, endDay, 23, 59, 59).getTime() / 1000);
+export async function getNotesForTarget(
+  target: QueryTemporalTarget,
+  terms: { question: string[]; event: string[] },
+  limit: number
+): Promise<HybridSearchResult[]> {
+  const notes = (await listNotes()).filter((note) => isUsableNoteRow(note));
 
-  const notes = await listNotes();
-  return notes
-    .filter((note) => note.createdAt >= startEpoch && note.createdAt <= endEpoch)
-    .filter((note) => isUsableNoteRow(note))
-    .sort((a, b) => a.createdAt - b.createdAt)
-    .slice(0, limit)
+  // Ranked BEFORE the limit, with the same sentence-selection rule (and the
+  // same truncated text) context construction uses — see
+  // rankNotesForTarget's own doc comment.
+  const resolveStart = nowMs();
+  const selected = rankNotesForTarget(
+    notes.map((note) => ({ note, text: truncateForContext(note.content || note.transcript || ""), createdAt: note.createdAt })),
+    target,
+    terms,
+    limit
+  );
+  logDuration(`Temporal retrieval resolver (${notes.length} notes scanned)`, resolveStart);
+  if (__DEV__) {
+    // Ids, reasons and scores only — never note content (private diary text).
+    console.log("[RAG_TRACE] retrieval decisions", {
+      scanned: notes.length,
+      selected: selected.map(({ note, reason, overlap, specificity }) => ({ id: note.id, reason, overlap, specificity })),
+    });
+  }
+
+  return selected
+    .map(({ note }) => note)
     .map((note) => ({
       id: note.id,
       content: note.content,

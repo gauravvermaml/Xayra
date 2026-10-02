@@ -8,8 +8,8 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 
 /**
- * Thin wrapper around the desktop `llama-cli`, used only by the Tier 2 eval
- * harness. The app itself never touches this — on-device inference goes
+ * Thin wrapper around the desktop llama.cpp tools, used only by the Tier 2
+ * eval harness. The app itself never touches this — on-device inference goes
  * through llama.rn.
  *
  * Running the same GGUF on the desktop is what makes evaluation practical at
@@ -18,28 +18,83 @@ const execFileAsync = promisify(execFile);
  * this is NOT bit-identical to the device — different thread count, different
  * build flags — so it is a tool for comparing prompts against each other, not
  * for predicting on-device latency or reproducing a device result exactly.
+ *
+ * RAW COMPLETION, NOT CHAT MODE. Every prompt this app builds is already a
+ * complete ChatML string. This harness used to run `llama-cli -st`, which in
+ * the installed llama.cpp is conversation-only: it treated the prompt file as
+ * a user message and wrapped it in the model's chat template AGAIN, so every
+ * case was scored on system/user/assistant turns nested inside a second user
+ * turn — input the app never sends (observed 2026-10-02: the run printed the
+ * interactive banner and echoed "> <|im_start|>system…"). `llama-completion
+ * -no-cnv` feeds the prompt byte-for-byte, exactly once, and
+ * `verifyPromptPassedOnce` below checks that on every run.
  */
 
-/** winget adds this to PATH, but only for shells started after the install,
+/** winget adds these to PATH, but only for shells started after the install,
  * so the explicit path is tried first and PATH is the fallback. */
-const WINGET_LLAMA_CLI = join(
+const WINGET_LLAMA_DIR = join(
   process.env.LOCALAPPDATA ?? "",
   "Microsoft",
   "WinGet",
   "Packages",
-  "ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe",
-  "llama-cli.exe"
+  "ggml.llamacpp_Microsoft.Winget.Source_8wekyb3d8bbwe"
 );
 
-export function resolveLlamaCli(): string {
-  if (process.env.LLAMA_CLI && existsSync(process.env.LLAMA_CLI)) {
-    return process.env.LLAMA_CLI;
+function resolveTool(envVar: string, exe: string): string {
+  const fromEnv = process.env[envVar];
+  if (fromEnv && existsSync(fromEnv)) {
+    return fromEnv;
   }
-  if (existsSync(WINGET_LLAMA_CLI)) {
-    return WINGET_LLAMA_CLI;
+  const winget = join(WINGET_LLAMA_DIR, `${exe}.exe`);
+  // Otherwise let execFile resolve it from PATH and surface its own ENOENT.
+  return existsSync(winget) ? winget : exe;
+}
+
+export const resolveLlamaCompletion = () => resolveTool("LLAMA_COMPLETION", "llama-completion");
+export const resolveLlamaTokenize = () => resolveTool("LLAMA_TOKENIZE", "llama-tokenize");
+
+/** Flags that would put llama.cpp into chat/interactive mode, re-applying a
+ * chat template on top of a prompt that already has one. Never passed. */
+export const CHAT_MODE_FLAGS = ["-st", "--single-turn", "-cnv", "--conversation", "-i", "--interactive", "--jinja", "--chat-template"];
+
+export type CompletionArgsInput = {
+  modelPath: string;
+  promptPath: string;
+  contextSize: number;
+  maxTokens: number;
+  stop?: readonly string[];
+  grammarPath?: string;
+  /** Omitted = llama.cpp's default (1.0, off) — what every existing eval ran with. */
+  repeatPenalty?: number;
+};
+
+/** Pure, so the "prompt passed exactly once, in raw mode" contract is
+ * unit-testable without a model (see __tests__/evalHarness-promptOnce.test.ts). */
+export function buildCompletionArgs({ modelPath, promptPath, contextSize, maxTokens, stop, grammarPath, repeatPenalty }: CompletionArgsInput): string[] {
+  const args = [
+    "-m", modelPath,
+    // -bf, not -f: llama.cpp strips one trailing newline from a prompt read
+    // with -f, and every app prompt ends "<|im_start|>assistant\n" — which
+    // llama.rn sends intact. Caught by verifyPromptPassedOnce (72 tokens
+    // built, 71 evaluated). -bf reads the file byte-for-byte.
+    "-bf", promptPath,
+    "-c", String(contextSize),
+    "-n", String(maxTokens),
+    "--temp", "0",
+    "-no-cnv",        // raw completion: no chat template applied on top of ours
+    "--no-warmup",    // the warm-up run would double every case's cost
+    "--no-display-prompt",
+  ];
+  for (const stopString of stop ?? []) {
+    args.push("-r", stopString);
   }
-  // Let execFile resolve it from PATH and surface its own ENOENT if absent.
-  return "llama-cli";
+  if (grammarPath) {
+    args.push("--grammar-file", grammarPath);
+  }
+  if (repeatPenalty !== undefined) {
+    args.push("--repeat-penalty", String(repeatPenalty));
+  }
+  return args;
 }
 
 export type CompletionRequest = {
@@ -56,6 +111,7 @@ export type CompletionRequest = {
   /** Stop strings, for prose (RAG) generation. When set, the output is taken
    * as free text rather than scanned for a JSON array. */
   stop?: readonly string[];
+  repeatPenalty?: number;
 };
 
 export type CompletionResult = {
@@ -98,11 +154,9 @@ function parseOutputTokens(...streams: string[]): number | null {
 /**
  * Pulls the model's actual answer out of llama-cli's stdout.
  *
- * This build wraps generation in an interactive front-end: an ASCII banner, a
- * command list, the echoed prompt (even with `--no-display-prompt`), then the
- * completion, then a throughput line and "Exiting...". Naive prefix-stripping
- * does not survive that, and every case scored as a schema failure until this
- * was replaced.
+ * Raw completion prints only the generated text, but anchoring on the last
+ * balanced array (rather than trusting stdout to be exactly the JSON) stays
+ * robust to llama.cpp's own trailing markers.
  *
  * Grammar-constrained extraction always emits a single JSON array, so the
  * reliable anchor is the LAST balanced `[...]` in the stream. Scanning
@@ -134,79 +188,59 @@ function extractJsonArray(stdout: string): string {
 }
 
 /**
- * Pulls a prose answer out of the interactive front-end's stdout: everything
- * after the echoed prompt's final assistant marker, minus the trailing
- * throughput line and "Exiting...".
+ * A prose answer from raw-completion stdout. With `--no-display-prompt` and
+ * no chat front-end, stdout is the generated text plus llama.cpp's own
+ * "[end of text]" marker — the echoed-prompt and banner parsing the old
+ * `llama-cli -st` path needed (and repeatedly got wrong) no longer applies.
  */
-function extractProse(stdout: string, prompt: string): string {
-  // Anchor on the TAIL of the prompt, not on a turn marker.
-  //
-  // The obvious approach — slice after the last "<|im_start|>assistant" — is
-  // wrong here, and silently so. This build echoes the whole prompt back, the
-  // echo is line-wrapped, and the marker does not survive verbatim. The slice
-  // then failed, the full stdout was returned as the "answer", and every RAG
-  // case was scored against the PROMPT. Because the system prompt quotes the
-  // refusal line inside LAW 1, the refusal detector matched the instruction
-  // text and four correct answers were reported as wrongful refusals.
-  //
-  // The anchor is the prompt's last line of real CONTENT — the note text or
-  // the user's question — taken from the prompt itself so no caller has to
-  // supply it. Template markers and the trailing assistant cue are skipped
-  // because the echo reformats them; a content line survives intact.
-  //
-  // A fixed-length tail slice was tried first and did not work: the echo is
-  // line-wrapped, so the last N characters never matched, the slice silently
-  // returned the whole stdout, and the scorer graded the PROMPT.
-  // Works backwards from the end, keeping lines until one turns up that came
-  // from the prompt. Everything after the echo is the answer, and nothing in
-  // the answer should match a prompt line verbatim.
-  //
-  // Two anchor-based attempts failed before this. A fixed-length tail slice
-  // never matched because the echo is line-wrapped. Anchoring on the prompt's
-  // last content line did not work either: this front-end RENDERS the turn
-  // markers ("<|im_start|>system" prints as "> system"), so the echo is not a
-  // substring of the prompt at all. Both failures were silent — the slice
-  // returned the entire stdout, and because the system prompt quotes the
-  // refusal line inside LAW 1, the scorer read the instruction as the answer
-  // and reported four correct responses as wrongful refusals.
-  const promptLines = new Set(
-    prompt
-      .split(/\r?\n/)
-      .map((line) => line.replace(/<\|[a-zA-Z0-9_]+\|>/g, "").trim())
-      .filter((line) => line.length > 0)
-  );
-
-  const stdoutLines = stdout.split(/\r?\n/).map((line) => line.replace(/<\|[a-zA-Z0-9_]+\|>/g, "").trimEnd());
-
-  const answerLines: string[] = [];
-  for (let i = stdoutLines.length - 1; i >= 0; i--) {
-    const line = stdoutLines[i];
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
-      // Blank lines inside an answer are kept, but a run of them before any
-      // answer text has been seen is just the front-end's spacing.
-      if (answerLines.length > 0) answerLines.unshift(line);
-      continue;
+function extractProse(stdout: string, stop: readonly string[]): string {
+  let text = stdout.replace(/\s*\[end of text\]\s*$/, "");
+  for (const stopString of stop) {
+    if (text.endsWith(stopString)) {
+      text = text.slice(0, -stopString.length);
     }
-    if (trimmed.startsWith("[ Prompt:") || trimmed === "Exiting..." || trimmed.startsWith(">")) {
-      continue;
-    }
-    // The front-end elides long prompts with "... (truncated)", so that line
-    // is not a verbatim prompt line and would otherwise be read as answer
-    // text. It marks the end of the echo just as reliably.
-    if (promptLines.has(trimmed) || trimmed.includes("... (truncated)")) {
-      break;
-    }
-    answerLines.unshift(line);
   }
+  return text.trim();
+}
 
-  let body = answerLines.join("\n");
-  // The front-end appends a throughput line and an exit notice after the
-  // answer; neither is model output.
-  return body
-    .split("[ Prompt:")[0]
-    .replace(/\bExiting\.\.\.\s*$/, "")
-    .trim();
+const PROMPT_EVAL_TOKENS = /prompt eval time\s*=\s*[\d.]+\s*ms\s*\/\s*(\d+)\s*tokens/i;
+const TOKENIZED_COUNT = /Total number of tokens:\s*(\d+)/i;
+
+/**
+ * Proves the model receives `prompt` exactly once, as written: counts its
+ * tokens independently with `llama-tokenize`, then runs a one-token raw
+ * completion over the same file and compares with the prompt-token count
+ * llama.cpp itself reports processing. A chat template applied on top (the
+ * old `llama-cli -st` bug) adds template tokens and fails this; so would a
+ * prompt duplicated or truncated on the way in. Throws on mismatch so a run
+ * can never silently score the wrong input again.
+ */
+export async function verifyPromptPassedOnce(modelPath: string, prompt: string): Promise<{ tokenized: number; evaluated: number }> {
+  const workDir = await mkdtemp(join(tmpdir(), "xayra-eval-check-"));
+  try {
+    const promptPath = join(workDir, "prompt.txt");
+    await writeFile(promptPath, prompt, "utf8");
+    const tokenize = await execFileAsync(resolveLlamaTokenize(), ["-m", modelPath, "-f", promptPath, "--ids", "--show-count", "--log-disable"], {
+      maxBuffer: 32 * 1024 * 1024,
+      windowsHide: true,
+    });
+    const tokenized = Number((tokenize.stdout + tokenize.stderr).match(TOKENIZED_COUNT)?.[1] ?? NaN);
+    const completion = await execFileAsync(
+      resolveLlamaCompletion(),
+      buildCompletionArgs({ modelPath, promptPath, contextSize: 4096, maxTokens: 1 }),
+      { maxBuffer: 32 * 1024 * 1024, windowsHide: true, timeout: 300_000 }
+    );
+    const evaluated = Number(completion.stderr.match(PROMPT_EVAL_TOKENS)?.[1] ?? NaN);
+    if (!Number.isFinite(tokenized) || !Number.isFinite(evaluated) || tokenized !== evaluated) {
+      throw new Error(
+        `Prompt was not passed to the model exactly once: tokenizer counts ${tokenized} tokens, ` +
+          `llama.cpp evaluated ${evaluated}. A chat template or duplicated input is being added.`
+      );
+    }
+    return { tokenized, evaluated };
+  } finally {
+    await rm(workDir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 /**
@@ -233,29 +267,14 @@ export async function runCompletion(request: CompletionRequest): Promise<Complet
     const promptPath = join(workDir, "prompt.txt");
     await writeFile(promptPath, prompt, "utf8");
 
-    const args = [
-      "-m", modelPath,
-      "-f", promptPath,
-      "-c", String(contextSize),
-      "-n", String(maxTokens),
-      "--temp", "0",
-      "-st",            // single turn: generate once, then exit
-      "--no-warmup",    // the warm-up run would double every case's cost
-      "--no-display-prompt",
-      "-v",  // restores the absolute token count in the timing line
-    ];
-
-    for (const stopString of stop ?? []) {
-      args.push("--reverse-prompt", stopString);
-    }
-
+    let grammarPath: string | undefined;
     if (grammar) {
-      const grammarPath = join(workDir, "grammar.gbnf");
+      grammarPath = join(workDir, "grammar.gbnf");
       await writeFile(grammarPath, grammar, "utf8");
-      args.push("--grammar-file", grammarPath);
     }
+    const args = buildCompletionArgs({ modelPath, promptPath, contextSize, maxTokens, stop, grammarPath, repeatPenalty: request.repeatPenalty });
 
-    const { stdout, stderr } = await execFileAsync(resolveLlamaCli(), args, {
+    const { stdout, stderr } = await execFileAsync(resolveLlamaCompletion(), args, {
       timeout: timeoutMs,
       maxBuffer: 32 * 1024 * 1024,
       windowsHide: true,
@@ -264,7 +283,7 @@ export async function runCompletion(request: CompletionRequest): Promise<Complet
     return {
       // Grammar-constrained cases emit a JSON array; prose cases do not, and
       // scanning them for brackets would mangle the answer.
-      text: grammar ? extractJsonArray(stdout) : extractProse(stdout, prompt),
+      text: grammar ? extractJsonArray(stdout) : extractProse(stdout, stop ?? []),
       outputTokens: parseOutputTokens(stdout, stderr),
       durationMs: Date.now() - startedAt,
     };
