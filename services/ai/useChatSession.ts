@@ -5,7 +5,7 @@ import { LLAMA_MODEL_MISSING_ERROR_PREFIX, LlamaCancelledError } from "./localLl
 import { useModelDownload, type ModelDownloadStatus } from "./modelDownloadManager";
 import { generateRAGAnswer, type RagCitation } from "./rag";
 import { isMicInUse } from "../audio/audioInputState";
-import { speakText, stopSpeech } from "../audio/tts";
+import { speakText, speakTextAndWait, stopSpeech } from "../audio/tts";
 import { showToast } from "../../components/Toast";
 
 export type ChatMessage = {
@@ -41,8 +41,19 @@ export type ChatSession = {
    * can't be reused for that: its own speech is fire-and-forget, which
    * would let the mic re-arm mid-sentence and transcribe the assistant's
    * own voice as the next "question" (no echo cancellation exists here). */
-  ask: (text: string) => Promise<{ text: string }>;
+  ask: (text: string) => Promise<{ assistantId: string; text: string }>;
   toggleSpeech: (message: Pick<ChatMessage, "id" | "text">) => void;
+  /** Like `toggleSpeech`'s own "start" branch, but awaits playback actually
+   * finishing (or being stopped) instead of firing-and-forgetting — for a
+   * caller (Active/Handsfree Mode's voice pipeline, via `ask()` above) that
+   * needs to know when speech ends before re-arming the mic, while STILL
+   * keeping `speakingMessageId` correctly in sync so the chat bubble's own
+   * "Listen"/"Stop" button reflects that Xayra is actually talking. Live
+   * bug this fixes: a voice-triggered question's answer used to play back
+   * through a raw `speakTextAndWait()` call in app/index.tsx that never
+   * touched this hook's own speech state at all, so the button stayed
+   * stuck on "Listen" the whole time Xayra was actually speaking. */
+  speakMessageAndWait: (message: Pick<ChatMessage, "id" | "text">) => Promise<void>;
 };
 
 /**
@@ -86,6 +97,19 @@ export function useChatSession(): ChatSession {
     setSpeakingMessageId(message.id);
     const clearIfCurrent = () => setSpeakingMessageId((current) => (current === message.id ? null : current));
     void speakText(message.text, { onDone: clearIfCurrent, onStopped: clearIfCurrent, onError: clearIfCurrent });
+  }, []);
+
+  const speakMessageAndWait = useCallback(async (message: Pick<ChatMessage, "id" | "text">) => {
+    setSpeakingMessageId(message.id);
+    try {
+      await speakTextAndWait(message.text);
+    } finally {
+      // Same "only clear if it's still mine" guard as `playMessageSpeech`'s
+      // `clearIfCurrent` — a newer speech (the user tapping a different
+      // message's "Listen" while this one was still finishing) could have
+      // already moved `speakingMessageId` on by the time this resolves.
+      setSpeakingMessageId((current) => (current === message.id ? null : current));
+    }
   }, []);
 
   const toggleSpeech = useCallback(
@@ -174,20 +198,20 @@ export function useChatSession(): ChatSession {
   );
 
   const ask = useCallback(
-    async (rawText: string): Promise<{ text: string }> => {
+    async (rawText: string): Promise<{ assistantId: string; text: string }> => {
       const query = rawText.trim();
       if (!query || isSendingRef.current || !isModelReady) {
-        return { text: "" };
+        return { assistantId: "", text: "" };
       }
       isSendingRef.current = true;
       void stopSpeech();
       setSpeakingMessageId(null);
       setIsSending(true);
       try {
-        const { text } = await runRagExchange(query);
-        return { text };
+        const { assistantId, text } = await runRagExchange(query);
+        return { assistantId, text };
       } catch {
-        return { text: "" };
+        return { assistantId: "", text: "" };
       } finally {
         isSendingRef.current = false;
         setIsSending(false);
@@ -224,5 +248,15 @@ export function useChatSession(): ChatSession {
     [isModelReady, runRagExchange, playMessageSpeech]
   );
 
-  return { messages, isSending, speakingMessageId, modelDownload, isModelReady, submitQuery, ask, toggleSpeech };
+  return {
+    messages,
+    isSending,
+    speakingMessageId,
+    modelDownload,
+    isModelReady,
+    submitQuery,
+    ask,
+    toggleSpeech,
+    speakMessageAndWait,
+  };
 }

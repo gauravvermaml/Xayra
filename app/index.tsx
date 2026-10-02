@@ -529,7 +529,7 @@ export default function HomeScreen() {
       text: string,
       audioUri: string | null,
       whisperModelId: string | null
-    ): Promise<{ intent: "RECORD" | "ASK"; answerText?: string }> => {
+    ): Promise<{ intent: "RECORD" | "ASK"; answerText?: string; assistantId?: string }> => {
       setProcessingState("processing");
       // ASK auto-peeks to 50% to show the answer card; RECORD snaps back to
       // the resting peek once saved (see routeRecord). Snapped immediately —
@@ -551,8 +551,8 @@ export default function HomeScreen() {
           // re-arms the mic, which `submitQuery`'s own fire-and-forget
           // speech can't provide. This is now the ONLY RAG call for a voice
           // query — see this function's doc comment above.
-          const { text: answerText } = await chatSession.ask(text);
-          return { intent, answerText };
+          const { assistantId, text: answerText } = await chatSession.ask(text);
+          return { intent, answerText, assistantId };
         }
         await chatSession.submitQuery(text, "text");
         return { intent };
@@ -720,22 +720,35 @@ export default function HomeScreen() {
 
       try {
         reportState?.("processing");
-        const { intent, answerText } = await routeFreeformInput(transcript.trim(), audioUri, whisperModelId ?? null);
+        const { intent, answerText, assistantId } = await routeFreeformInput(
+          transcript.trim(),
+          audioUri,
+          whisperModelId ?? null
+        );
 
         reportState?.("speaking");
         if (intent === "RECORD") {
           await speakTextAndWait("Saved.");
-        } else if (answerText) {
-          // Deliberately NOT chatSession's own (fire-and-forget) speech —
-          // Handsfree Mode needs to actually wait for playback to finish
-          // before ActiveModeManager re-arms the mic, or it would transcribe
-          // the assistant's own voice as the next "question" (no echo
-          // cancellation exists here). `routeFreeformInput` already ran the
-          // RAG exchange via `ask()` (no speech side effect of its own) and
-          // handed back the answer text — this is the only speech that
-          // happens, and the only RAG call that happened; see this bug's
-          // full writeup on `routeFreeformInput`'s own doc comment above.
-          await speakTextAndWait(answerText);
+        } else if (answerText && assistantId) {
+          // `chatSession.speakMessageAndWait` — not chatSession's other
+          // (fire-and-forget) speech path, and not a raw `speakTextAndWait`
+          // call either. Handsfree Mode needs to actually wait for playback
+          // to finish before ActiveModeManager re-arms the mic, or it would
+          // transcribe the assistant's own voice as the next "question" (no
+          // echo cancellation exists here) — `routeFreeformInput` already
+          // ran the RAG exchange via `ask()` (no speech side effect of its
+          // own) and handed back the answer text, so this is still the only
+          // speech that happens. But a raw `speakTextAndWait` call here
+          // (the previous version of this code) never touched
+          // `useChatSession`'s own `speakingMessageId` state at all — live
+          // bug: the chat bubble's "Listen"/"Stop" button stayed stuck on
+          // "Listen" for the entire time Xayra was actually talking, since
+          // nothing ever marked that specific message as the one currently
+          // speaking. `speakMessageAndWait` is the awaitable sibling of the
+          // button's own `toggleSpeech`, keeping that state correctly in
+          // sync while still giving Handsfree the same "wait for it to
+          // finish" guarantee a raw call would have.
+          await chatSession.speakMessageAndWait({ id: assistantId, text: answerText });
         }
       } finally {
         isProcessingVoiceQueryRef.current = false;
