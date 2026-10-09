@@ -243,7 +243,12 @@ export function detectDatePhrases(rawText: string, todayISO: string): string[] {
   const seen = new Set<string>();
   const phrases: string[] = [];
   for (const result of results) {
-    const text = result.text.trim();
+    // chrono matches only "Friday" in "coming Friday"; the direction word is
+    // kept so the candidate means what the note said (see COMING_WEEKDAY).
+    const comingPrefix = result.start.isCertain("weekday")
+      ? expanded.slice(0, result.index).match(/(?:this\s+)?coming\s+$/i)?.[0] ?? ""
+      : "";
+    const text = (comingPrefix + result.text).trim();
     const key = text.toLowerCase();
     if (text && !seen.has(key)) {
       seen.add(key);
@@ -251,6 +256,92 @@ export function detectDatePhrases(rawText: string, todayISO: string): string[] {
     }
   }
   return phrases;
+}
+
+/** chrono's own casual time-of-day readings ("in the morning" → 06:00,
+ * "this afternoon" → 15:00, "this evening"/"at night" → 20:00, "tonight" →
+ * 22:00, "noon", "midnight"). chrono marks these hours as *implied*, never
+ * `isCertain("hour")`, so without this check a stated time of day was
+ * silently replaced by the 13:00 default. Read from chrono's own result
+ * tags — no word list of our own. */
+const CASUAL_TIME_OF_DAY_TAG = /^casualReference\/(?:morning|afternoon|evening|tonight|night|noon|midnight)$/;
+
+/** Product default for a broad "morning" ("in the morning", "Friday
+ * morning"): chrono reads it as 06:00, the start of its morning window,
+ * which is too early for a reminder. Exact times ("9am") stay exact. */
+const BROAD_MORNING_REMINDER_TIME = "08:00";
+
+type ChronoResult = ReturnType<typeof chrono.parse>[number];
+
+/** Whether a chrono result states a time of day — a clock time ("9am") or a
+ * casual one ("in the morning"). */
+function statesTimeOfDay(result: ChronoResult): boolean {
+  const component = result.end?.isCertain("hour") ? result.end : result.start;
+  return component.isCertain("hour") || [...result.tags()].some((tag) => CASUAL_TIME_OF_DAY_TAG.test(tag));
+}
+
+/** Whether a chrono result names a day ("Friday", "tomorrow", "30th
+ * October") rather than only a time of day ("morning", "at 9am"). */
+function namesADay(result: ChronoResult): boolean {
+  return result.start.isCertain("day") || result.start.isCertain("weekday") || result.start.isCertain("month");
+}
+
+/** "coming Friday" / "this coming Friday" — Xayra's product rule: the NEXT
+ * future occurrence, a week later when said on that weekday itself. A bare
+ * "Friday" keeps chrono's own reading (today, on a Friday). */
+const COMING_WEEKDAY = /\b(?:this\s+)?coming\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i;
+const WEEKDAY_INDEX: Record<string, number> = {
+  sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6,
+};
+
+type ParsedDatePhrase = {
+  /** chrono's first result — the day (or range) the phrase names. */
+  day: ChronoResult;
+  /** Where the time of day comes from: `day` itself, or a separate
+   * time-only result later in the same phrase — chrono splits "Friday in
+   * the morning" into "Friday" and "morning". */
+  time: ChronoResult;
+  startDate: string;
+  endDate: string | null;
+};
+
+/**
+ * The one reading of a date phrase that both reconciliation and
+ * resolveDateAndTime use. Confirmed on-device (Fri 9 Oct, 17:16): the model
+ * returned "coming Friday in the morning" correctly, but only chrono's FIRST
+ * result ("Friday") was read — "morning" was dropped (13:00 default) and
+ * "Friday" said on a Friday meant today, so the reminder was stored
+ * already in the past.
+ */
+function parseDatePhrase(phrase: string, todayISO: string): ParsedDatePhrase | null {
+  const today = parseIsoDateLocal(todayISO);
+  const expanded = expandWeekdayPlusDayOfMonthPhrases(expandEndOfMonthPhrases(phrase, today), today);
+  const results = chrono.parse(expanded, today, { forwardDate: true });
+  const day = results[0];
+  if (!day) return null;
+  const time =
+    namesADay(day) && !statesTimeOfDay(day)
+      ? results.slice(1).find((r) => !namesADay(r) && statesTimeOfDay(r)) ?? day
+      : day;
+  const start = new Date(day.start.date());
+  const coming = expanded.match(COMING_WEEKDAY);
+  if (
+    coming &&
+    day.start.isCertain("weekday") &&
+    !day.start.isCertain("day") &&
+    day.start.get("weekday") === WEEKDAY_INDEX[coming[1].toLowerCase()] &&
+    formatIsoDate(start) <= todayISO
+  ) {
+    start.setDate(start.getDate() + 7);
+  }
+  return { day, time, startDate: formatIsoDate(start), endDate: day.end ? formatIsoDate(day.end.date()) : null };
+}
+
+/** chrono's reading of one candidate phrase, exactly as resolveDateAndTime
+ * will read it. */
+function readPhrase(phrase: string, todayISO: string): { namesDay: boolean; statesTime: boolean; date: string } | null {
+  const parsed = parseDatePhrase(phrase, todayISO);
+  return parsed ? { namesDay: namesADay(parsed.day), statesTime: statesTimeOfDay(parsed.time), date: parsed.startDate } : null;
 }
 
 /** Matches "every 3 days"/"every 2 weeks"/"every 6 months" — shared between
@@ -510,9 +601,8 @@ export function resolveDateAndTime(
   const today = parseIsoDateLocal(todayISO);
 
   const bareDayMatch = trimmed.match(BARE_DAY_OF_MONTH_PATTERN);
-  const expanded = expandWeekdayPlusDayOfMonthPhrases(expandEndOfMonthPhrases(trimmed, today), today);
-  const results = chrono.parse(expanded, today, { forwardDate: true });
-  const result = results[0];
+  const parsed = parseDatePhrase(trimmed, todayISO);
+  const result = parsed?.day;
 
   // Only treat this as a bare day-of-month if chrono itself finds no
   // parseable date in the phrase — a phrase like "March 3rd" also matches
@@ -533,13 +623,22 @@ export function resolveDateAndTime(
     }
   }
 
-  if (!result) {
+  if (!parsed || !result) {
     return { actionDate: defaultDateTime.actionDate, toDate: null, notificationTime: defaultDateTime.notificationTime };
   }
 
-  const timeComponent = result.end?.isCertain("hour") ? result.end : result.start;
-  const hasExplicitTime = timeComponent.isCertain("hour");
-  const notificationTime = hasExplicitTime ? formatHHMM(timeComponent.date()) : defaultDateTime.notificationTime;
+  // The time may come from a separate time-only result in the same phrase
+  // ("Friday" + "morning") — see parseDatePhrase.
+  const timeResult = parsed.time;
+  const timeComponent = timeResult.end?.isCertain("hour") ? timeResult.end : timeResult.start;
+  // A casual time of day ("Friday in the morning") counts as stated too —
+  // its hour is chrono's own reading of that phrase (see statesTimeOfDay).
+  const hasExplicitTime = statesTimeOfDay(timeResult);
+  const notificationTime = !hasExplicitTime
+    ? defaultDateTime.notificationTime
+    : !timeComponent.isCertain("hour") && [...timeResult.tags()].includes("casualReference/morning")
+      ? BROAD_MORNING_REMINDER_TIME
+      : formatHHMM(timeComponent.date());
   // Only fall through to the (possibly next-day) default action date when
   // there was no explicit time to protect either — a phrase that DID state
   // a real clock time keeps today's date here, same as before this change.
@@ -562,14 +661,14 @@ export function resolveDateAndTime(
   // resolves to 2027, not the past — so a past result here is never a
   // deliberate future date being overridden. Falls back to today, exactly
   // as an unparseable phrase already does above.
-  const startDate = formatIsoDate(result.start.date());
+  const startDate = parsed.startDate;
   if (startDate < todayISO) {
     return { actionDate: noTimeFallbackActionDate, toDate: null, notificationTime };
   }
 
   return {
     actionDate: startDate,
-    toDate: result.end ? formatIsoDate(result.end.date()) : null,
+    toDate: parsed.endDate,
     notificationTime,
   };
 }
@@ -1262,7 +1361,12 @@ function isRecurrence(value: unknown): value is Recurrence {
  * natural shape of a short voice transcript, still qualifies.
  */
 export function isSingleSentence(text: string): boolean {
-  return text.split(/[.!?]+/).filter((part) => part.trim().length > 0).length <= 1;
+  return splitSentences(text).length <= 1;
+}
+
+/** The note's sentences, split the same way isSingleSentence counts them. */
+function splitSentences(text: string): string[] {
+  return text.split(/[.!?]+/).filter((part) => part.trim().length > 0);
 }
 
 // --------------------------------------------------------------------------
@@ -1623,9 +1727,41 @@ export function normalizeExtracted(
         );
         datePhrase = "";
       }
-    } else if (
+    }
+    // A model phrase that is part of one longer chrono candidate is widened
+    // to that candidate: "on 30th October" (model) → "on 30th October at
+    // 9am" (chrono) — confirmed: the model trims the clock time, and the
+    // reminder then fell back to 13:00.
+    if (datePhrase) {
+      const lowerPhrase = datePhrase.toLowerCase();
+      const wider = detectedPhrases.filter((p) => p.length > datePhrase.length && p.toLowerCase().includes(lowerPhrase));
+      if (wider.length === 1) {
+        datePhrase = wider[0];
+      }
+    }
+    // The note said "coming Friday" but the model's phrase dropped the
+    // direction ("Friday in the morning"): restore it, or a Friday note said
+    // on a Friday resolves to today and the reminder lands in the past.
+    const noteComing = rawNoteText.match(COMING_WEEKDAY);
+    if (datePhrase && noteComing && !COMING_WEEKDAY.test(datePhrase)) {
+      const weekday = new RegExp(`\\b${noteComing[1]}\\b`, "i");
+      if (weekday.test(datePhrase)) {
+        datePhrase = datePhrase.replace(weekday, (w) => `coming ${w}`);
+      }
+    }
+    // chrono splits "coming Friday in the morning" into a day ("Friday") and
+    // a separate time-only candidate ("morning"). Counting the time-only one
+    // here used to disable the single-candidate auto-fill below — confirmed
+    // on-device: the model returned "" for the budget-meeting note and the
+    // to-do fell to the no-date default (today). Day-naming candidates are
+    // counted on their own whenever there are any.
+    const readings = detectedPhrases.map((phrase) => ({ phrase, reading: readPhrase(phrase, todayISO) }));
+    const dayCandidates = readings.filter((r) => r.reading?.namesDay).map((r) => r.phrase);
+    const autoFillCandidates = dayCandidates.length > 0 ? dayCandidates : detectedPhrases;
+    if (
+      !datePhrase &&
       validEntries.length === 1 &&
-      detectedPhrases.length === 1 &&
+      autoFillCandidates.length === 1 &&
       recurrence === "none" &&
       (isSingleSentence(rawNoteText) || allowMultiSentenceAutoFill)
     ) {
@@ -1674,7 +1810,28 @@ export function normalizeExtracted(
       // 6:40am. Remind me to arrange the airport pickup." — the one task and
       // the one date candidate are different sentences ON PURPOSE, not by
       // accident).
-      datePhrase = detectedPhrases[0];
+      datePhrase = autoFillCandidates[0];
+    }
+    // A day with no time, plus exactly one time-only candidate in the same
+    // sentence, is one due date/time: "Friday" + "morning" → "Friday
+    // morning". Single-task notes only — with several tasks the time may
+    // belong to another one. Kept only if chrono reads the combination as
+    // the same day with a time of day.
+    if (datePhrase && validEntries.length === 1 && recurrence === "none") {
+      const dayReading = readPhrase(datePhrase, todayISO);
+      if (dayReading?.namesDay && !dayReading.statesTime) {
+        const sentence = splitSentences(rawNoteText).find((s) => s.toLowerCase().includes(datePhrase.toLowerCase()));
+        const timeOnly = readings.filter(
+          (r) => r.reading && !r.reading.namesDay && r.reading.statesTime && sentence?.toLowerCase().includes(r.phrase.toLowerCase())
+        );
+        if (timeOnly.length === 1) {
+          const combined = `${datePhrase} ${timeOnly[0].phrase}`;
+          const combinedReading = readPhrase(combined, todayISO);
+          if (combinedReading?.namesDay && combinedReading.statesTime && combinedReading.date === dayReading.date) {
+            datePhrase = combined;
+          }
+        }
+      }
     }
     // Multi-task, multi-candidate notes are deliberately left alone here —
     // matching the right date to the right task is a genuine semantic

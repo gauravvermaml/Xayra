@@ -399,6 +399,109 @@ describe("reconciliation - empty-date auto-fill", () => {
   });
 });
 
+describe("reconciliation - real-world date/time regressions (RC1, Thursday 8 Oct 2026)", () => {
+  // Exact on-device notes. The model outputs are what the production model
+  // returned for them (desktop replay, temperature 0).
+  const THURSDAY = "2026-10-08";
+  const BUDGET_NOTE = "Make a note for the budget meeting with Priya coming Friday in the morning.";
+  const OSCAR_NOTE = "Make a note for meeting with Oscar on 30th October at 9am.";
+  const extract = (note: string, modelOutput: unknown, now: Date) =>
+    normalizeExtracted(modelOutput, THURSDAY, note, detectDatePhrases(note, THURSDAY), true, now);
+
+  it("chrono splits the budget note into a day and a time-only candidate; the day keeps its 'coming'", () => {
+    expect(detectDatePhrases(BUDGET_NOTE, THURSDAY)).toEqual(["coming Friday", "morning"]);
+  });
+
+  it.each([
+    ["before the 1pm cutoff", new Date(2026, 9, 8, 9, 0)],
+    ["after the 1pm cutoff", new Date(2026, 9, 8, 14, 0)],
+  ])("'coming Friday in the morning' is Friday 9 Oct in the morning, %s", (_label, now) => {
+    const [todo] = extract(BUDGET_NOTE, modelSaid("Make a note"), now);
+    expect(todo.actionDate).toBe("2026-10-09");
+    expect(todo.notificationTime).toBe("08:00");
+  });
+
+  it("a model phrase of just 'Friday' still gets the note's time of day", () => {
+    const [todo] = extract(BUDGET_NOTE, modelSaid("budget meeting with Priya", "Friday"), new Date(2026, 9, 8, 9, 0));
+    expect(todo).toMatchObject({ actionDate: "2026-10-09", notificationTime: "08:00" });
+  });
+
+  it("'on 30th October at 9am' keeps 09:00 when the model trims the time", () => {
+    const [todo] = extract(OSCAR_NOTE, modelSaid("Make a note", "on 30th October"), new Date(2026, 9, 8, 9, 0));
+    expect(todo).toMatchObject({ actionDate: "2026-10-30", notificationTime: "09:00" });
+  });
+
+  it("a broad 'morning' is the 08:00 product default; an exact time stays exact", () => {
+    const now = new Date(2026, 9, 8, 9, 0);
+    expect(resolveDateAndTime("tomorrow morning", THURSDAY, "none", now)).toMatchObject({ actionDate: "2026-10-09", notificationTime: "08:00" });
+    expect(resolveDateAndTime("tomorrow at 7am", THURSDAY, "none", now)).toMatchObject({ actionDate: "2026-10-09", notificationTime: "07:00" });
+  });
+
+  describe("'coming <weekday>' — the next future occurrence (Fri 9 Oct 2026, 17:16 on-device report)", () => {
+    const FRIDAY = "2026-10-09";
+    const FRIDAY_EVENING = new Date(2026, 9, 9, 17, 16);
+    const THURSDAY_MORNING = new Date(2026, 9, 8, 9, 0);
+
+    it("Thursday + 'coming Friday morning' → the next day, 08:00", () => {
+      expect(resolveDateAndTime("coming Friday morning", THURSDAY, "none", THURSDAY_MORNING)).toMatchObject({ actionDate: "2026-10-09", notificationTime: "08:00" });
+    });
+
+    it("Friday + 'coming Friday morning' → the following Friday, 08:00", () => {
+      expect(resolveDateAndTime("coming Friday morning", FRIDAY, "none", FRIDAY_EVENING)).toMatchObject({ actionDate: "2026-10-16", notificationTime: "08:00" });
+    });
+
+    it("Friday + 'this coming Friday morning' → the following Friday, 08:00", () => {
+      expect(resolveDateAndTime("this coming Friday morning", FRIDAY, "none", FRIDAY_EVENING)).toMatchObject({ actionDate: "2026-10-16", notificationTime: "08:00" });
+    });
+
+    it("a bare 'Friday at 7pm' keeps the existing bare-weekday behaviour", () => {
+      expect(resolveDateAndTime("Friday at 7pm", FRIDAY, "none", new Date(2026, 9, 9, 9, 0))).toMatchObject({ actionDate: FRIDAY, notificationTime: "19:00" });
+      expect(resolveDateAndTime("Friday at 7pm", THURSDAY, "none", THURSDAY_MORNING)).toMatchObject({ actionDate: "2026-10-09", notificationTime: "19:00" });
+    });
+
+    it("'30th October at 9am' remains 09:00", () => {
+      expect(resolveDateAndTime("on 30th October at 9am", FRIDAY, "none", FRIDAY_EVENING)).toMatchObject({ actionDate: "2026-10-30", notificationTime: "09:00" });
+    });
+
+    // The exact on-device note, whichever phrase the model returns.
+    const PRIYA_NOTE = "Remind me of Priya's meeting coming Friday in the morning.";
+    it.each([
+      ["the full phrase (what the model actually returned)", "coming Friday in the morning"],
+      ["a phrase that dropped 'coming'", "Friday in the morning"],
+      ["no phrase at all", ""],
+    ])("the real Priya note is Fri 16 Oct 08:00, never a past default — model gave %s", (_label, phrase) => {
+      const [todo] = normalizeExtracted(modelSaid("Remind Priya of their meeting", phrase), FRIDAY, PRIYA_NOTE, detectDatePhrases(PRIYA_NOTE, FRIDAY), true, FRIDAY_EVENING);
+      expect(todo).toMatchObject({ actionDate: "2026-10-16", notificationTime: "08:00" });
+    });
+  });
+
+  it("a lone time-only candidate still auto-fills, unchanged", () => {
+    const note = "Remind me to call Mum this evening.";
+    expect(detectDatePhrases(note, THURSDAY)).toEqual(["this evening"]);
+    const [todo] = extract(note, modelSaid("Call Mum"), new Date(2026, 9, 8, 15, 0));
+    expect(todo).toMatchObject({ actionDate: THURSDAY, notificationTime: "20:00" });
+  });
+
+  it("never attaches a time to a day in a different sentence", () => {
+    const note = "Remind me to call the plumber on Friday. The kids are home in the morning.";
+    const [todo] = extract(note, modelSaid("Call the plumber", "on Friday"), new Date(2026, 9, 8, 9, 0));
+    expect(todo).toMatchObject({ actionDate: "2026-10-09", notificationTime: "13:00" });
+  });
+
+  it("leaves multi-task notes to the model — a time may belong to another task", () => {
+    const note = "Remind me to call Bob on Friday and email Sue in the morning.";
+    const todos = extract(
+      note,
+      [
+        { task: "Call Bob", date_phrase: "on Friday", recurrence: "none" },
+        { task: "Email Sue", date_phrase: "", recurrence: "none" },
+      ],
+      new Date(2026, 9, 8, 9, 0)
+    );
+    expect(todos[0]).toMatchObject({ actionDate: "2026-10-09", notificationTime: "13:00" });
+  });
+});
+
 describe("extraction trigger phrase gating", () => {
   it.each([
     "Remind me to call the plumber tomorrow.",
@@ -893,7 +996,7 @@ describe("preFilterZeroTaskNotes", () => {
     "My sister is moving house at the end of the month.",
     "The cleaner comes every second Friday.",
     "A courier is delivering the parcel tomorrow afternoon.",
-    "The neighbours are having their driveway resurfaced.",
+    "The neighbours are having their fence resurfaced.",
     "The council is collecting green waste next week.",
     "My colleague is presenting at the conference in March.",
     "The gas company is reading the meter on Friday.",
