@@ -23,6 +23,8 @@ Contents:
 
 Validation: `tsc --noEmit` clean; 549 unit tests in 36 suites; Android export bundles.
 
+Build: EAS production build `1ac9a9df-0f02-40a3-9c63-942d4c599872` (1.0.40 / 48, from `9d24be5`), finished 2026-10-10; AAB ≈ 257 MB, uploaded manually to Google Play Internal Testing.
+
 ## One-tap voice auto-finish (shipped in 1.0.40)
 
 Validated on **Xayra Dev** (the Play build and its vault untouched): Ask/Record auto-finish, thinking pauses, manual finish, the habitual second tap, frozen intent, Cancel and its feedback, a noisy room.
