@@ -47,6 +47,7 @@ import {
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakTextAndWait } from "../services/audio/tts";
 import { playWakeChime } from "../services/audio/wakeChime";
+import { cleanupOrphanRecordings } from "../services/audio/recordingCleanup";
 import { isAudioTooShort } from "../services/audio/wav";
 import {
   countNotes,
@@ -55,6 +56,7 @@ import {
   deleteNote,
   EmptyRecordingError,
   isSilentTranscript,
+  listNoteAudioUris,
   listNotes,
   retryPendingEmbeddings,
   retryPendingExtractions,
@@ -185,6 +187,9 @@ const CENTER_AREA_BREATHING_ROOM_PX = 40;
  * and exactly one recording pipeline, shared by manual taps and Handsfree
  * Mode.
  */
+/** Orphan-recording cleanup runs once per app process (see the focus effect). */
+let didCleanupRecordingsThisLaunch = false;
+
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -443,6 +448,13 @@ export default function HomeScreen() {
     useCallback(() => {
       void retryPendingEmbeddings();
       void retryPendingExtractions();
+      // Once per app launch, after the vault is open: removes recordings a
+      // killed process left behind (never audio a note still links to) —
+      // see services/audio/recordingCleanup.ts.
+      if (!didCleanupRecordingsThisLaunch) {
+        didCleanupRecordingsThisLaunch = true;
+        void cleanupOrphanRecordings(listNoteAudioUris).catch(() => {});
+      }
       // Quick-menu "Archived notes (N)" label — count only, silent on
       // failure like the recovery passes above (not worth surfacing an
       // error for a label refresh).
@@ -608,7 +620,7 @@ export default function HomeScreen() {
       options?: { isHandsfree?: boolean }
     ) => {
       // TEXT-ONLY STORAGE (enforced, no exceptions): this raw WAV
-      // (services/audio/recorder.ts, written to documentDirectory/recordings/)
+      // (services/audio/recorder.ts, written to the cache folder's recordings/)
       // is ALWAYS deleted once this function is done with it, regardless of
       // outcome — a RECORD intent no longer keeps its audio around for
       // in-app playback (services/notes/noteManager.ts's `createVoiceNote`
@@ -875,7 +887,12 @@ export default function HomeScreen() {
   useFocusEffect(
     useCallback(() => {
       return () => {
-        void recorderStopRef.current();
+        // An abandoned recording is never transcribed, so its WAV is
+        // deleted here — it used to be left behind permanently.
+        void recorderStopRef
+          .current()
+          .then((uri) => (uri ? FileSystem.deleteAsync(uri, { idempotent: true }) : undefined))
+          .catch(() => {});
       };
     }, [])
   );

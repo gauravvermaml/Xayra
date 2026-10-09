@@ -464,6 +464,14 @@ export async function updateNoteText(noteId: string, text: string): Promise<void
   }
 }
 
+/** Every audio file a note still links to (notes saved before text-only
+ * storage) — what launch cleanup must never delete. */
+export async function listNoteAudioUris(): Promise<string[]> {
+  const db = await getRawDatabase();
+  const result = await db.execute("SELECT audio_uri FROM notes WHERE audio_uri IS NOT NULL");
+  return result.rows.map((row) => String(row.audio_uri));
+}
+
 export async function deleteNote(noteId: string): Promise<void> {
   const db = await getRawDatabase();
   const ftsAvailable = await isFtsAvailable();

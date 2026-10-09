@@ -13,7 +13,19 @@ export const SAMPLE_RATE = 16000;
 export const CHANNELS = 1;
 export const BITS_PER_SAMPLE = 16;
 
-export const RECORDINGS_DIR = `${FileSystem.documentDirectory}recordings/`;
+/**
+ * Input audio is temporary: a WAV exists only until it is transcribed (the
+ * durable artefact is the text note), so recordings live in the app's CACHE
+ * area, never durable document storage. Deleted after transcription, on an
+ * abandoned recording, and — defensively — at launch
+ * (services/audio/recordingCleanup.ts).
+ */
+export const RECORDINGS_DIR = `${FileSystem.cacheDirectory}recordings/`;
+
+/** Where recordings were written before they moved to the cache. Notes
+ * saved before text-only storage may still link to audio here (and show a
+ * player); only UNLINKED files are ever cleaned from it. */
+export const LEGACY_RECORDINGS_DIR = `${FileSystem.documentDirectory}recordings/`;
 
 export function buildWavHeader(dataSize: number): Uint8Array {
   const header = new ArrayBuffer(44);
