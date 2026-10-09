@@ -8,6 +8,18 @@ if there's nothing worth keeping) when it ships.
 
 ## Open
 
+### Tray scrolling at 50% — reported, NOT reproduced (2026-10-09)
+Reported: light vertical drags in the Record/Ask tray at 50% sometimes moved the tray instead of scrolling. A dev-only diagnostic (logging, at each content-drag start, the sheet state, scrollable lock status, position vs detent and keyboard state from `useBottomSheetInternal()`) showed all 21 observed drags with the sheet EXTENDED and scrolling UNLOCKED, and the list did scroll. Reopen only with evidence: re-add that logging in `useExpandOverdragGestureHandlers.ts`'s `handleOnStart` (use a module-level JS function with `runOnJS` — Worklets rejects `runOnJS(console.log)`), reproduce on Xayra Dev, read the failing drag's line.
+
+### Restore doesn't update an older local copy of an edited note
+Backup now carries edits (newer-edit-wins), but `restoreFromDrive` only INSERTs missing notes — a device that already holds an older copy keeps it. Would need a restore-side newer-wins update plus re-embedding.
+
+### Explicit storage cleanup for legacy linked audio
+Historical notes saved before text-only storage may still link to WAVs in `documentDirectory/recordings/` (kept on purpose). Offer an explicit, user-confirmed "remove old recordings" option later.
+
+### Grounding: same-note combination distortions
+Note-level coverage allows combining sentences of one note, so an answer can misrelate them (e.g. "on his way back from painting the fence" fusing two sentences). Sentence-level coverage was measured and rejected 9 correct answers; a fix needs relationship-of-phrase checking — new grounding work.
+
 ### Share-to-Xayra from other apps (Android share sheet)
 
 Let a user share text from any other app (Google Notes, browser, etc. —
