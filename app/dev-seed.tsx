@@ -11,7 +11,9 @@ import { createTextNote, listNotes } from "../services/notes/noteManager";
  * DEV-ONLY note seeder, for evaluating RAG answer quality against a
  * realistic corpus.
  *
- * Reachable at `xayra://dev-seed` (or /dev-seed in the router) and inert
+ * Reachable at `xayra://dev-seed` (`xayra-dev://dev-seed` in the
+ * APP_VARIANT=development build — see app.config.js), or /dev-seed in the
+ * router, and inert
  * unless `__DEV__` — a production build renders the disabled notice and can
  * never write anything. Not part of any navigation flow; nothing links here.
  *
@@ -61,7 +63,7 @@ const SEED_NOTES: SeedNote[] = [
   { daysAgo: 11, text: "File the tax returns 7 days before the end of September this year." },
   { daysAgo: 14, text: "Pay the strata levy, 1240 dollars, due the first week of October." },
   { daysAgo: 16, text: "Coffee with Marcus about the contract renewal. He wants a decision by mid October." },
-  { daysAgo: 20, text: "Replace the kitchen tap washer. Bunnings has the 15mm ones." },
+  { daysAgo: 20, text: "Replace the kitchen tap washer. Penrith Hardware has the 15mm ones." },
   { daysAgo: 22, text: "Gym membership renews automatically on the 5th of each month. Cancel it if I stop going." },
   { daysAgo: 25, text: "Anita is allergic to shellfish. Remember that for the dinner booking." },
 ];
@@ -101,6 +103,35 @@ function hotDayProbeTimestamp(): number {
   const target = new Date(now.getFullYear() - 1, 9, 15, 12, 0, 0); // month 9 = October
   return Math.floor(target.getTime() / 1000);
 }
+
+/**
+ * Two real notes from RC1 field testing, verbatim, with their original
+ * recorded times — for validating Grounding v1 on-device against the exact
+ * evidence that failed, without touching a real vault:
+ *  - Theo: "When did Theo pick the vaccum from me?" must be answerable from the
+ *    recording date; "What did Theo pick from me?" is the vacuum, not the
+ *    roller from the Penrith Hardware sentence.
+ *  - Marco: records information ABOUT Marco, never a conversation —
+ *    "When did I speak to Marco?" must refuse, with this note under
+ *    Related notes.
+ */
+const FIELD_REPORT_NOTES: { label: string; text: string; recordedAt: Date }[] = [
+  {
+    label: "Theo",
+    text:
+      "Theo just came by to pick the vacuum. He is painting the fence so went to Penrith Hardware to pick a roller. " +
+      "On the way back, he stopped by",
+    recordedAt: new Date(2026, 9, 7, 21, 32), // 7 Oct 2026, 9:32 pm
+  },
+  {
+    label: "Marco",
+    text:
+      "Marco was away for 3 weeks while he moved house. He moved from Kingsford to Mascot into a house that has a garden studio. " +
+      "He has just approved a tenant for it, a young couple. He is sorting out their internet connection. He returned to work today. " +
+      "Good to have him back. He keeps things calm at work.",
+    recordedAt: new Date(2026, 9, 6, 13, 8), // 6 Oct 2026, 1:08 pm
+  },
+];
 
 export default function DevSeedScreen() {
   const router = useRouter();
@@ -174,6 +205,25 @@ export default function DevSeedScreen() {
     }
   }, [append]);
 
+  const handleFieldReportNotes = useCallback(async () => {
+    setBusy(true);
+    setLog([]);
+    try {
+      const db = await getRawDatabase();
+      for (const { label, text, recordedAt } of FIELD_REPORT_NOTES) {
+        const note = await createTextNote(text);
+        await db.execute("UPDATE notes SET created_at = ? WHERE id = ?", [Math.floor(recordedAt.getTime() / 1000), note.id]);
+        append(`Added ${label} note, recorded ${recordedAt.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}.`);
+      }
+      append('Try: "When did Theo pick the vaccum from me?" and "What did Theo pick from me?"');
+      append('Try: "When did I speak to Marco?" — must refuse, with the Marco note under Related notes.');
+    } catch (err) {
+      append(`FAILED: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  }, [append]);
+
   const handleSeed = useCallback(async () => {
     setBusy(true);
     setLog([]);
@@ -238,6 +288,10 @@ export default function DevSeedScreen() {
 
       <Pressable accessibilityRole="button" onPress={handleHotDayProbe} disabled={busy} style={styles.secondaryButton}>
         <Text style={styles.secondaryLabel}>Add hot-day note (backdated ~1 year, anniversary probe)</Text>
+      </Pressable>
+
+      <Pressable accessibilityRole="button" onPress={handleFieldReportNotes} disabled={busy} style={styles.secondaryButton}>
+        <Text style={styles.secondaryLabel}>Add Theo + Marco field-report notes (original dates)</Text>
       </Pressable>
 
       <Pressable accessibilityRole="button" onPress={goHome} disabled={busy} style={styles.secondaryButton}>
