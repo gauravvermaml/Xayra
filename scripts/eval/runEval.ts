@@ -125,7 +125,7 @@ async function runRagCase(evalCase: EvalCase, modelPath: string): Promise<CaseSc
         ).contextText
       : "--- NOTE CONTEXT ---\nNo relevant voice notes were found.";
 
-  const prompt = finalizePrompt(buildRagPrompt(evalCase.query ?? "", noteContext));
+  const prompt = finalizePrompt(buildRagPrompt(evalCase.query ?? "", noteContext, evalCaseNow(evalCase)));
   const completion = await runCompletion({
     modelPath,
     prompt,

@@ -171,7 +171,7 @@ async function main() {
       const rows: Row[] = [];
       for (const c of cases) {
         const r = retrieve(c);
-        const prompt = buildPrompt(r.groundedQuestion, r.context) + (cfg.noThink ? "<think>\n\n</think>\n\n" : "");
+        const prompt = buildPrompt(r.groundedQuestion, r.context, NOW) + (cfg.noThink ? "<think>\n\n</think>\n\n" : "");
         const gen = await runCompletion({ modelPath: cfg.model, prompt, contextSize: 4096, maxTokens: 256, stop: CHAT_TEMPLATE_STOP_TOKENS, repeatPenalty: penalty });
         const raw = gen.text.replace(/^<think>[\s\S]*?<\/think>\s*/, "").trim();
         const refused = isKnownRefusal(raw) || REFUSAL.test(raw);

@@ -139,7 +139,7 @@ async function main() {
       console.log(`\n======== ${question}`);
       console.log(`target: ${JSON.stringify(target)}   selected: ${JSON.stringify(ranked.map((r) => r.reason))}${verification ? `   grounded question: ${groundedQuestion}` : ""}`);
       console.log(contextText.split("\n").map((l) => `  | ${l}`).join("\n"));
-      const prompt = buildPrompt(groundedQuestion, contextText) + (NO_THINK ? "<think>\n\n</think>\n\n" : "");
+      const prompt = buildPrompt(groundedQuestion, contextText, NOW) + (NO_THINK ? "<think>\n\n</think>\n\n" : "");
       for (const penalty of ["1.0", "1.15"]) {
         const g = await generate(prompt, penalty, dir);
         const { text: final, outcome } = finalizeAnswer({

@@ -194,8 +194,7 @@ export function buildCalendarBaseline(now: Date): string {
  * date. Without this, the model has no way to resolve relative-time
  * questions ("last Monday", "yesterday", "this month") and hallucinates one.
  */
-export function buildSystemPromptWithDate(): string {
-  const now = new Date();
+export function buildSystemPromptWithDate(now: Date = new Date()): string {
   const today = now.toLocaleDateString("en-US", {
     weekday: "long",
     year: "numeric",
@@ -257,8 +256,16 @@ export const QWEN_IM_END = "<|im_end|>";
  */
 export const CHAT_TEMPLATE_STOP_TOKENS = [QWEN_IM_END, "<|endoftext|>"];
 
-export function buildPrompt(userQuery: string, noteContext: string): string {
-  const systemPrompt = buildSystemPromptWithDate();
+/**
+ * `now` is for evaluation scripts only: an eval pins its clock, and the
+ * prompt's "Today is …" line must use that same clock. Mixing the real
+ * system date with a pinned one made a desktop eval tell the model "Today is
+ * Thursday, October 8" while the question said "yesterday (Thursday,
+ * October 1)" — and the model answered with the wrong day. Production
+ * callers omit it and get the real date, byte-identically.
+ */
+export function buildPrompt(userQuery: string, noteContext: string, now: Date = new Date()): string {
+  const systemPrompt = buildSystemPromptWithDate(now);
 
   // A fine-tuned model holds the answer FORMAT in its weights, so replaying
   // FEW_SHOT_ANSWER's bullets-and-structure example would spend prefill
