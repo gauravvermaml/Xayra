@@ -7,8 +7,18 @@ import AudioRecord from "@fugood/react-native-audio-pcm-stream";
 import { logDuration, nowMs } from "../ai/perf";
 import { isMicInUse, setMicInUse } from "./audioInputState";
 import { pausePlayback } from "./player";
+import { TrailingSilenceDetector } from "./silenceDetector";
 import { stopSpeech } from "./tts";
 import { BITS_PER_SAMPLE, CHANNELS, SAMPLE_RATE, computeRms, writePcmChunksAsWav } from "./wav";
+
+export type StartRecordingOptions = {
+  /** Finish automatically once speech has been heard and then followed by
+   * this much trailing silence. Omitted = finish only on a manual stop. */
+  autoStopAfterSilenceMs?: number;
+  /** Called at most once per recording, when that trailing silence is
+   * reached. The recorder keeps recording; the caller decides to stop. */
+  onAutoStop?: () => void;
+};
 
 export type VoiceRecorder = {
   isRecording: boolean;
@@ -20,7 +30,7 @@ export type VoiceRecorder = {
    * animates off of, not a canned/synthetic pulse. */
   amplitude: number;
   requestPermissions: () => Promise<boolean>;
-  startRecording: () => Promise<void>;
+  startRecording: (options?: StartRecordingOptions) => Promise<void>;
   stopRecording: () => Promise<string | null>;
 };
 
@@ -31,6 +41,8 @@ export type VoiceRecorder = {
  * the tail end of the recording.
  */
 const STOP_DRAIN_MS = 200;
+/** How often the auto-stop check runs — same cadence as Handsfree's. */
+const SILENCE_POLL_INTERVAL_MS = 200;
 
 /**
  * Wraps @fugood/react-native-audio-pcm-stream with the lifecycle shape this
@@ -47,8 +59,19 @@ export function useVoiceRecorder(): VoiceRecorder {
   const chunksRef = useRef<Buffer[]>([]);
   const subscriptionRef = useRef<{ remove: () => void } | null>(null);
   const errorSubscriptionRef = useRef<{ remove: () => void } | null>(null);
+  // Kept in step with `isRecording` synchronously (not on render), so a
+  // stop requested from the auto-stop timer and one from a tap in the same
+  // moment can't both get through.
   const isRecordingRef = useRef(false);
-  isRecordingRef.current = isRecording;
+  const autoStopTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const clearAutoStop = useCallback(() => {
+    if (autoStopTimerRef.current) {
+      clearInterval(autoStopTimerRef.current);
+      autoStopTimerRef.current = null;
+    }
+  }, []);
+  useEffect(() => clearAutoStop, [clearAutoStop]);
 
   /**
    * Build 42 P1-4 fix: recording has no real backgrounding resilience (no
@@ -84,7 +107,7 @@ export function useVoiceRecorder(): VoiceRecorder {
     }
   }, []);
 
-  const startRecording = useCallback(async () => {
+  const startRecording = useCallback(async (options?: StartRecordingOptions) => {
     if (isBusyRef.current) {
       return;
     }
@@ -126,6 +149,15 @@ export function useVoiceRecorder(): VoiceRecorder {
       subscriptionRef.current?.remove();
       errorSubscriptionRef.current?.remove();
 
+      // Auto-finish uses the same adaptive speech / trailing-silence
+      // detector as Handsfree (silenceDetector.ts). It never fires before
+      // speech has been heard, and there is no maximum length — a manual
+      // tap can always finish.
+      clearAutoStop();
+      const autoStopMs = options?.autoStopAfterSilenceMs;
+      const detector = autoStopMs ? new TrailingSilenceDetector({ trailingSilenceMs: autoStopMs }) : null;
+      detector?.reset(Date.now());
+
       AudioRecord.init({
         sampleRate: SAMPLE_RATE,
         channels: CHANNELS,
@@ -134,7 +166,9 @@ export function useVoiceRecorder(): VoiceRecorder {
       subscriptionRef.current = AudioRecord.on("data", (base64Chunk) => {
         const chunk = Buffer.from(base64Chunk, "base64");
         chunksRef.current.push(chunk);
-        setAmplitude(computeRms(chunk));
+        const rms = computeRms(chunk);
+        setAmplitude(rms);
+        detector?.push(rms, Date.now());
       });
       // Build 42 P1-5 fix: the native module previously had no error
       // channel at all — a mid-recording mic-permission revocation or
@@ -152,8 +186,19 @@ export function useVoiceRecorder(): VoiceRecorder {
       });
 
       AudioRecord.start();
+      isRecordingRef.current = true;
       setIsRecording(true);
       setMicInUse(true);
+
+      if (detector) {
+        autoStopTimerRef.current = setInterval(() => {
+          if (!detector.hasFinishedSpeaking(Date.now())) {
+            return;
+          }
+          clearAutoStop();
+          options?.onAutoStop?.();
+        }, SILENCE_POLL_INTERVAL_MS);
+      }
     } catch (err) {
       Alert.alert("Recording Error", err instanceof Error ? err.message : String(err));
       throw err;
@@ -161,14 +206,15 @@ export function useVoiceRecorder(): VoiceRecorder {
       isBusyRef.current = false;
       setIsTransitioning(false);
     }
-  }, [requestPermissions]);
+  }, [requestPermissions, clearAutoStop]);
 
   const stopRecording = useCallback(async () => {
-    if (isBusyRef.current || !isRecording) {
+    if (isBusyRef.current || !isRecordingRef.current) {
       return null;
     }
     isBusyRef.current = true;
     setIsTransitioning(true);
+    clearAutoStop();
     try {
       AudioRecord.stop();
       // Let any in-flight final chunk land before we stop listening.
@@ -177,6 +223,7 @@ export function useVoiceRecorder(): VoiceRecorder {
       subscriptionRef.current = null;
       errorSubscriptionRef.current?.remove();
       errorSubscriptionRef.current = null;
+      isRecordingRef.current = false;
       setIsRecording(false);
       setAmplitude(0);
       setMicInUse(false);
@@ -212,7 +259,7 @@ export function useVoiceRecorder(): VoiceRecorder {
       isBusyRef.current = false;
       setIsTransitioning(false);
     }
-  }, [isRecording]);
+  }, [clearAutoStop]);
 
   return {
     isRecording,

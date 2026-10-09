@@ -1,6 +1,6 @@
 /**
  * A tiny shared pub/sub so the UI can show what's ACTUALLY happening during
- * a note save or a query — "Hearing you out", "Finding where this belongs",
+ * a note save or a query — "Got it", "Finding where this belongs",
  * "Reading through your notes" — instead of one static "Transcribing..." /
  * "Thinking..." label (or a bare spinner) that says nothing about real
  * progress. Same shape as `services/notifications/todoNotifications.ts`'s
@@ -33,7 +33,7 @@
 export type PipelineFlow = "note" | "chat";
 
 export type PipelineStage =
-  | "transcribing" // Whisper turning speech into text
+  | "transcribing" // Whisper turning speech into text (capture has already ended)
   | "understanding" // the embedding model placing a note in semantic space
   | "saving" // the encrypted write finishing
   | "retrieving" // hybrid vector+keyword search for a query
@@ -74,7 +74,10 @@ export function subscribeToPipelineStage(flow: PipelineFlow, listener: Listener)
  * product-voice copy: no model names, no technical terms, matches the tone
  * `localLlama.ts`'s own SYSTEM_PROMPT sets for Xayra elsewhere. */
 export const PIPELINE_STAGE_LABELS: Record<PipelineStage, string> = {
-  transcribing: "Hearing you out",
+  // Transcription only ever starts once the user has stopped talking, so
+  // this acknowledges what was heard rather than implying Xayra is still
+  // listening (it used to read "Hearing you out").
+  transcribing: "Got it",
   understanding: "Finding where this belongs",
   saving: "Tucked away safely",
   retrieving: "Reading through your notes",

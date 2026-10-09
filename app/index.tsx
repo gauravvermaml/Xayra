@@ -15,6 +15,7 @@ import Animated, {
 
 import { CentralRecorderCanvas, type RecorderCanvasState } from "../components/CentralRecorderCanvas";
 import { ChatSheetContent } from "../components/ChatSheetContent";
+import { CancelProcessingButton } from "../components/CancelProcessingButton";
 import { ComposeBar } from "../components/ComposeBar";
 import { ExpandedTextOverlay } from "../components/ExpandedTextOverlay";
 import { HistorySheet, SHEET_SNAP_POINTS } from "../components/HistorySheet";
@@ -25,10 +26,7 @@ import { colors } from "../constants/theme";
 import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
-import { cancelActiveLlamaCompletion } from "../services/ai/localLlama";
-import { cancelActiveTranscription } from "../services/ai/localWhisper";
 import {
-  PIPELINE_STAGE_LABELS,
   setPipelineStage,
   subscribeToPipelineStage,
   type PipelineStage,
@@ -44,6 +42,14 @@ import {
   initializeToDoNotifications,
   subscribeToToDoNotificationTap,
 } from "../services/notifications/todoNotifications";
+import {
+  cancelProcessing,
+  centralStatusText,
+  decideCentralTap,
+  ManualUtteranceController,
+  type ManualUtteranceSnapshot,
+  type UtteranceMode,
+} from "../services/audio/manualUtterance";
 import { useVoiceRecorder } from "../services/audio/recorder";
 import { speakTextAndWait } from "../services/audio/tts";
 import { playWakeChime } from "../services/audio/wakeChime";
@@ -294,7 +300,11 @@ export default function HomeScreen() {
   // submission does — no classification, just this. Defaults to "record"
   // (the more common action — most sessions are jotting a thought, not
   // asking a question of past ones).
-  const [inputMode, setInputMode] = useState<"record" | "ask">("record");
+  const [inputMode, setInputMode] = useState<UtteranceMode>("record");
+  // Read only at the moment Handsfree hands an utterance off — every
+  // utterance then carries that mode explicitly (see finishUtterance).
+  const inputModeRef = useRef(inputMode);
+  inputModeRef.current = inputMode;
   const [inputText, setInputText] = useState("");
   // True from the moment the compose input is focused until it's either
   // blurred (handleInputBlur) or submitted (handleSubmitText) — passed to
@@ -325,20 +335,19 @@ export default function HomeScreen() {
   const [processingState, setProcessingState] = useState<"idle" | "processing">("idle");
   const [processingLabel, setProcessingLabel] = useState<"note" | "query" | null>(null);
   // Real, granular pipeline progress (see services/ai/pipelineStage.ts) —
-  // "Hearing you out", "Finding where this belongs", etc. — read here so the
+  // "Got it", "Finding where this belongs", etc. — read here so the
   // recorder canvas's status line can show what's ACTUALLY happening right
-  // now instead of one static label for the whole save/query. Falls back to
-  // `processingLabel`'s older generic text below whenever no specific stage
-  // is set (e.g. the brief gap right after one stage clears and before the
-  // next one starts).
+  // now instead of one static label for the whole save/query. Shows "Got
+  // it" whenever no specific stage is set (e.g. the brief gap right after
+  // one stage clears and before the next one starts).
   //
   // QA Phase 3, P2-2 fix: this canvas can be showing either a RECORD
   // ("note" flow) or an ASK-by-voice ("chat" flow, since an ASK-intent
   // utterance is routed through the same `chatSession.ask()`/`rag.ts` path
-  // Chat's own typed queries use) operation, decided by `inputMode` before
-  // `finishUtterance` even starts — so both flows are subscribed to
-  // unconditionally, and `processingLabel` (already captured at the same
-  // moment as `inputMode`, see `finishUtterance` below) picks which one is
+  // Chat's own typed queries use) operation, decided by the utterance's own
+  // frozen mode before `finishUtterance` even starts — so both flows are
+  // subscribed to unconditionally, and `processingLabel` (set from that same
+  // mode, see `finishUtterance` below) picks which one is
   // actually THIS screen's own in-flight operation. Without this split, a
   // typed query submitted from Chat while this screen has its own voice
   // note mid-save would have overwritten this canvas's "note" stage with
@@ -480,10 +489,13 @@ export default function HomeScreen() {
   //
   // Every submission — typed into ComposeBar, or spoken (manual tap or
   // Handsfree) — funnels through here. There is no classification step:
-  // `inputMode` (set only by the user tapping the Record/Ask pill) decides
-  // RECORD vs ASK outright, every time, with zero exceptions in either
-  // direction (RECORD never calls the RAG/Llama pipeline; ASK never writes
-  // a note).
+  // the Record/Ask pill decides RECORD vs ASK outright, every time, with
+  // zero exceptions in either direction (RECORD never calls the RAG/Llama
+  // pipeline; ASK never writes a note). The mode is captured when the
+  // submission begins (typed submit, manual recording start, Handsfree
+  // hand-off) and passed down explicitly — nothing downstream re-reads the
+  // pill, so switching it mid-transcription can't change what an
+  // already-started utterance means.
 
   const routeRecord = useCallback(
     async (text: string, audioUri: string | null, whisperModelId: string | null) => {
@@ -540,7 +552,8 @@ export default function HomeScreen() {
     async (
       text: string,
       audioUri: string | null,
-      whisperModelId: string | null
+      whisperModelId: string | null,
+      mode: UtteranceMode
     ): Promise<{ intent: "RECORD" | "ASK"; answerText?: string; assistantId?: string }> => {
       setProcessingState("processing");
       // ASK auto-peeks to 50% to show the answer card; RECORD snaps back to
@@ -549,7 +562,7 @@ export default function HomeScreen() {
       // still moves right away rather than only after the note/answer
       // pipeline finishes.
       sheetRef.current?.snapToIndex(1);
-      const intent: "RECORD" | "ASK" = inputMode === "record" ? "RECORD" : "ASK";
+      const intent: "RECORD" | "ASK" = mode === "record" ? "RECORD" : "ASK";
       try {
         setProcessingLabel(intent === "RECORD" ? "note" : "query");
         if (intent === "RECORD") {
@@ -573,7 +586,7 @@ export default function HomeScreen() {
         setProcessingLabel(null);
       }
     },
-    [inputMode, routeRecord, chatSession]
+    [routeRecord, chatSession]
   );
 
   // ---- The single shared recording pipeline ------------------------------
@@ -604,9 +617,8 @@ export default function HomeScreen() {
   const lastVoiceQueryRef = useRef<{ normalizedText: string; at: number } | null>(null);
   const DUPLICATE_VOICE_QUERY_WINDOW_MS = 3000;
 
-  // Build 39 "stop, don't execute this": set the instant a user re-taps the
-  // center button while something's already processing (see
-  // handleRecordPress below). Checked at the one checkpoint that actually
+  // Build 39 "stop, don't execute this": set by the explicit Cancel action
+  // (or a tap during Handsfree's own processing — see handleRecordPress). Checked at the one checkpoint that actually
   // matters for a note (right after transcription resolves, before a note
   // is ever created or a query ever routed) — a plain ref, not state, since
   // it has to be visible synchronously inside `finishUtterance`'s own
@@ -616,8 +628,9 @@ export default function HomeScreen() {
   const finishUtterance = useCallback(
     async (
       audioUri: string,
+      mode: UtteranceMode,
       reportState?: (state: "processing" | "speaking") => void,
-      options?: { isHandsfree?: boolean }
+      options?: { isHandsfree?: boolean; onRouted?: () => void }
     ) => {
       // TEXT-ONLY STORAGE (enforced, no exceptions): this raw WAV
       // (services/audio/recorder.ts, written to the cache folder's recordings/)
@@ -645,19 +658,16 @@ export default function HomeScreen() {
         // once transcription had already finished) — otherwise the canvas
         // sat at "idle" for the entire real Whisper cold-start/transcribe
         // window, the single biggest real delay a user actually feels,
-        // showing nothing at all rather than the "Hearing you out" stage
-        // that's genuinely happening right now. `inputMode` is already
-        // known (the user chose Record/Ask before ever tapping the mic), so
-        // it's safe to set the label this early.
+        // showing nothing at all rather than the transcription stage
+        // that's genuinely happening right now. `mode` is this utterance's
+        // own frozen Record/Ask choice, so it's safe to set the label this
+        // early.
         setProcessingState("processing");
-        setProcessingLabel(inputMode === "record" ? "note" : "query");
+        setProcessingLabel(mode === "record" ? "note" : "query");
         // QA Phase 3, P2-2: tag this write with the flow THIS utterance
-        // actually belongs to (known upfront from `inputMode`, per the
-        // comment above), not a shared untagged value — see the
-        // `noteStage`/`chatStage` split above for the read side of this
-        // fix. Re-derived (not hoisted into a shared variable) so it stays
-        // correct even across the `try`/`finally` block boundary below.
-        setPipelineStage(inputMode === "record" ? "note" : "chat", "transcribing");
+        // actually belongs to, not a shared untagged value — see the
+        // `noteStage`/`chatStage` split above for the read side of this fix.
+        setPipelineStage(mode === "record" ? "note" : "chat", "transcribing");
         cancelRequestedRef.current = false;
         const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
         if (cancelRequestedRef.current) {
@@ -735,8 +745,12 @@ export default function HomeScreen() {
         const { intent, answerText, assistantId } = await routeFreeformInput(
           transcript.trim(),
           audioUri,
-          whisperModelId ?? null
+          whisperModelId ?? null,
+          mode
         );
+        // Saved / answered: speaking the result below no longer holds a
+        // manual utterance open.
+        options?.onRouted?.();
 
         reportState?.("speaking");
         if (intent === "RECORD") {
@@ -773,19 +787,16 @@ export default function HomeScreen() {
         // no-wake-word/duplicate) that flips processing state on at the top
         // of this function but never reaches `routeFreeformInput`'s own
         // matching reset below — without this, one of those rejections
-        // would leave the canvas stuck on "Hearing you out" forever. A
+        // would leave the canvas stuck on "Got it" forever. A
         // no-op on the normal success path, where routeFreeformInput's own
         // `finally` has already reset all three.
         setProcessingState("idle");
         setProcessingLabel(null);
-        // Matches the flow this same utterance's "transcribing" write above
-        // used — see that comment for why this is re-derived from
-        // `inputMode` rather than shared via a variable across the
-        // try/finally boundary.
-        setPipelineStage(inputMode === "record" ? "note" : "chat", null);
+        // Matches the flow this same utterance's "transcribing" write used.
+        setPipelineStage(mode === "record" ? "note" : "chat", null);
       }
     },
-    [routeFreeformInput, chatSession, inputMode]
+    [routeFreeformInput, chatSession]
   );
 
   // ---- Handsfree Mode -----------------------------------------------------
@@ -850,7 +861,7 @@ export default function HomeScreen() {
       // so an actively-used session never times out mid-conversation.
       armHandsfreeTimeoutRef.current();
       try {
-        await finishUtterance(audioUri, reportState, { isHandsfree: true });
+        await finishUtterance(audioUri, inputModeRef.current, reportState, { isHandsfree: true });
       } catch (err) {
         console.error("[Handsfree] Failed to handle utterance", err);
       }
@@ -882,16 +893,54 @@ export default function HomeScreen() {
   // of which screen is currently focused. The only real, separate case
   // that still correctly turns Handsfree off is leaving the app entirely
   // (`useActiveMode()`'s own `AppState` listener, P2-3) — untouched here.
-  const recorderStopRef = useRef(recorder.stopRecording);
-  recorderStopRef.current = recorder.stopRecording;
+  const recorderRef = useRef(recorder);
+  recorderRef.current = recorder;
+  const finishUtteranceRef = useRef(finishUtterance);
+  finishUtteranceRef.current = finishUtterance;
+
+  // ---- Manual voice utterance (central button) ----------------------------
+  //
+  // Tap → speak → finishes on its own after trailing silence (or on a
+  // second tap while recording) → transcribe → save/answer. The controller
+  // freezes Record/Ask when recording starts and carries it through; see
+  // services/audio/manualUtterance.ts. Created once; it reaches the
+  // recorder and pipeline through refs so it always calls the latest ones.
+  const [manualUtterance, setManualUtterance] = useState<ManualUtteranceSnapshot>({ phase: "idle", mode: null });
+  const manualControllerRef = useRef<ManualUtteranceController | null>(null);
+  if (!manualControllerRef.current) {
+    manualControllerRef.current = new ManualUtteranceController({
+      startRecording: (options) => recorderRef.current.startRecording(options),
+      stopRecording: () => recorderRef.current.stopRecording(),
+      processUtterance: async (audioUri, mode, trigger, release) => {
+        if (__DEV__) {
+          console.log(`[Recorder] Finished by ${trigger === "silence" ? "trailing silence" : "tap"} (${mode})`);
+        }
+        try {
+          await finishUtteranceRef.current(audioUri, mode, undefined, { onRouted: release });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          setError(message);
+          Alert.alert("Recording Error", message);
+        }
+      },
+      onChange: setManualUtterance,
+      onError: (err) => setError(err instanceof Error ? err.message : "Recording failed."),
+    });
+  }
+  const manualController = manualControllerRef.current;
+
   useFocusEffect(
     useCallback(() => {
       return () => {
         // An abandoned recording is never transcribed, so its WAV is
         // deleted here — it used to be left behind permanently.
-        void recorderStopRef
-          .current()
-          .then((uri) => (uri ? FileSystem.deleteAsync(uri, { idempotent: true }) : undefined))
+        void recorderRef.current
+          .stopRecording()
+          .then((uri) => {
+            if (!uri) return undefined;
+            manualControllerRef.current?.abandon();
+            return FileSystem.deleteAsync(uri, { idempotent: true });
+          })
           .catch(() => {});
       };
     }, [])
@@ -902,104 +951,64 @@ export default function HomeScreen() {
   // Declared here, after `activeMode` exists, specifically so it can guard
   // against the single-native-session collision described above.
   const handleRecordPress = useCallback(async () => {
-    // Build 39 "stop, don't execute this": a tap while something's already
-    // processing (not recording, not idle) means cancel, not "start a new
-    // recording" — the canvas is deliberately no longer disabled during
-    // this window (see its own `disabled` prop comment) specifically so
-    // this tap can land. `cancelRequestedRef` is checked at the one point
-    // in finishUtterance where a note/query would otherwise get created;
-    // `cancelActiveLlamaCompletion()` additionally cuts an already-running
-    // RAG answer off immediately rather than letting it keep generating for
-    // several more seconds before the cancellation is even noticed.
-    //
-    // Build 48 fix, live user report: this check MUST run before the
-    // Handsfree guard below, not after it. It used to sit after, so a tap
-    // during Handsfree's own "transcribing"/"speaking" processing window
-    // (ActiveModeManager already stopped capturing that utterance's audio
-    // by this point — ownership of the native session is not at stake)
-    // hit the `activeMode.isActive` early-return and did nothing at all,
-    // silently. The user's tap looked like it was ignored, the in-flight
-    // transcription/RAG call kept running with no way to stop it, and it
-    // read as the app being stuck — the fix here just moved this branch
-    // above the collision guard, which only needs to block a tap from
-    // STARTING a second recording (the `else` branch further down), not
-    // from cancelling one that's already in flight.
-    if (processingState === "processing") {
-      cancelRequestedRef.current = true;
-      // Build 48 fix #3, same live report: cancelling used to only be able
-      // to cut short an already-RUNNING Llama answer — a tap landing while
-      // Whisper was still transcribing set the ref correctly, but nothing
-      // stopped transcribeAudioLocal() itself, so the actual "Cancelled"
-      // feedback couldn't fire until Whisper finished on its own (several
-      // real seconds), which is what "takes a few seconds to cancel" was.
-      // whisper.rn's transcribe() has always returned a real abort handle;
-      // localWhisper.ts just never captured it before now. Both cancels are
-      // safe no-ops when they don't apply (no completion/transcription
-      // actually in flight at the moment of the tap).
-      cancelActiveTranscription();
-      cancelActiveLlamaCompletion();
-      return;
-    }
-    // Build 48 fix #2, same live report: a tap while Handsfree is still
-    // actively CAPTURING an utterance (VAD hasn't yet detected trailing
-    // silence, so processingState above is still "idle") used to be a
-    // silent no-op too — the user had to wait out VAD silence-detection
-    // before the branch above could even see anything to cancel, which is
-    // what made a genuine cancel intent look like it needed several taps.
-    // `cancelCurrentUtterance()` discards the in-progress capture directly
-    // (see its own doc comment) and reports whether there was anything to
-    // discard — a tap while Handsfree is just idly listening (no speech
-    // detected yet) correctly stays a no-op, since nothing here would be
-    // "cancelling" anything real.
-    if (activeMode.isActive) {
-      if (activeMode.cancelCurrentUtterance()) {
-        showToast("Cancelled");
-      }
-      return;
-    }
-    if (recorder.isTransitioning) {
-      return;
-    }
-    setError(null);
-    try {
-      if (recorder.isRecording) {
-        const audioUri = await recorder.stopRecording();
-        if (!audioUri) {
-          return;
+    const action = decideCentralTap({
+      manualPhase: manualController.snapshot.phase,
+      isProcessing: processingState === "processing",
+      isHandsfreeActive: activeMode.isActive,
+      isRecorderTransitioning: recorder.isTransitioning,
+    });
+    switch (action) {
+      case "finish-manual":
+        // The manual "finish now" override — recording otherwise finishes
+        // itself after trailing silence.
+        await manualController.finish("tap");
+        return;
+      case "ignore":
+        // Processing a manual or typed submission: a tap no longer
+        // cancels. Recording now finishes on its own, so a habitual second
+        // tap can land just after it did — cancelling is the explicit
+        // Cancel action's job (handleCancelProcessing).
+        return;
+      case "cancel-handsfree-processing":
+        // Build 39/48, unchanged for Handsfree: a tap during Handsfree's own
+        // transcribing/answering cancels it. Checked before the Handsfree
+        // capture branch so it isn't swallowed by it.
+        cancelProcessing(cancelRequestedRef);
+        return;
+      case "cancel-handsfree-capture":
+        // Build 48 fix #2, unchanged: a tap while Handsfree is capturing an
+        // utterance discards it (a no-op if no speech has been detected
+        // yet). Also what keeps a manual recording from competing for the
+        // one native capture session while Handsfree owns it.
+        if (activeMode.cancelCurrentUtterance()) {
+          showToast("Cancelled");
         }
-        try {
-          await finishUtterance(audioUri);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          setError(message);
-          Alert.alert("Recording Error", message);
-        }
-      } else {
+        return;
+      case "start-manual":
+        setError(null);
         // Tapping to start recording collapses the sheet to its resting
         // peek immediately.
         sheetRef.current?.snapToIndex(0);
-        // Build 39: `recorder.startRecording()` now runs FIRST, not after
-        // `asrRouter.startListening()` — confirmed on-device (Pixel 9) that
-        // Tier 1 (native on-device speech recognition) failed with
-        // "no-speech" on every single attempt, always silently falling back
-        // to Whisper. `recorder.startRecording()` calls expo-audio's
-        // `setAudioModeAsync()` to (re)configure the device's whole audio
-        // session for recording — reconfiguring that session WHILE Tier 1's
-        // SpeechRecognizer session was already open and listening (the old
-        // order) is a plausible way to starve it of real audio input:
-        // Android's audio focus can hand off exclusively to whichever
-        // client most recently claimed the session, cutting Tier 1 off from
-        // audio before it ever heard anything. Starting the PCM recorder
-        // first means the audio session is already stable by the time Tier
-        // 1 opens its own session on top of it, instead of an already-open
-        // Tier 1 session getting the rug pulled out from under it.
-        await recorder.startRecording();
-        asrRouter.startListening();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Recording failed.");
+        try {
+          // Build 39: the PCM recorder starts FIRST, then Tier 1 — confirmed
+          // on-device (Pixel 9) that reconfiguring the audio session
+          // (`setAudioModeAsync`, inside startRecording) while Tier 1's
+          // SpeechRecognizer was already listening starved it of audio.
+          await manualController.start(inputMode);
+          asrRouter.startListening();
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Recording failed.");
+        }
+        return;
     }
-  }, [recorder, activeMode.isActive, activeMode.cancelCurrentUtterance, finishUtterance, processingState]);
+  }, [manualController, processingState, activeMode, recorder.isTransitioning, inputMode]);
+
+  // The explicit way to abort processing (manual or typed) — the central
+  // button no longer does it. Same cancellation as always: the pipeline's
+  // checkpoint flag, plus cutting off transcription / generation if running.
+  const handleCancelProcessing = useCallback(() => {
+    cancelProcessing(cancelRequestedRef);
+  }, []);
 
   // 10-minute no-speech safety timeout (Requirement 5) — armed the moment
   // Handsfree engages, and re-armed on every utterance ActiveModeManager
@@ -1047,7 +1056,14 @@ export default function HomeScreen() {
 
   const handleLongPressCenterButton = handleToggleHandsfree;
 
-  const canvasState: RecorderCanvasState = recorder.isRecording
+  // Right after a manual recording finishes (by silence or tap) the
+  // recorder is still draining its last chunk; show it as processing at
+  // once so the hand-off is visible.
+  const isManualStopping =
+    manualUtterance.phase === "processing" && (recorder.isRecording || recorder.isTransitioning);
+  const canvasState: RecorderCanvasState = isManualStopping
+    ? "transcribing"
+    : recorder.isRecording
     ? "recording"
     : processingState === "processing"
       ? "transcribing"
@@ -1055,27 +1071,23 @@ export default function HomeScreen() {
         ? "listening"
         : "idle";
 
-  // Prefers the real, granular pipeline stage (see pipelineStage.ts) —
-  // "Hearing you out", "Reading through your notes", etc. — falling back to
-  // the older generic label only for the brief gap between one stage
-  // clearing and the next one starting (e.g. right after a note finishes
-  // embedding and before the pipeline as a whole has finished unwinding).
-  const recordingStatusText = recorder.isRecording
-    ? "Recording… tap to stop"
-    : canvasState === "transcribing"
-      ? // Build 39: "tap to cancel" appended here, not baked into
-        // PIPELINE_STAGE_LABELS itself — those labels are shared with
-        // ChatSheetContent's own streaming row (which has no cancel
-        // gesture of its own), so the hint only belongs on this specific
-        // status line.
-        `${
-          pipelineStage
-            ? PIPELINE_STAGE_LABELS[pipelineStage]
-            : processingLabel === "note"
-              ? "Transcribing your thought..."
-              : "Searching your thoughts..."
-        } · tap to cancel`
-      : null;
+  // Listening copy only while the mic is capturing; once capture ends,
+  // "Got it", then the real pipeline stages (see centralStatusText).
+  const recordingStatusText = centralStatusText({
+    phase: isManualStopping
+      ? "stopping"
+      : canvasState === "recording"
+        ? "recording"
+        : canvasState === "transcribing"
+          ? "processing"
+          : "idle",
+    pipelineStage,
+    isHandsfreeActive: activeMode.isActive,
+  });
+  const showCancelProcessing = canvasState === "transcribing" && !activeMode.isActive;
+  // Record/Ask can't change while a manual utterance is in flight — its
+  // meaning was frozen when recording began.
+  const isModeLocked = manualUtterance.phase !== "idle";
 
   // Opens a note's detail modal — shared by a chat citation chip's tap AND
   // a row tap in the Record-mode notes list (ChatSheetContent's
@@ -1130,7 +1142,10 @@ export default function HomeScreen() {
   // regardless.
   const handleInputBlur = useCallback(() => setIsComposing(false), []);
 
-  const handleSelectMode = useCallback((mode: "record" | "ask") => {
+  const handleSelectMode = useCallback((mode: UtteranceMode) => {
+    if (manualControllerRef.current?.snapshot.phase !== "idle") {
+      return;
+    }
     setInputMode(mode);
   }, []);
 
@@ -1138,13 +1153,13 @@ export default function HomeScreen() {
     (text: string) => {
       setInputText("");
       setIsComposing(false);
-      void routeFreeformInput(text, null, null).catch((err) => {
+      void routeFreeformInput(text, null, null, inputMode).catch((err) => {
         const message = err instanceof Error ? err.message : "Something went wrong.";
         setError(message);
         Alert.alert("Failed", message);
       });
     },
-    [routeFreeformInput]
+    [routeFreeformInput, inputMode]
   );
 
   if (!isReady) {
@@ -1207,16 +1222,16 @@ export default function HomeScreen() {
           // (see the wake-word/Handsfree mutual-exclusion fix above); that
           // guard alone is the actual fix, and doesn't need this prop's help.
           //
-          // Build 39: no longer disabled while `processingState ===
-          // "processing"` — tapping during that window is now the "stop,
-          // don't execute this" gesture (see handleRecordPress's own
-          // cancel branch below), not a dead tap. Only genuinely mid-
+          // Not disabled while processing — a tap then is handled (or
+          // deliberately ignored) by decideCentralTap. Only genuinely mid-
           // transition (a start/stop call already in flight) still disables
           // it, since that's a real race, not a deliberate user action to
           // support.
           disabled={recorder.isTransitioning}
         />
         {recordingStatusText && <Text style={styles.statusText}>{recordingStatusText}</Text>}
+        {canvasState === "recording" && <Text style={styles.statusHint}>Tap to finish</Text>}
+        {showCancelProcessing && <CancelProcessingButton onCancel={handleCancelProcessing} />}
         {error && <Text style={styles.errorText}>{error}</Text>}
       </Animated.View>
 
@@ -1283,7 +1298,13 @@ export default function HomeScreen() {
               <Pressable
                 key={mode}
                 onPress={() => handleSelectMode(mode)}
-                style={[styles.modePillOption, inputMode === mode && styles.modePillOptionActive]}
+                disabled={isModeLocked}
+                accessibilityState={{ selected: inputMode === mode, disabled: isModeLocked }}
+                style={[
+                  styles.modePillOption,
+                  inputMode === mode && styles.modePillOptionActive,
+                  isModeLocked && inputMode !== mode && styles.modePillOptionLocked,
+                ]}
               >
                 <Text style={[styles.modePillText, inputMode === mode && styles.modePillTextActive]}>
                   {mode === "record" ? "Record" : "Ask"}
@@ -1630,6 +1651,9 @@ const styles = StyleSheet.create({
   modePillOptionActive: {
     backgroundColor: colors.accent,
   },
+  modePillOptionLocked: {
+    opacity: 0.35,
+  },
   modePillText: {
     color: "rgba(235,235,245,0.6)",
     fontSize: 12,
@@ -1648,6 +1672,11 @@ const styles = StyleSheet.create({
     color: "rgba(255,255,255,0.7)",
     fontSize: 13,
     fontWeight: "600",
+  },
+  statusHint: {
+    color: "rgba(255,255,255,0.45)",
+    fontSize: 12,
+    marginTop: -6,
   },
   errorText: {
     color: "#F87171",
