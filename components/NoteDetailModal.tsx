@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
 import { Feather } from "@expo/vector-icons";
 
 import { AudioPlayerControls } from "./AudioPlayerControls";
 import { colors } from "../constants/theme";
+import { useKeyboardOverlap } from "../hooks/useKeyboardOverlap";
 import { useAudioPlayerControls } from "../services/audio/player";
 import { deleteNote, getNoteById, updateNoteText, type Note } from "../services/notes/noteManager";
 import { copyTextWithFeedback } from "../utils/clipboard";
@@ -134,6 +135,13 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted, onUpdated
     );
   };
 
+  // Editing opens the keyboard over this bottom-anchored sheet; padding the
+  // backdrop by exactly the covered height lifts the sheet above it (and the
+  // sheet shrinks to fit — see `sheet`/`editArea`), so the text being typed
+  // and Save/Cancel stay visible. 0 whenever the keyboard is down.
+  const backdropRef = useRef<View>(null);
+  const keyboardOverlap = useKeyboardOverlap(backdropRef);
+
   return (
     <Modal
       visible={visible}
@@ -141,7 +149,12 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted, onUpdated
       transparent
       onRequestClose={onClose}
     >
-      <Pressable style={styles.backdrop} onPress={onClose}>
+      <Pressable
+        ref={backdropRef}
+        testID="note-detail-backdrop"
+        style={[styles.backdrop, { paddingBottom: keyboardOverlap }]}
+        onPress={onClose}
+      >
         <Pressable style={styles.sheet} onPress={(e) => e.stopPropagation()}>
           <View style={styles.handle} />
 
@@ -183,7 +196,7 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted, onUpdated
               </View>
 
               {draft !== null ? (
-                <View>
+                <View style={styles.editArea}>
                   <TextInput
                     testID="note-edit-input"
                     value={draft}
@@ -270,6 +283,9 @@ const styles = StyleSheet.create({
     paddingTop: 10,
     paddingBottom: 28,
     maxHeight: "80%",
+    // Lets the sheet give up height when the keyboard lifts it, instead of
+    // pushing its header off the top of the screen.
+    flexShrink: 1,
   },
   handle: {
     alignSelf: "center",
@@ -295,7 +311,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10,
   },
+  // The edit area and its input shrink (the input then scrolls internally,
+  // keeping the caret in view) so Save/Cancel never get pushed off-screen.
+  editArea: {
+    flexShrink: 1,
+  },
   editInput: {
+    flexShrink: 1,
     color: colors.textPrimary,
     fontSize: 16,
     lineHeight: 23,
