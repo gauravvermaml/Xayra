@@ -22,7 +22,7 @@ import { readPreferences, writePreferences } from "../services/settings/preferen
  * last "ok, go" step became a deliberate user action instead of one that
  * just happens to them.
  *
- * The last checklist row ("Locking in 100% offline privacy...") is
+ * The last checklist row ("Keeping your AI processing on-device") is
  * deliberately COSMETIC pacing, not a real measured step — by the time the
  * three real downloads finish, `prewarmLocalLlama()` has already been
  * triggered by modelDownloadManager's own `setStatus` side effect, so
@@ -53,9 +53,11 @@ import { readPreferences, writePreferences } from "../services/settings/preferen
  */
 
 type CosmeticStep = { key: string; label: string };
-const COSMETIC_STEPS: CosmeticStep[] = [
+// Copy note: AI processing is on-device, but Drive backup and Calendar are
+// optional network features — so no absolute "100% offline" claim here.
+export const COSMETIC_STEPS: CosmeticStep[] = [
   { key: "warmup", label: "✨ Tuning quick-recall for your device" },
-  { key: "sandbox", label: "🛡️ Locking in 100% offline privacy" },
+  { key: "sandbox", label: "🛡️ Keeping your AI processing on-device" },
 ];
 const COSMETIC_STEP_DURATION_MS = 1100;
 
@@ -229,7 +231,7 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
       if (cancelled) return;
       setCosmeticStepIndex(1);
 
-      // Step 1, "Locking in 100% offline privacy" — still cosmetic pacing,
+      // Step 1, "Keeping your AI processing on-device" — still cosmetic pacing,
       // see this file's own doc comment for why.
       await new Promise((resolve) => setTimeout(resolve, COSMETIC_STEP_DURATION_MS));
       if (cancelled) return;

@@ -80,6 +80,17 @@ describe("NoteDetailModal — editing a journal note", () => {
     expect(texts(tree)).toContain("Theo came by to pick the vacuum.");
   });
 
+  it("shows the recorded time but never the internal processing status", async () => {
+    for (const status of ["embedded", "transcribed", "pending"]) {
+      mockGetNoteById.mockResolvedValue({ ...NOTE, status });
+      const tree = await render(<NoteDetailModal noteId="note-1" visible onClose={jest.fn()} />);
+      const all = texts(tree).join(" ");
+      expect(all).toContain(NOTE.content);
+      expect(all).toMatch(/2026/);
+      expect(all.toLowerCase()).not.toContain(status);
+    }
+  });
+
   it("Cancel leaves the note untouched", async () => {
     const tree = await render(<NoteDetailModal noteId="note-1" visible onClose={jest.fn()} />);
     await act(async () => tree.root.findByProps({ testID: "note-edit-button" }).props.onPress());

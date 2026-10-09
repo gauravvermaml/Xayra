@@ -180,9 +180,6 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted, onUpdated
             <>
               <View style={styles.metaRow}>
                 <Text style={styles.timestamp}>{formatTimestamp(note.createdAt)}</Text>
-                <View style={styles.statusBadge}>
-                  <Text style={styles.statusBadgeText}>{note.status}</Text>
-                </View>
               </View>
 
               {draft !== null ? (
@@ -367,18 +364,6 @@ const styles = StyleSheet.create({
   timestamp: {
     color: colors.textMuted,
     fontSize: 13,
-  },
-  statusBadge: {
-    backgroundColor: colors.surfaceElevated,
-    borderRadius: 999,
-    paddingHorizontal: 10,
-    paddingVertical: 3,
-  },
-  statusBadgeText: {
-    color: colors.textMuted,
-    fontSize: 11,
-    fontWeight: "600",
-    textTransform: "uppercase",
   },
   transcriptScroll: {
     maxHeight: 220,

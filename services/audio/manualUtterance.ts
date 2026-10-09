@@ -1,3 +1,4 @@
+import { IDLE_TAP_CUE } from "../../constants/copy";
 import { cancelActiveLlamaCompletion } from "../ai/localLlama";
 import { cancelActiveTranscription } from "../ai/localWhisper";
 import { PIPELINE_STAGE_LABELS, type PipelineStage } from "../ai/pipelineStage";
@@ -176,6 +177,21 @@ export function cancelProcessing(cancelRequested: { current: boolean }): void {
   cancelRequested.current = true;
   cancelActiveTranscription();
   cancelActiveLlamaCompletion();
+}
+
+/**
+ * What a tap on the central button will do — only when truly idle: not
+ * recording, processing, starting, or in Handsfree (whose own status is
+ * authoritative). The live status line owns every other state.
+ */
+export function idleTapCue(state: {
+  canvasState: "idle" | "recording" | "transcribing" | "listening";
+  manualPhase: ManualUtterancePhase;
+  isHandsfreeActive: boolean;
+  mode: UtteranceMode;
+}): string | null {
+  if (state.canvasState !== "idle" || state.manualPhase !== "idle" || state.isHandsfreeActive) return null;
+  return IDLE_TAP_CUE[state.mode];
 }
 
 /** While the mic is capturing a manual utterance. */

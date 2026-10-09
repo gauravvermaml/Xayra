@@ -13,7 +13,11 @@ import Animated, {
   withSpring,
 } from "react-native-reanimated";
 
-import { CentralRecorderCanvas, type RecorderCanvasState } from "../components/CentralRecorderCanvas";
+import {
+  CentralRecorderCanvas,
+  IDLE_TEXT_CLEARANCE_PX,
+  type RecorderCanvasState,
+} from "../components/CentralRecorderCanvas";
 import { ChatSheetContent } from "../components/ChatSheetContent";
 import { CancelProcessingButton } from "../components/CancelProcessingButton";
 import { ComposeBar } from "../components/ComposeBar";
@@ -22,6 +26,7 @@ import { HistorySheet, SHEET_SNAP_POINTS } from "../components/HistorySheet";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { showToast } from "../components/Toast";
 import { TodosOverlay } from "../components/TodosOverlay";
+import { HOME_SUBTITLE } from "../constants/copy";
 import { colors } from "../constants/theme";
 import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
@@ -46,6 +51,7 @@ import {
   cancelProcessing,
   centralStatusText,
   decideCentralTap,
+  idleTapCue,
   ManualUtteranceController,
   type ManualUtteranceSnapshot,
   type UtteranceMode,
@@ -78,6 +84,9 @@ import { getTimeBasedGreeting } from "../utils/greeting";
  * keep the mic (and the screen, via ActiveModeManager's own keep-awake) on
  * indefinitely. */
 const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** Vertical gap between the central button and the status lines under it. */
+const CENTER_AREA_GAP_PX = 12;
 
 /** How long the launch greeting ("Good morning, ...") stays up before
  * cross-fading into the header's normal persistent subtitle. */
@@ -1084,6 +1093,13 @@ export default function HomeScreen() {
     pipelineStage,
     isHandsfreeActive: activeMode.isActive,
   });
+  // When nothing is happening, say what a tap will do in the current mode.
+  const idleCue = idleTapCue({
+    canvasState,
+    manualPhase: manualUtterance.phase,
+    isHandsfreeActive: activeMode.isActive,
+    mode: inputMode,
+  });
   const showCancelProcessing = canvasState === "transcribing" && !activeMode.isActive;
   // Record/Ask can't change while a manual utterance is in flight — its
   // meaning was frozen when recording began.
@@ -1201,8 +1217,8 @@ export default function HomeScreen() {
             {greetingText}
           </Animated.Text>
         ) : (
-          <Animated.Text key="subtitle" entering={FadeIn} style={styles.brandSubtitle}>
-            Say "remind me" or "make a note" for a to-do — everything else is saved as a journal entry.
+          <Animated.Text key={`subtitle-${inputMode}`} entering={FadeIn} style={styles.brandSubtitle}>
+            {HOME_SUBTITLE[inputMode]}
           </Animated.Text>
         )}
       </View>
@@ -1230,6 +1246,11 @@ export default function HomeScreen() {
           disabled={recorder.isTransitioning}
         />
         {recordingStatusText && <Text style={styles.statusText}>{recordingStatusText}</Text>}
+        {idleCue && (
+          <Text testID="idle-tap-cue" style={[styles.statusText, styles.idleCue]}>
+            {idleCue}
+          </Text>
+        )}
         {canvasState === "recording" && <Text style={styles.statusHint}>Tap to finish</Text>}
         {showCancelProcessing && <CancelProcessingButton onCancel={handleCancelProcessing} />}
         {error && <Text style={styles.errorText}>{error}</Text>}
@@ -1335,6 +1356,7 @@ export default function HomeScreen() {
             onInputBlur={handleInputBlur}
             onSubmit={handleSubmitText}
             placeholder={inputMode === "record" ? "Type your thoughts..." : "Search your thoughts..."}
+            mode={inputMode}
           />
         }
         // Record mode shows the notes list (newest first); Ask mode keeps
@@ -1666,7 +1688,13 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    gap: 12,
+    gap: CENTER_AREA_GAP_PX,
+  },
+  // While idle there's no waveform row between the button and this line,
+  // so it needs its own clearance past the rim's shadow, plus breathing
+  // room. Recording/processing status keeps its existing spacing.
+  idleCue: {
+    marginTop: IDLE_TEXT_CLEARANCE_PX - CENTER_AREA_GAP_PX,
   },
   statusText: {
     color: "rgba(255,255,255,0.7)",

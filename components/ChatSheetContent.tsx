@@ -5,6 +5,7 @@ import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
 import { MarkdownText } from "./MarkdownText";
 import { NoteCard } from "./NoteCard";
 import { RelatedNotesSection } from "./RelatedNotesSection";
+import { ASK_STARTER_PROMPTS, NOTES_EMPTY_TITLE, RECORD_EMPTY_SUBTEXT } from "../constants/copy";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { allowCellularDownloadAndResume, resumeDownloads, type ModelDownloadStatus } from "../services/ai/modelDownloadManager";
 import { PIPELINE_STAGE_LABELS, subscribeToPipelineStage } from "../services/ai/pipelineStage";
@@ -77,7 +78,6 @@ function StreamingStageLabel({ color }: { color: string }) {
 
 /** Shown only before the first message of a session. Tapping one submits it
  * exactly like typing it into the compose bar. */
-const STARTER_PROMPTS = ["Summarize my latest notes", "What did I record about work?", "List my recent tasks"] as const;
 
 export type ChatSheetContentProps = {
   /** Record shows the notes list (newest first); Ask shows Q&A history,
@@ -219,8 +219,8 @@ export function ChatSheetContent({
       // Archive.tsx still uses NotesSheetContent directly and keeps its own
       // copy of this same empty state in sync independently.
       <View style={styles.notesEmptyState}>
-        <Text style={styles.emptyText}>No notes recorded yet.</Text>
-        <Text style={styles.notesEmptySubtext}>Tap Xayra to record your first voice note</Text>
+        <Text style={styles.emptyText}>{NOTES_EMPTY_TITLE}</Text>
+        <Text style={styles.notesEmptySubtext}>{RECORD_EMPTY_SUBTEXT}</Text>
         <Pressable onPress={onRestoreFromDrive} disabled={isRestoring} style={styles.restoreLinkRow}>
           {isRestoring ? (
             <ActivityIndicator color={colors.accent} size="small" />
@@ -230,7 +230,28 @@ export function ChatSheetContent({
         </Pressable>
       </View>
     ) : (
-      <Text style={styles.emptyText}>Ask anything — answers are grounded in your recorded notes.</Text>
+      // Starter prompts sit directly under the intro line, at the top of the
+      // tray. They used to render after the flex:1 list — i.e. at the bottom
+      // of the sheet's full-height content — which is below what's visible
+      // at the tray's 20%/50% snaps. This list empty state only renders
+      // before anything has been asked, which is exactly when they apply.
+      <View style={styles.askEmptyState}>
+        <Text style={styles.emptyText}>Ask anything — answers are grounded in your recorded notes.</Text>
+        {isModelReady && (
+          <View testID="ask-starter-prompts" style={styles.starterChipRow}>
+            {ASK_STARTER_PROMPTS.map((prompt) => (
+              <Pressable
+                key={prompt}
+                onPress={() => onSubmitStarterPrompt(prompt)}
+                disabled={isSending}
+                style={({ pressed }) => [styles.starterChip, pressed && styles.starterChipPressed]}
+              >
+                <Text style={styles.starterChipText}>{prompt}</Text>
+              </Pressable>
+            ))}
+          </View>
+        )}
+      </View>
     );
 
   const renderItem = ({ item }: { item: DrawerListItem }) => {
@@ -321,20 +342,6 @@ export function ChatSheetContent({
         />
       )}
 
-      {mode === "ask" && messages.length === 0 && isModelReady && (
-        <View style={styles.starterChipRow}>
-          {STARTER_PROMPTS.map((prompt) => (
-            <Pressable
-              key={prompt}
-              onPress={() => onSubmitStarterPrompt(prompt)}
-              disabled={isSending}
-              style={({ pressed }) => [styles.starterChip, pressed && styles.starterChipPressed]}
-            >
-              <Text style={styles.starterChipText}>{prompt}</Text>
-            </Pressable>
-          ))}
-        </View>
-      )}
 
       {/* Build 25: the "downloading" progress card used to render here —
           it's now components/ModelDownloadCard.tsx, rendered once by
@@ -516,11 +523,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "700",
   },
+  askEmptyState: {
+    alignItems: "center",
+    gap: spacing.base,
+  },
   starterChipRow: {
     flexDirection: "row",
     flexWrap: "wrap",
+    justifyContent: "center",
     gap: spacing.sm,
-    marginBottom: spacing.sm,
   },
   starterChip: {
     backgroundColor: "#1C1C1E",

@@ -2,6 +2,7 @@ import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View } from "
 import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
 
 import { NoteCard } from "./NoteCard";
+import { ARCHIVE_EMPTY_SUBTEXT, NOTES_EMPTY_TITLE } from "../constants/copy";
 import { colors, spacing } from "../constants/theme";
 
 export type DisplayNote = {
@@ -64,10 +65,8 @@ export function NotesSheetContent({
           button already visible above the drawer (CentralRecorderCanvas)
           rather than a second, redundant icon here. Search still gets
           its own icon-free copy; only the record-mode text changed. */}
-      <Text style={styles.emptyText}>{isSearchActive ? "No matching notes yet." : "No notes recorded yet."}</Text>
-      <Text style={styles.emptySubtext}>
-        {isSearchActive ? "Try a different search term." : "Tap Xayra to record your first voice note"}
-      </Text>
+      <Text style={styles.emptyText}>{isSearchActive ? "No matching notes yet." : NOTES_EMPTY_TITLE}</Text>
+      <Text style={styles.emptySubtext}>{isSearchActive ? "Try a different search term." : ARCHIVE_EMPTY_SUBTEXT}</Text>
       {!isSearchActive && (
         <Pressable onPress={onRestoreFromDrive} disabled={isRestoring} style={styles.restoreLinkRow}>
           {isRestoring ? (

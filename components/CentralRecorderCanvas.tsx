@@ -421,6 +421,16 @@ const BUTTON_SIZE = 90;
 const RIM_SIZE = Math.round(BUTTON_SIZE * 1.2);
 // How far the "listening" glow halo extends past the rim's own edge.
 const GLOW_SIZE = Math.round(RIM_SIZE * 1.6);
+const RIM_SHADOW_RADIUS = 18;
+const RIM_SHADOW_OFFSET_Y = 10;
+/** How far the rim's drop shadow visibly reaches below the button's layout
+ * box. Text placed directly under the canvas (with no waveform row in
+ * between, i.e. while idle) needs at least this much clearance or it sits
+ * on the shadow and reads as overlapping the button. */
+export const BUTTON_SHADOW_EXTENT_PX = RIM_SHADOW_OFFSET_Y + RIM_SHADOW_RADIUS;
+/** Where idle text under the canvas should start, measured from the
+ * button's layout box: past the shadow, plus comfortable breathing room. */
+export const IDLE_TEXT_CLEARANCE_PX = BUTTON_SHADOW_EXTENT_PX + 10;
 
 const styles = StyleSheet.create({
   wrapper: {
@@ -457,8 +467,8 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255,255,255,0.14)",
     shadowColor: "#000000",
     shadowOpacity: 0.9,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 10 },
+    shadowRadius: RIM_SHADOW_RADIUS,
+    shadowOffset: { width: 0, height: RIM_SHADOW_OFFSET_Y },
     elevation: 14,
   },
   button: {

@@ -1,6 +1,7 @@
 import { memo, useEffect, useRef } from "react";
 import { Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 import { BottomSheetTextInput } from "@gorhom/bottom-sheet";
+import { Feather } from "@expo/vector-icons";
 
 import { colors, radius, spacing } from "../constants/theme";
 
@@ -28,6 +29,9 @@ export type ComposeBarProps = {
    * opinion of its own on which mode is active; it just renders whatever
    * string it's given. */
   placeholder: string;
+  /** Picks the leading icon: a pencil for Record (writing a note), a
+   * magnifier for Ask (searching your notes). Presentation only. */
+  mode: "record" | "ask";
 };
 
 /**
@@ -99,6 +103,7 @@ export const ComposeBar = memo(function ComposeBar({
   onInputBlur,
   onSubmit,
   placeholder,
+  mode,
 }: ComposeBarProps) {
   const canSubmit = inputText.trim().length > 0;
 
@@ -138,7 +143,13 @@ export const ComposeBar = memo(function ComposeBar({
     <View style={styles.container}>
       <View style={styles.row}>
         <View style={styles.searchBar}>
-          <Text style={styles.searchIcon}>⌕</Text>
+          <Feather
+            testID="compose-mode-icon"
+            name={mode === "record" ? "edit-3" : "search"}
+            size={16}
+            color="rgba(235,235,245,0.6)"
+            style={styles.searchIcon}
+          />
           <BottomSheetTextInput
             value={inputText}
             onChangeText={onInputChange}
@@ -211,8 +222,6 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.xs,
   },
   searchIcon: {
-    color: "rgba(235,235,245,0.6)",
-    fontSize: 16,
     marginRight: spacing.sm,
   },
   input: {
