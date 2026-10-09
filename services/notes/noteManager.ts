@@ -464,6 +464,21 @@ export async function updateNoteText(noteId: string, text: string): Promise<void
   }
 }
 
+export type NoteRevision = { id: string; content: string; transcript: string | null; updatedAt: number };
+
+/** Each note's current text and when it last changed — what Drive backup
+ * compares against its copy to carry an edit over (driveSync.ts). */
+export async function listNoteRevisions(): Promise<NoteRevision[]> {
+  const db = await getRawDatabase();
+  const result = await db.execute("SELECT id, content, transcript, updated_at FROM notes");
+  return result.rows.map((row) => ({
+    id: String(row.id),
+    content: String(row.content ?? ""),
+    transcript: row.transcript == null ? null : String(row.transcript),
+    updatedAt: Number(row.updated_at),
+  }));
+}
+
 /** Every audio file a note still links to (notes saved before text-only
  * storage) — what launch cleanup must never delete. */
 export async function listNoteAudioUris(): Promise<string[]> {

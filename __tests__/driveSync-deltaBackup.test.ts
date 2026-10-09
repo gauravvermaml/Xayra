@@ -30,8 +30,10 @@ jest.mock("../db/client", () => ({ getRawDatabase: jest.fn() }));
 jest.mock("../services/crypto/keyManager", () => ({ getOrCreateDatabaseKey: jest.fn(() => Promise.resolve("local-fake-key")) }));
 
 const mockListNotes = jest.fn();
+const mockListNoteRevisions = jest.fn(() => Promise.resolve([] as unknown[]));
 jest.mock("../services/notes/noteManager", () => ({
   listNotes: mockListNotes,
+  listNoteRevisions: mockListNoteRevisions,
   mergeMissingNotes: jest.fn(() => Promise.resolve(0)),
 }));
 
@@ -70,12 +72,20 @@ jest.mock("expo-file-system/legacy", () => ({
 /** A minimal in-memory stand-in for the DOWNLOADED remote backup's op-sqlite
  * connection — just enough to drive `insertMissingNoteRows`/
  * `insertMissingToDoRows`'s real SELECT/INSERT/transaction pattern. */
-function createFakeMergeDb(seedNoteIds: string[], seedToDoIds: string[] = []) {
-  let notes = seedNoteIds.map((id) => ({ id }));
+type FakeBackupNote = { id: string; content?: string; transcript?: string | null; created_at?: number; updated_at?: number };
+function createFakeMergeDb(seedNotes: (string | FakeBackupNote)[], seedToDoIds: string[] = []) {
+  let notes: FakeBackupNote[] = seedNotes.map((n) => (typeof n === "string" ? { id: n } : { ...n }));
   let todos = seedToDoIds.map((id) => ({ id }));
   const execute = jest.fn(async (query: string, params: unknown[] = []) => {
     const q = query.trim();
     if (/^SELECT id FROM notes/i.test(q)) return { rows: notes.map((n) => ({ id: n.id })) };
+    if (/^SELECT id, content, transcript, updated_at FROM notes/i.test(q)) return { rows: notes.map((n) => ({ ...n })) };
+    if (/^UPDATE notes SET content = \?, transcript = \?, updated_at = \? WHERE id = \?/i.test(q)) {
+      const [content, transcript, updated_at, id] = params as [string, string | null, number, string];
+      const row = notes.find((n) => n.id === id);
+      if (row) Object.assign(row, { content, transcript, updated_at });
+      return { rows: [] };
+    }
     if (/^SELECT id FROM todos/i.test(q)) return { rows: todos.map((t) => ({ id: t.id })) };
     if (/^INSERT OR IGNORE INTO notes/i.test(q)) {
       notes.push({ id: params[0] as string });
@@ -96,6 +106,7 @@ function createFakeMergeDb(seedNoteIds: string[], seedToDoIds: string[] = []) {
     transaction,
     close: jest.fn(),
     getNoteIds: () => notes.map((n) => n.id),
+    getNote: (id: string) => notes.find((n) => n.id === id),
     getToDoIds: () => todos.map((t) => t.id),
   };
 }
@@ -202,5 +213,63 @@ describe("backupToDrive delta merge (explicit user redesign, 2026-09-16)", () =>
     expect(fakeMergeDb.getNoteIds().sort()).toEqual(existingIds.sort());
     expect(result.addedNoteCount).toBe(0);
     expect(result.message).toBe("Everything is already backed up!");
+  });
+});
+
+describe("backupToDrive carries a local edit into an existing backup", () => {
+  const BACKED_UP = { id: "n1", content: "Theo came by to pick the vaccum.", transcript: null, created_at: 1_000, updated_at: 2_000 };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGetCurrentUser.mockReturnValue({ user: { email: "test@example.com", name: "Test User" } });
+    mockGetTokens.mockResolvedValue({ accessToken: "fake-token" });
+    mockReadAsStringAsync.mockResolvedValue("remote-fake-key");
+    mockListAllToDos.mockResolvedValue([]);
+    mockListNotes.mockResolvedValue([
+      { id: "n1", content: "Theo came by to pick the vacuum.", transcript: null, transcriptionModel: null, createdAt: 1_000 },
+    ]);
+    global.fetch = mockDriveFetchWithExistingBackup() as unknown as typeof fetch;
+  });
+
+  async function backUp(remote: FakeBackupNote[], local: { id: string; content: string; transcript: string | null; updatedAt: number }[]) {
+    const fakeMergeDb = createFakeMergeDb(remote);
+    mockOpen.mockReturnValue(fakeMergeDb);
+    mockListNoteRevisions.mockResolvedValue(local);
+    const { backupToDrive } = require("../services/sync/driveSync");
+    const result = await backupToDrive();
+    return { result, fakeMergeDb };
+  }
+
+  it("an edit made after the backup replaces the backed-up text in place: same id, created_at kept, no duplicate", async () => {
+    const { result, fakeMergeDb } = await backUp([BACKED_UP], [
+      { id: "n1", content: "Theo came by to pick the vacuum.", transcript: null, updatedAt: 5_000 },
+    ]);
+    expect(fakeMergeDb.getNoteIds()).toEqual(["n1"]);
+    // What restore reads from the backup (content, transcript, created_at):
+    expect(fakeMergeDb.getNote("n1")).toMatchObject({ content: "Theo came by to pick the vacuum.", created_at: 1_000, updated_at: 5_000 });
+    expect(result.updatedNoteCount).toBe(1);
+    expect(result.addedNoteCount).toBe(0);
+    expect(result.message).toBe("Updated 1 edited note in your Drive backup.");
+  });
+
+  it("a voice note's edited transcript is carried over too", async () => {
+    const { fakeMergeDb } = await backUp([{ ...BACKED_UP, transcript: "Theo came by to pick the vaccum." }], [
+      { id: "n1", content: "Theo came by to pick the vacuum.", transcript: "Theo came by to pick the vacuum.", updatedAt: 5_000 },
+    ]);
+    expect(fakeMergeDb.getNote("n1")).toMatchObject({ transcript: "Theo came by to pick the vacuum." });
+  });
+
+  it("a device holding an OLDER copy never overwrites a later edit already in the backup", async () => {
+    const { result, fakeMergeDb } = await backUp([{ ...BACKED_UP, content: "Newest wording from another device.", updated_at: 9_000 }], [
+      { id: "n1", content: "Theo came by to pick the vaccum.", transcript: null, updatedAt: 5_000 },
+    ]);
+    expect(fakeMergeDb.getNote("n1")).toMatchObject({ content: "Newest wording from another device.", updated_at: 9_000 });
+    expect(result.updatedNoteCount).toBe(0);
+  });
+
+  it("a newer timestamp with identical text (e.g. re-indexing) writes nothing", async () => {
+    const { result, fakeMergeDb } = await backUp([BACKED_UP], [{ id: "n1", content: BACKED_UP.content, transcript: null, updatedAt: 9_000 }]);
+    expect(result.updatedNoteCount).toBe(0);
+    expect(fakeMergeDb.execute.mock.calls.some(([q]) => /^UPDATE notes/i.test(String(q).trim()))).toBe(false);
   });
 });

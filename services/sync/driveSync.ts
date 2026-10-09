@@ -12,7 +12,7 @@ import { Platform } from "react-native";
 
 import { getRawDatabase } from "../../db/client";
 import { getOrCreateDatabaseKey } from "../crypto/keyManager";
-import { listNotes, mergeMissingNotes, type CloudNoteRecord } from "../notes/noteManager";
+import { listNoteRevisions, listNotes, mergeMissingNotes, type CloudNoteRecord, type NoteRevision } from "../notes/noteManager";
 import { listAllToDos, mergeMissingToDos, type CloudToDoRecord } from "../todos/todoManager";
 import type { Recurrence } from "../../db/schema";
 
@@ -569,6 +569,41 @@ async function insertMissingNoteRows(targetDb: DB, notes: CloudNoteRecord[]): Pr
   return missing.length;
 }
 
+/**
+ * Carries local edits (noteManager's updateNoteText) into an existing backup:
+ * a note already in the backup whose local copy is NEWER (later
+ * `updated_at`) and different is replaced in place — same id, so no
+ * duplicate; `created_at` is never written. "Newer" matters: a device
+ * holding an older copy can never overwrite a later edit already in the
+ * backup. Restore reads `content`/`transcript`/`created_at` from these
+ * rows and re-embeds locally, so it returns the edited text. Runs on the
+ * downloaded backup copy, opened with the backup's own key, exactly like
+ * insertMissingNoteRows — encryption is unchanged.
+ */
+async function updateEditedNoteRows(targetDb: DB, local: NoteRevision[]): Promise<number> {
+  const remote = await targetDb.execute("SELECT id, content, transcript, updated_at FROM notes");
+  const backedUp = new Map(remote.rows.map((row) => [String(row.id), row]));
+  const edited = local.filter((note) => {
+    const row = backedUp.get(note.id);
+    if (!row || !(note.updatedAt > Number(row.updated_at))) return false;
+    return row.content !== note.content || (row.transcript ?? null) !== note.transcript;
+  });
+  if (edited.length === 0) {
+    return 0;
+  }
+  await targetDb.transaction(async (tx) => {
+    for (const note of edited) {
+      await tx.execute("UPDATE notes SET content = ?, transcript = ?, updated_at = ? WHERE id = ?", [
+        note.content,
+        note.transcript,
+        note.updatedAt,
+        note.id,
+      ]);
+    }
+  });
+  return edited.length;
+}
+
 /** Mirror-image of `insertMissingNoteRows`, for the `todos` table — same
  * INSERT shape `todoManager.ts`'s `mergeMissingToDos` uses, deliberately not
  * reused for the same reason (that function's local-notification
@@ -604,7 +639,7 @@ async function insertMissingToDoRows(targetDb: DB, todos: CloudToDoRecord[]): Pr
   return missing.length;
 }
 
-function formatBackupMessage(addedNoteCount: number, addedToDoCount: number): string {
+function formatBackupMessage(addedNoteCount: number, addedToDoCount: number, updatedNoteCount = 0): string {
   const parts: string[] = [];
   if (addedNoteCount > 0) {
     parts.push(`${addedNoteCount} note${addedNoteCount === 1 ? "" : "s"}`);
@@ -612,12 +647,19 @@ function formatBackupMessage(addedNoteCount: number, addedToDoCount: number): st
   if (addedToDoCount > 0) {
     parts.push(`${addedToDoCount} to-do${addedToDoCount === 1 ? "" : "s"}`);
   }
-  return parts.length === 0 ? "Everything is already backed up!" : `Added ${parts.join(" and ")} to your Drive backup.`;
+  const updated = updatedNoteCount > 0 ? `Updated ${updatedNoteCount} edited note${updatedNoteCount === 1 ? "" : "s"} in your Drive backup.` : "";
+  if (parts.length === 0) {
+    return updated || "Everything is already backed up!";
+  }
+  return `Added ${parts.join(" and ")} to your Drive backup.${updated ? ` ${updated}` : ""}`;
 }
 
 export type BackupResult = {
   sizeBytes: number;
   addedNoteCount: number;
+  /** Notes already in the backup whose edited text replaced the backed-up
+   * copy (same id, same created_at) — see updateEditedNoteRows. */
+  updatedNoteCount?: number;
   addedToDoCount: number;
   /** Ready-to-display summary, e.g. for an Alert — see app/settings.tsx. */
   message: string;
@@ -711,6 +753,7 @@ async function mergeLocalIntoExistingRemoteBackup(
 
     const [localNotes, localToDos] = await Promise.all([listNotes(), listAllToDos()]);
     const addedNoteCount = await insertMissingNoteRows(mergeDb, localNotes.map(toCloudNoteRecord));
+    const updatedNoteCount = await updateEditedNoteRows(mergeDb, await listNoteRevisions());
     const addedToDoCount = await insertMissingToDoRows(mergeDb, localToDos.map(toCloudToDoRecord));
 
     // VACUUM INTO again here, exactly like the fresh-snapshot path below —
@@ -740,8 +783,9 @@ async function mergeLocalIntoExistingRemoteBackup(
     return {
       sizeBytes: record.sizeBytes,
       addedNoteCount,
+      updatedNoteCount,
       addedToDoCount,
-      message: formatBackupMessage(addedNoteCount, addedToDoCount),
+      message: formatBackupMessage(addedNoteCount, addedToDoCount, updatedNoteCount),
     };
   } finally {
     mergeDb?.close();
