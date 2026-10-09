@@ -2,9 +2,32 @@
 
 *(The app was originally built and shipped internally as "Silent Confidant," then briefly "Remi," before the full rebrand to **Xayra** documented below. Historical sections further down in this file predate the rename and refer to the app by whichever name was current at the time — that's intentional, not an inconsistency to fix; each section is an accurate record of what was true when it was written.)*
 
-**Last updated:** RC1 — Grounding v1 (release candidate, not yet built — see its own section below: deterministic temporal resolution, relationship-aware answer validation, no unvalidated text on screen; release-candidate freeze in effect). Previously: Build 57 (not yet built — see its own section below: fixed an asymmetric drag-commit threshold in the Record/Ask tray's 50%→100% expand gesture). Build 49 (Handsfree cancel-tap latency chain, splash sizing) and Build 48 + the Hybrid Extraction Architecture (fine-tuned model wired in) already shipped together in production 1.0.37; Build 50 through 57 are not yet built or shipped.
+**Last updated:** RC1 patch — 1.0.39 (see its own section below: reminder date/time fixes, grounding fixes from real-world reports, Related notes). Previously: RC1 — Grounding v1 (1.0.38/46, shipped to Internal Testing — see its own section below: deterministic temporal resolution, relationship-aware answer validation, no unvalidated text on screen; release-candidate freeze in effect). Previously: Build 57 (not yet built — see its own section below: fixed an asymmetric drag-commit threshold in the Record/Ask tray's 50%→100% expand gesture). Build 49 (Handsfree cancel-tap latency chain, splash sizing) and Build 48 + the Hybrid Extraction Architecture (fine-tuned model wired in) already shipped together in production 1.0.37; Build 50 through 57 are not yet built or shipped.
 
-## RC1 — Grounding v1 (release candidate; not yet built)
+## RC1 patch — 1.0.39 (Internal Testing)
+
+Fixes for release-blocking issues found in real Redmi use of RC1 (1.0.38/46), each traced to its first incorrect decision before changing anything. Validated on-device in the parallel **Xayra Dev** install (see CLAUDE.md "Development variant"); the Play install and its vault were never touched. Production model and prompts unchanged (production prompts verified byte-identical).
+
+**Reminders (`extractionLogic.ts`)**
+- "coming Friday in the morning" stored as today 13:00: chrono splits a day and a time-only phrase ("Friday" + "morning") into separate candidates/results. Auto-fill now counts day-naming candidates separately from time-only ones; a day and one time-only phrase in the same sentence of a single-task note combine; the resolver reads a later time-only result in the same phrase; a model phrase that drops the clock time is widened to chrono's longer candidate ("on 30th October" → "…at 9am").
+- Broad "morning" = 08:00 (product default; chrono says 06:00). Exact times stay exact.
+- "coming / this coming <weekday>" = next future occurrence (+7 days when said on that weekday); bare "Friday" unchanged. If the model drops "coming", it is restored from the note.
+
+**Grounding (`relationshipGrounding.ts`)**
+- A legitimate recording-date answer was rejected because the spoken question's spelling differed from the note ("vaccum"/"vacuum" class): speech-to-text spelling variants (one edit or one adjacent swap, 5+ letters) now match.
+- Month/weekday abbreviations ("Oct") were read as invented names — safe only together with coverage, which ships with it.
+- **Note-level coverage**: a statement anchored to one note may not borrow evidence words from another note (a cross-note false association passed before). Sentence-level was measured and rejected 9 correct answers.
+- **Asked-relationship check** (questions naming a person): with "did I…" questions, ALL the asked action/object words must appear in one sentence naming that person, or the answer is rejected — information ABOUT someone is not a conversation WITH them; when such sentences exist, answer words must come from them (an object from a different event in the same note is rejected). Closed irregular-verb table, no synonyms. Unscoped, it rejected 14 correct answers; scoped, none.
+
+**Related notes UX**: under the "couldn't verify" fallback (validator rejection or model refusal with notes shown), the shown notes that share a word with the question, as one section of up to 3 rows (date + excerpt, tap opens the note). Never citation chips; TTS reads only the fallback.
+
+**Eval harness**: the RAG prompt's "Today is" line used the real clock while every other eval date was pinned — the model was told two different "todays" and a desktop run failed T8 for that reason alone. `buildPrompt` takes an optional `now`, passed only by eval scripts; production callers unchanged.
+
+**Validation**: 448/448 unit tests; bundle OK; 132-answer sweep unchanged (5/114 correct answers rejected, 12/18 wrong answers caught, 6 still shown); ten temporal regressions unchanged (8 correct; Q2/Q5 model failures correctly rejected); relationship regressions unchanged. Redmi (Xayra Dev): reminder 30 Oct 09:00 ✓; "coming Friday in the morning" said on Friday → following Friday 08:00 ✓; recording-date "when" answer ✓; "what did X pick from me" → correct object ✓; unsupported "spoke to" → fallback + Related note ✓; Related note opens the note ✓; TTS fallback-only ✓.
+
+**Known safe-failure limitations (documented, not triggers for another phase)**: no pronoun chaining ("He approved…" can't be tied to a name → refused); a "did I…" question worded differently from the note ("chat" vs "spoke") is refused; a place name before a verb can be read as its actor ("went to [Place] to pick…") so some legitimate answers are refused; plus RC1's documented limitations below.
+
+## RC1 — Grounding v1 (release candidate; shipped as 1.0.38/46)
 
 **Status:** accepted as the RAG Grounding v1 engineering baseline on 2026-10-02 after a Redmi smoke test (7/8 checks PASS; the Varun different-date scenario was not reproducible in the tester's real vault and is covered by automated regressions instead). Target: an Internal Testing AAB installed on Pixel 9 through the existing Play tester link. Production model unchanged (`qwen-task-extractor-q4_k_m.gguf`, fine-tuned Qwen2.5-1.5B). **Release-candidate freeze in effect** — see "Freeze" below.
 

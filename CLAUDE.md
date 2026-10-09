@@ -17,7 +17,7 @@
 Accepted 2026-10-02 as the RC1 engineering baseline. Full write-up, validation numbers and known limitations: `PROJECT_STATE_HANDOFF.md` → "RC1 — Grounding v1".
 
 - **Freeze**: no new reasoning features, retrieval heuristics, prompt experiments or model changes without an explicitly identified **release-blocking** failure. The documented false rejections (F17, F9, F13, U6) and the six incomplete/off-topic answers are evaluation limitations, not triggers for another architecture phase. RC1 keeps the fine-tuned production model; Qwen3 is a later, separate evaluation.
-- **Pipeline**: dates are resolved deterministically BEFORE generation (`temporalResolver.ts`); after generation, `finalizeAnswer` (`ragFormatting.ts`) runs, in order: refusal mapping → unsupported denial → "Yes" checks → explicit-year date check → relationship check (`relationshipGrounding.ts`) → word-overlap grounding → verification addendum.
+- **Pipeline**: dates are resolved deterministically BEFORE generation (`temporalResolver.ts`); after generation, `finalizeAnswer` (`ragFormatting.ts`) runs, in order: refusal mapping → unsupported denial → "Yes" checks → explicit-year date check → relationship check (`relationshipGrounding.ts`: single-sentence value support, note-level coverage, speech-to-text spelling variants, and the asked-relationship check for questions naming a person) → word-overlap grounding → verification addendum. When notes were shown but no verified answer comes back, the fallback carries **Related notes** (`relatedEvidenceNotes`) — the shown notes about the question, never presented as proof.
 - **Invariants — keep these when touching RAG code**:
   - Validators **validate, never rewrite** a generated claim. An unsupported answer becomes `UNVERIFIED_ANSWER_MESSAGE` with no citations. (The old post-generation year repair was removed on purpose.)
   - An unsupported "Yes" is rejected, never converted into "No". Absence of notes is never proof that something didn't happen.
@@ -26,6 +26,8 @@ Accepted 2026-10-02 as the RC1 engineering baseline. Full write-up, validation n
   - `rag.ts`'s pipeline trace prints private note text, so it stays `__DEV__`-only.
   - Never rely on the model to validate itself, and don't add large keyword dictionaries.
   - `rag.ts` and every eval script share `finalizeAnswer`; keep them on the same path.
+- **Closed lists, not dictionaries**: the irregular-verb table (`IRREGULAR_VERB_BASE`) is grammatical normalization only — never add synonyms ("chat" ≠ "speak"). Number words and month/weekday abbreviations are the other closed lists.
+- **Test fixtures**: never commit a user's real diary text as a fixture or seed — replace it with a synthetic note that preserves the structure under test.
 - **Regression tools** (desktop llama.cpp, raw completion `-no-cnv -bf`, production model at `models/qwen-task-extractor-q4_k_m.gguf`):
   ```
   npx tsx scripts/eval/runTemporalRegression.ts                       # six hot-day questions
@@ -57,6 +59,19 @@ Accepted 2026-10-02 as the RC1 engineering baseline. Full write-up, validation n
 - `db/` — `schema.ts` (Drizzle schema plus raw `vec0`/`fts5` SQL — drizzle-kit has no first-class virtual-table support) and `client.ts` (connection, dimension-migration logic).
 - `modules/` — small local Expo native modules, following the same pattern each time (`package.json` with a `file:` reference from root `package.json`, `expo-module.config.json`, a thin Kotlin `Module`): `app-signature/` (release-signature verification), `device-cpu/` (`Runtime.getRuntime().availableProcessors()` for inference thread sizing, plus `PowerManager.getCurrentThermalStatus()` so background AI work can defer itself when the device is already hot), and `download-bridge/` (hands a large model download to Android's own system `DownloadManager` service so it survives this app's process being backgrounded/killed mid-transfer — see `services/ai/modelDownloadManager.ts`).
 - `patches/` — `patch-package` fixes for native dependencies with broken Gradle scripts (see Coding Standards).
+
+## Development variant (parallel install on a test device)
+
+`APP_VARIANT=development` (read by `app.config.js`) builds **Xayra Dev** — package `com.anonymous.silentconfidant.dev`, scheme `xayra-dev` — which installs alongside the Play build without touching it or its encrypted vault. Unset, `app.config.js` returns `app.json`'s config unchanged (production package `com.anonymous.silentconfidant`; EAS still bumps versionCode in `app.json`).
+
+```
+APP_VARIANT=development CI=1 npx expo prebuild --clean --no-install --platform android
+cd android && JAVA_HOME=<JDK 17> APP_VARIANT=development ./gradlew assembleDebug
+adb install android/app/build/outputs/apk/debug/app-debug.apk      # plain install — never -r, never uninstall
+APP_VARIANT=development npx expo start --dev-client                  # + adb reverse tcp:8081 tcp:8081
+```
+
+Never run destructive package commands (uninstall, `pm clear`, `install -r`) against the production package on a device holding a real vault. The generated `android/` folder is gitignored; regenerate it without the variable before any LOCAL production build (EAS cloud builds are unaffected). Dev-only seed data: `xayra-dev://dev-seed`.
 
 ## Build, typecheck & native rebuild
 
