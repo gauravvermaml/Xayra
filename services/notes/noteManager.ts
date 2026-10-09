@@ -890,17 +890,51 @@ const FTS_STOPWORDS = new Set([
  * you say"), in which case falling back to the unfiltered terms is safer
  * than returning a query that matches nothing.
  */
-function toFtsQuery(text: string): string {
-  const allTerms = text
-    .split(/\s+/)
-    .map((term) => term.replace(/"/g, '""').trim())
-    .filter(Boolean);
+export function toFtsQuery(text: string, extraTerms: string[] = []): string {
+  const allTerms = queryWords(text);
   const contentTerms = allTerms.filter((term) => !FTS_STOPWORDS.has(term.toLowerCase()));
-  const terms = contentTerms.length > 0 ? contentTerms : allTerms;
+  const terms = [...new Set([...(contentTerms.length > 0 ? contentTerms : allTerms), ...extraTerms])];
   if (terms.length === 0) {
     return '""';
   }
-  return terms.map((term) => `"${term}"`).join(" OR ");
+  return terms.map((term) => `"${term.replace(/"/g, '""')}"`).join(" OR ");
+}
+
+/**
+ * The query's words as FTS5's tokenizer will see them: leading/trailing
+ * punctuation stripped BEFORE the stopword test — "about?" used to slip past
+ * it as a non-stopword and then match "about" in an unrelated note
+ * (confirmed on-device: "What was Theos notes all about?" retrieved "Coffee
+ * with Marcus about the contract renewal" on that word alone). A possessive
+ * "'s" is unambiguous syntax, so "Theo's" searches as "Theo" (FTS5 would
+ * otherwise need the separate token "s" right after it).
+ */
+export function queryWords(text: string): string[] {
+  return text
+    .split(/\s+/)
+    .map((word) => word.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").replace(/['’]s$/i, ""))
+    .filter(Boolean);
+}
+
+/**
+ * Possessives typed or transcribed without the apostrophe ("Theos notes"):
+ * a capitalized word ending in a single "s" is ALSO searched without it —
+ * but only when the notes themselves say so: the stripped form occurs in
+ * some note and the word as written occurs in none. A rule that always
+ * stripped the "s" would turn "James" into "Jame" and "Chris" into "Chri";
+ * checking the vault's own words means those (which notes contain as
+ * written, and whose stripped forms they don't) are left alone.
+ */
+export async function possessiveSearchVariants(text: string, occursInNotes: (word: string) => Promise<boolean>): Promise<string[]> {
+  const variants: string[] = [];
+  for (const word of queryWords(text)) {
+    if (!/^[A-Z][a-z]+[^s]s$/.test(word) || FTS_STOPWORDS.has(word.toLowerCase())) continue;
+    const stripped = word.slice(0, -1);
+    if (!(await occursInNotes(word)) && (await occursInNotes(stripped))) {
+      variants.push(stripped);
+    }
+  }
+  return variants;
 }
 
 /**
@@ -960,6 +994,10 @@ export async function hybridSearchNotes(
 
   let ftsRows: typeof vectorResult.rows = [];
   if (await isFtsAvailable()) {
+    const occursInNotes = async (word: string) =>
+      (await db.execute("SELECT 1 FROM notes_fts WHERE notes_fts MATCH ? LIMIT 1", [`"${word.replace(/"/g, '""')}"`])).rows
+        .length > 0;
+    const possessiveVariants = await possessiveSearchVariants(trimmed, occursInNotes);
     const ftsResult = await db.execute(
       `
         SELECT notes.id, notes.content, notes.transcript, notes.audio_uri, notes.transcription_model, notes.created_at
@@ -969,7 +1007,7 @@ export async function hybridSearchNotes(
         ORDER BY bm25(notes_fts) ASC
         LIMIT ?
       `,
-      [toFtsQuery(trimmed), poolSize]
+      [toFtsQuery(trimmed, possessiveVariants), poolSize]
     );
     ftsRows = ftsResult.rows;
   }

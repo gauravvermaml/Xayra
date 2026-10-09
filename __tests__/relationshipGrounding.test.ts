@@ -366,3 +366,46 @@ describe("asked relationship — the answer must answer what was asked", () => {
     expect(verdict("When did I chat with Marco?", [SPOKE], "You spoke to Marco on Saturday, October 3, 2026.")).toBe("reject");
   });
 });
+
+describe("named attribution must be supported by the shown notes (Xayra Dev report, 9 Oct)", () => {
+  const local = (y: number, m: number, d: number, h: number, mi: number) => Math.floor(new Date(y, m - 1, d, h, mi).getTime() / 1000);
+  // The unrelated note keyword search returned; the person asked about is in none of it.
+  const MARCUS = custom("marcus", "Coffee with Marcus about the contract renewal. He wants a decision by mid October.", local(2026, 9, 23, 20, 18));
+  const THEO = custom(
+    "theo",
+    "Theo just came by to pick the vacuum. He is painting the fence so went to Penrith Hardware to pick a roller. On the way back, he stopped by",
+    local(2026, 10, 7, 21, 32)
+  );
+
+  it.each([
+    ["What was Theos notes all about?", "Theo's notes were about a coffee meeting with Marcus regarding the contract renewal, and he wants a decision by mid October."],
+    ["What were Theo's notes about?", "Theo's notes were about a coffee meeting with Marcus regarding the contract renewal."],
+    ["What was Theos notes all about?", "Theo had coffee with Marcus about the contract renewal."],
+    ["What was Theos notes all about?", "The notes from Theo were about coffee with Marcus and the contract renewal."],
+  ])("an unrelated note is never relabelled as the asked person's — %s → %s", (question, answer) => {
+    expect(verdict(question, [MARCUS], answer)).toBe("reject");
+  });
+
+  it("the same possessive attribution is accepted when that person's note was shown", () => {
+    expect(verdict("What were Theos notes about?", [THEO], "Theo's note says he came by to pick the vacuum.")).toBe("accept");
+  });
+
+  it("the answer about the shown note, without misattribution, is still accepted", () => {
+    expect(verdict("What was Theos notes all about?", [MARCUS], "Your note is about coffee with Marcus about the contract renewal.")).toBe("accept");
+  });
+
+  it("a nationality after 'a' is an ordinary word, so a spelling correction passes (Brazillian → Brazilian)", () => {
+    const tenant = custom("tenant", "He has just approved a tenant for it, a Brazillian couple.", local(2026, 10, 6, 13, 8));
+    expect(verdict("Who is the tenant?", [tenant], "The tenant is a Brazilian couple.")).toBe("accept");
+  });
+
+  it("similar but different people's names are never interchangeable", () => {
+    const jon = custom("jon", "Lunch with Jon and Priya at the market.", local(2026, 10, 5, 12, 0));
+    expect(verdict("Who did I have lunch with?", [jon], "You had lunch with John and Priya.")).toBe("reject");
+  });
+
+  it("'Today's' at the start of an answer is not a person", () => {
+    const walk = custom("walk", "Went for a 5k walk along the river this morning.", local(2026, 10, 2, 8, 0));
+    expect(verdict("What did I do this morning?", [walk], "Today's note says you went for a 5k walk along the river.")).toBe("accept");
+  });
+});

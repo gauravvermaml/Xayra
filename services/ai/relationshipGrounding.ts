@@ -214,14 +214,36 @@ const sameAmount = (a: Amount, b: Amount) => a.value === b.value && (a.currency 
  * function and calendar words ("The Overstory" is not a name "the"). */
 export function buildNameLexicon(...texts: string[]): Set<string> {
   const lexicon = new Set<string>();
+  const isCandidate = (w: string) =>
+    w !== "i" && w !== "now" && !CALENDAR_WORDS.has(w) && !CALENDAR_ABBREVIATIONS.has(w) && !FUNCTION_WORDS.has(w);
   for (const t of texts) {
     for (const m of t.matchAll(/(?<![.!?:•]\s|^)(?<!^\s*)\b([A-Z][a-z]+)/gm)) {
+      // "a Brazilian couple", "an Italian restaurant": a capitalized word
+      // after an indefinite article is a proper adjective, not a person —
+      // checked as an ordinary word instead (so "Brazillian"/"Brazilian"
+      // meet through the ordinary spelling tolerance, never through fuzzy
+      // matching of people's names).
+      if (INDEFINITE_ARTICLE_BEFORE.test(t.slice(0, m.index))) continue;
       const w = m[1].toLowerCase();
-      if (w !== "i" && w !== "now" && !CALENDAR_WORDS.has(w) && !CALENDAR_ABBREVIATIONS.has(w) && !FUNCTION_WORDS.has(w)) lexicon.add(w);
+      if (isCandidate(w)) lexicon.add(w);
+    }
+    // A capitalized possessive is a name even at the start of a sentence:
+    // "Theo's notes were about…" attributes evidence to Theo, and must be
+    // checked like any other name.
+    for (const m of t.matchAll(/\b([A-Z][a-z]+)['’]s\b/g)) {
+      const w = m[1].toLowerCase();
+      if (isCandidate(w) && !NON_PERSON_POSSESSIVES.has(w)) lexicon.add(w);
     }
   }
   return lexicon;
 }
+
+const INDEFINITE_ARTICLE_BEFORE = /\b(?:a|an)\s+$/i;
+/** Sentence-initial possessives that are never a person ("Today's plan"). */
+const NON_PERSON_POSSESSIVES = new Set([
+  "here", "let", "how", "one", "today", "yesterday", "tomorrow", "tonight", "last", "next",
+  "everyone", "someone", "anyone", "nobody", "everybody", "somebody", "anybody", "nothing", "something", "everything",
+]);
 
 type Token = { word: string; stem: string; name: string | null; possessive: boolean };
 
@@ -415,10 +437,19 @@ export function validateRelationships(input: {
 }): RelationshipCheck {
   const { answer, question, evidence, now, eventEvidence } = input;
   const lexicon = buildNameLexicon(question, ...evidence.map((s) => s.text), answer);
+  // "What were Theos notes about?" answered "Theo had coffee with…": the
+  // question's apostrophe-less possessive names Theo, so a capitalized "Theo"
+  // in the answer is a name even at the start of a sentence.
+  for (const t of tokensOf(question, lexicon)) {
+    if (!t.name || !/^[a-z]+[^s]s$/.test(t.name)) continue;
+    const stripped = t.name.slice(0, -1);
+    if (new RegExp(`\\b${stripped[0].toUpperCase()}${stripped.slice(1)}\\b`).test(answer)) lexicon.add(stripped);
+  }
   const sentences = evidence.map((s) => parseEvidence(s, lexicon));
   const facts = extractAnswerFacts(answer, question, now, lexicon);
   const focus = questionTerms(question, now).filter((f) => !FUNCTION_WORDS.has(f));
-  const known = new Set([...sentences.flatMap((s) => s.names), ...namesOf(tokensOf(question, lexicon)).map((n) => n.name)]);
+  const evidenceNames = new Set(sentences.flatMap((s) => s.names));
+  const known = new Set([...evidenceNames, ...namesOf(tokensOf(question, lexicon)).map((n) => n.name)]);
   const violations: RelationshipViolation[] = [];
   const support: SupportLink[] = [];
   const supporting = new Set<ParsedSentence>();
@@ -473,7 +504,12 @@ export function validateRelationships(input: {
     const binds = (s: ParsedSentence, self: string) => shares(s.terms, s.literals, self) && agentConsistent(s);
 
     for (const n of fact.names) {
-      if (!known.has(n.name)) reject(`name "${n.name}" appears in no retrieved note`);
+      // A possessive attributes the evidence TO someone ("Theo's notes were
+      // about…"), so that person must be in the notes the model was shown —
+      // naming them in the question doesn't count.
+      if (n.possessive ? !evidenceNames.has(n.name) : !known.has(n.name)) {
+        reject(`name "${n.name}" appears in no retrieved note`);
+      }
     }
 
     if (fact.negated) {
