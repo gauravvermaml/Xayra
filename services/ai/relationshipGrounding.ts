@@ -75,6 +75,33 @@ const FUNCTION_WORDS = new Set(
 const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
 const WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 const CALENDAR_WORDS = new Set([...MONTHS, ...WEEKDAYS]);
+/** Month/weekday abbreviations ("Oct 7", "Tue") are dates, never names. */
+const CALENDAR_ABBREVIATIONS = new Set([
+  "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec",
+  "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat", "sun",
+]);
+
+/** One edit — including one swapped adjacent pair — between two words of
+ * five or more letters: the spelling variants speech-to-text produces for
+ * one word ("vaccum" in a spoken question, "vacuum" in the note). The same
+ * tolerance extraction's task-anchoring check already gives transcripts. */
+export function isSpellingVariant(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (Math.min(a.length, b.length) < 5 || Math.abs(a.length - b.length) > 1) return false;
+  const d: number[][] = Array.from({ length: a.length + 1 }, (_, i) =>
+    Array.from({ length: b.length + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
+  );
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (i > 1 && j > 1 && a[i - 1] === b[j - 2] && a[i - 2] === b[j - 1]) d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+    }
+  }
+  return d[a.length][b.length] <= 1;
+}
+
+/** `term` is in `terms`, allowing speech-to-text spelling variants. */
+export const hasTerm = (terms: string[], term: string) => terms.some((t) => isSpellingVariant(t, term));
 /** Subject pronouns end an agent search: the agent is then unknown, not a
  * different name. Possessive determiners ("his brother Elias") are skipped. */
 const SUBJECT_PRONOUNS = new Set(["i", "you", "we", "he", "she", "they", "it"]);
@@ -190,7 +217,7 @@ export function buildNameLexicon(...texts: string[]): Set<string> {
   for (const t of texts) {
     for (const m of t.matchAll(/(?<![.!?:•]\s|^)(?<!^\s*)\b([A-Z][a-z]+)/gm)) {
       const w = m[1].toLowerCase();
-      if (w !== "i" && w !== "now" && !CALENDAR_WORDS.has(w) && !FUNCTION_WORDS.has(w)) lexicon.add(w);
+      if (w !== "i" && w !== "now" && !CALENDAR_WORDS.has(w) && !CALENDAR_ABBREVIATIONS.has(w) && !FUNCTION_WORDS.has(w)) lexicon.add(w);
     }
   }
   return lexicon;
@@ -395,14 +422,18 @@ export function validateRelationships(input: {
   const violations: RelationshipViolation[] = [];
   const support: SupportLink[] = [];
   const supporting = new Set<ParsedSentence>();
+  // The sentences the CURRENT statement's values were anchored to.
+  let anchors = new Set<ParsedSentence>();
   const link = (statement: string, value: string, s: ParsedSentence) => {
     supporting.add(s);
+    anchors.add(s);
     support.push({ statement, value, noteId: s.source.noteId, noteIndex: s.source.noteIndex, sentenceIndex: s.source.sentenceIndex });
   };
   const ask = ASKS.find((a) => a.pattern.test(question));
 
   for (const fact of facts) {
     const reject = (reason: string) => violations.push({ statement: fact.text, reason });
+    anchors = new Set<ParsedSentence>();
 
     if (fact.decline) {
       // A decline is accepted only when the evidence really lacks the asked
@@ -427,13 +458,13 @@ export function validateRelationships(input: {
     // $480" answers "How much did the car service cost?" about the service.
     const statementTerms = [...fact.terms, ...focus, ...fact.literals];
     const shares = (terms: string[], literals: string[], self: string) =>
-      statementTerms.some((t) => t !== self && (terms.includes(t) || literals.includes(t)));
+      statementTerms.some((t) => t !== self && (hasTerm(terms, t) || literals.includes(t)));
     const predicates = fact.terms.filter((t) => !fact.names.some((n) => stem(n.name) === t));
     // "Eli recommended that his brother Elias move to Perth" does not support
     // "Eli is moving to Perth": the shared predicate has a different agent.
     const agentConsistent = (s: ParsedSentence) =>
       predicates
-        .filter((p) => s.terms.includes(p))
+        .filter((p) => hasTerm(s.terms, p))
         .every((p) => {
           const claimed = agentOf(fact.tokens, p);
           const recorded = agentOf(s.tokens, p);
@@ -508,20 +539,137 @@ export function validateRelationships(input: {
       const holders = sentences.filter((s) => dateSupported(d, s) && binds(s, ""));
       // A date that is only a note's recording day needs a shared predicate
       // word too — sharing a name or place is not enough.
-      const ok = holders.find((s) => explicitDate(d, s) || predicates.some((p) => s.terms.includes(p)));
+      const ok = holders.find((s) => explicitDate(d, s) || predicates.some((p) => hasTerm(s.terms, p)));
       if (ok) link(fact.text, describePeriod(d), ok);
       else reject(`${describePeriod(d)} is not recorded as the date of this event (${holders.length ? "only a note's recording date" : "no sentence"})`);
     }
+
+    // Note-level coverage: a statement anchored to a note by its values may
+    // not take any other word the evidence holds from a DIFFERENT note —
+    // "Theo picked the garden studio" anchors to Theo's note and borrows "garden
+    // flat" from Marco's. Same-note combinations stay allowed (sentence
+    // level rejected 9 correct answers that join neighbouring sentences).
+    // Words found nowhere in the evidence are left to the other checks.
+    // Possessive names are exempt, as everywhere here ("Eli's brother").
+    if (anchors.size > 0) {
+      const anchorNotes = new Set([...anchors].map((s) => s.source.noteIndex));
+      for (const t of fact.terms) {
+        if (CALENDAR_WORDS.has(t) || fact.names.some((n) => n.possessive && stem(n.name) === t)) continue;
+        const holders = sentences.filter((s) => hasTerm(s.terms, t));
+        if (holders.length > 0 && !holders.some((s) => anchorNotes.has(s.source.noteIndex))) {
+          reject(`"${t}" comes from a different note than the rest of this statement`);
+        }
+      }
+    }
   }
+
+  violations.push(...checkAskedRelationship(question, answer, facts, sentences, focus, lexicon));
 
   // The asked-for value must come from a sentence about the question's
   // subject — unless the answer itself says the notes lack it.
   if (ask && supporting.size > 0 && focus.length > 0 && !facts.some((f) => f.decline)) {
-    if (![...supporting].some((s) => focus.some((f) => s.terms.includes(f)))) {
+    if (![...supporting].some((s) => focus.some((f) => hasTerm(s.terms, f)))) {
       violations.push({ statement: answer, reason: `the ${ask.type} given comes from a note sentence that is not about ${focus.join("/")}` });
     }
   }
   return { ok: violations.length === 0, violations, support };
+}
+
+// ---------------------------------------------------------------------------
+// Asked relationship — does the evidence state what the question asks?
+// ---------------------------------------------------------------------------
+
+/**
+ * English irregular past forms → base form. Grammatical normalization only,
+ * so "Spoke to Marco" matches "speak" and "Sam made" matches "make" — a
+ * closed list, like the number words. Never synonyms: "chat" is not
+ * "speak", "visit" is not "meet".
+ */
+const IRREGULAR_VERB_BASE: Record<string, string> = Object.fromEntries(
+  (
+    "said:say made:make went:go gone:go saw:see seen:see spoke:speak spoken:speak met:meet bought:buy brought:bring " +
+    "thought:think told:tell came:come got:get gave:give given:give took:take taken:take ate:eat eaten:eat drank:drink " +
+    "swam:swim ran:run left:leave paid:pay sent:send found:find had:have did:do done:do wrote:write written:write " +
+    "sold:sell kept:keep slept:sleep felt:feel taught:teach caught:catch flew:fly drove:drive driven:drive rode:ride " +
+    "won:win lost:lose spent:spend built:build heard:hear held:hold stood:stand sat:sit began:begin broke:break " +
+    "broken:break chose:choose forgot:forget grew:grow knew:know wore:wear woke:wake lent:lend"
+  )
+    .split(" ")
+    .map((pair) => pair.split(":"))
+);
+const verbBase = (word: string) => stem(IRREGULAR_VERB_BASE[word] ?? word);
+
+/** Question words that frame the question rather than name what it asks
+ * about ("When did I LAST…", "What do I KNOW about…", "What DATE…"). */
+const QUESTION_FRAME_TERMS = new Set(["last", "know", "rememb", "dat", "time"]);
+
+/** "did I…", "have I…" — the question is about the user's own participation. */
+const USER_IS_SUBJECT = /\b(?:did|do|have|was|am|had)\s+i\b/i;
+
+/**
+ * The answer must answer the relationship the question asks about, not a
+ * different one the notes also record. Scoped — exactly as tested — to
+ * questions that name a person (possessives like "Priya's" don't count):
+ *
+ *  - "Relationship sentences" are evidence sentences naming that person and
+ *    containing the question's action/object words (spelling variants and
+ *    irregular verb forms allowed).
+ *  - A question about the user's OWN participation ("When did I speak to
+ *    Marco?") needs ALL its action/object words in one such sentence; with
+ *    none, nothing records what was asked and the answer is rejected —
+ *    information ABOUT Marco is not a conversation WITH him. Other
+ *    questions skip this rejection: "Where does Priya live?" is legitimately
+ *    answered by "Priya moved into her new flat", a paraphrase no word check
+ *    can tell from an unrecorded event.
+ *  - When relationship sentences exist, every answer word the evidence
+ *    holds must come from one of them: "What did Theo pick from me?" is
+ *    answered by "Theo just came by to pick the vacuum", not by the roller
+ *    he picked at Penrith Hardware.
+ *
+ * Applying this to every question rejected 14 correct answers in the
+ * 132-answer sweep (weather, knee, car); in this scope it rejects none.
+ */
+function checkAskedRelationship(
+  question: string,
+  answer: string,
+  facts: AnswerFact[],
+  sentences: ParsedSentence[],
+  focus: string[],
+  lexicon: Set<string>
+): RelationshipViolation[] {
+  const statements = facts.filter((f) => !f.decline);
+  const asked = tokensOf(question, lexicon);
+  const askedNames = [...new Set(asked.flatMap((t) => (t.name && !t.possessive ? [t.name] : [])))];
+  const anyNames = new Set(asked.flatMap((t) => (t.name ? [stem(t.name)] : [])));
+  const askedTerms = focus.filter((f) => !anyNames.has(f) && !CALENDAR_WORDS.has(f) && !QUESTION_FRAME_TERMS.has(f));
+  if (statements.length === 0 || askedNames.length === 0 || askedTerms.length === 0) return [];
+
+  const userIsSubject = USER_IS_SUBJECT.test(question);
+  const needed = userIsSubject ? askedTerms.length : 1;
+  const baseForms = (s: ParsedSentence) => [...new Set([...s.terms, ...s.tokens.map((t) => verbBase(t.word))])];
+  const relationship = sentences.filter(
+    (s) =>
+      askedNames.some((n) => s.names.includes(n)) &&
+      askedTerms.filter((q) => hasTerm(baseForms(s), verbBase(q))).length >= needed
+  );
+
+  if (relationship.length === 0) {
+    return userIsSubject
+      ? [{ statement: answer, reason: `no note sentence states what the question asks (${[...askedNames, ...askedTerms].join("/")})` }]
+      : [];
+  }
+  const questionStems = asked.map((t) => t.stem);
+  const violations: RelationshipViolation[] = [];
+  for (const fact of statements) {
+    for (const t of fact.terms) {
+      if (CALENDAR_WORDS.has(t) || hasTerm(questionStems, t) || fact.names.some((n) => n.possessive && stem(n.name) === t)) continue;
+      const holders = sentences.filter((s) => hasTerm(s.terms, t));
+      if (holders.length > 0 && !holders.some((s) => relationship.includes(s))) {
+        violations.push({ statement: fact.text, reason: `"${t}" comes from a note sentence that does not state what the question asks` });
+      }
+    }
+  }
+  return violations;
 }
 
 // ---------------------------------------------------------------------------
@@ -651,4 +799,28 @@ export function verificationAddendum(
       : `That was not ${queriedText}.`;
   }
   return `Your notes date this to ${describePeriod(event)}, not ${queried.label}${queried.relative ? ` (${queried.relative})` : ""}.`;
+}
+
+// ---------------------------------------------------------------------------
+// Related notes (shown under the fallback when an answer can't be verified)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which of the notes the model was actually shown are about the question:
+ * those with a shown sentence sharing at least one of the question's own
+ * content words, spelling variants included ("vaccum" finds "vacuum"). Lets
+ * the UI offer the user their own notes to check when no verified answer
+ * can be given — never as proof of anything, and never a retrieved note the
+ * model wasn't shown, or one about something else (the Marco note for a
+ * question about Theo). Returns note indices, in context order.
+ */
+export function relatedEvidenceNotes(evidence: EvidenceSentence[], question: string, now: Date): number[] {
+  const focus = questionTerms(question, now).filter((f) => !FUNCTION_WORDS.has(f) && !CALENDAR_WORDS.has(f));
+  const related: number[] = [];
+  for (const sentence of evidence) {
+    if (related.includes(sentence.noteIndex)) continue;
+    const terms = contentTerms(sentence.text);
+    if (focus.some((f) => hasTerm(terms, f))) related.push(sentence.noteIndex);
+  }
+  return related;
 }

@@ -4,6 +4,7 @@ import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
 
 import { MarkdownText } from "./MarkdownText";
 import { NoteCard } from "./NoteCard";
+import { RelatedNotesSection } from "./RelatedNotesSection";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { allowCellularDownloadAndResume, resumeDownloads, type ModelDownloadStatus } from "../services/ai/modelDownloadManager";
 import { PIPELINE_STAGE_LABELS, subscribeToPipelineStage } from "../services/ai/pipelineStage";
@@ -279,6 +280,8 @@ export function ChatSheetContent({
             <Text style={styles.speakerButtonText}>{speakingMessageId === message.id ? "⏹ Stop" : "🔊 Listen"}</Text>
           </Pressable>
         )}
+        {/* Shown only under the "couldn't verify" fallback — see RelatedNotesSection. */}
+        <RelatedNotesSection notes={message.relatedNotes ?? []} onOpen={onShowCitation} />
         {!!message.citations?.length && (
           <View style={styles.citationRow}>
             {message.citations.map((citation) => (

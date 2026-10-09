@@ -1,6 +1,7 @@
 import { generateLocalRAGAnswer } from "./localLlama";
 import { setPipelineStage } from "./pipelineStage";
 import { buildNoteContext, finalizeAnswer, resolveNoteText } from "./ragFormatting";
+import { relatedEvidenceNotes } from "./relationshipGrounding";
 import { getNotesForTarget, getRecentNotes, hybridSearchNotes, type HybridSearchResult } from "../notes/noteManager";
 import {
   buildGroundedQuestion,
@@ -70,7 +71,13 @@ export type RagCitation = {
 
 export type RagAnswer = {
   text: string;
+  /** Sources of a verified answer — empty whenever the answer was replaced. */
   citations: RagCitation[];
+  /** Only when notes WERE shown to the model but no verified answer came
+   * back (the model refused, or a validator rejected its answer): the shown
+   * notes that are about the question, offered for the user to check
+   * themselves. Never proof of anything; empty otherwise. */
+  relatedNotes: RagCitation[];
 };
 
 /**
@@ -188,7 +195,12 @@ export async function generateRAGAnswer(
       final: result.text,
     });
     const keepCitations = result.outcome === "shown";
-    return { text: result.text, citations: keepCitations ? citations : [] };
+    // No notes shown → no related notes; a verified answer keeps its normal
+    // citations instead.
+    const relatedIndices =
+      keepCitations || result.outcome === "no-notes" || !built ? [] : relatedEvidenceNotes(built.evidence, userQuery, now);
+    const relatedNotes = citations.filter((_, k) => relatedIndices.includes(included[k]));
+    return { text: result.text, citations: keepCitations ? citations : [], relatedNotes };
   } finally {
     // Ends the answering stage on every path: a validated answer, a thrown
     // error, or the user's cancel (LlamaCancelledError).

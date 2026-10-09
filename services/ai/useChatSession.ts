@@ -13,6 +13,9 @@ export type ChatMessage = {
   role: "user" | "assistant";
   text: string;
   citations?: RagCitation[];
+  /** Notes shown to the model when no verified answer came back — offered
+   * for the user to check, never as sources (see RagAnswer.relatedNotes). */
+  relatedNotes?: RagCitation[];
   isStreaming?: boolean;
 };
 
@@ -166,7 +169,12 @@ export function useChatSession(): ChatSession {
           clearTimeout(flushTimer);
           flushTimer = null;
         }
-        updateMessage(assistantId, { text: answer.text, citations: answer.citations, isStreaming: false });
+        updateMessage(assistantId, {
+          text: answer.text,
+          citations: answer.citations,
+          relatedNotes: answer.relatedNotes,
+          isStreaming: false,
+        });
         return { assistantId, text: answer.text };
       } catch (err) {
         if (flushTimer) {

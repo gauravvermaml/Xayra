@@ -1,5 +1,5 @@
 import { buildNoteContext, finalizeAnswer, UNVERIFIED_ANSWER_MESSAGE } from "../services/ai/ragFormatting";
-import { checkAffirmativeAnswer, checkVerificationAnswer, validateRelationships, verificationAddendum } from "../services/ai/relationshipGrounding";
+import { checkAffirmativeAnswer, checkVerificationAnswer, isSpellingVariant, relatedEvidenceNotes, validateRelationships, verificationAddendum } from "../services/ai/relationshipGrounding";
 import {
   classifyEventEvidence,
   describeQueriedDate,
@@ -244,5 +244,125 @@ describe("affirmative answers to yes/no questions", () => {
     const evidence = pipeline("Was 2025 hotter than the previous year?", [note("hot")]).built.evidence;
     expect(checkAffirmativeAnswer({ answer: "Yes, 2025 was hotter.", question: "Was 2025 hotter than the previous year?", evidence, now: NOW, comparative: true })).toBeNull();
     expect(checkAffirmativeAnswer({ answer: "Eli's brother Elias is moving to Perth.", question: "Is Eli moving to Perth?", evidence, now: NOW, comparative: false })).toBeNull();
+  });
+});
+
+describe("real-world notes (RC1 field reports, 8 Oct 2026)", () => {
+  const local = (y: number, m: number, d: number, h: number, mi: number) => Math.floor(new Date(y, m - 1, d, h, mi).getTime() / 1000);
+  // The complete stored notes, exactly as recorded.
+  const THEO = custom(
+    "theo",
+    "Theo just came by to pick the vacuum. He is painting the fence so went to Penrith Hardware to pick a roller. On the way back, he stopped by",
+    local(2026, 10, 7, 21, 32)
+  );
+  const MARCO = custom(
+    "marco",
+    "Marco was away for 3 weeks while he moved house. He moved from Kingsford to Mascot into a house that has a garden studio. " +
+      "He has just approved a tenant for it, a young couple. He is sorting out their internet connection. He returned to work today. " +
+      "Good to have him back. He keeps things calm at work.",
+    local(2026, 10, 6, 13, 8)
+  );
+  const THEO_Q = "When did Theo pick the vaccum from me?";
+
+  it.each([
+    ["You gave the vaccum to Theo on Wednesday, October 7, 2026."],
+    ["Theo came by to pick the vacuum on Wednesday, Oct 7, 2026."],
+    ["Your note from 7 October says Theo had just come by to pick the vacuum."],
+  ])("Theo: the recording-date answer is accepted — %s", (answer) => {
+    expect(verdict(THEO_Q, [THEO], answer)).toBe("accept");
+  });
+
+  it("Theo: an answer stitching the Penrith Hardware trip onto the vacuum pickup is rejected", () => {
+    expect(verdict(THEO_Q, [THEO], "Theo picked the vaccum from you on the way back from Penrith Hardware.")).toBe("reject");
+  });
+
+  it.each([
+    ["Theo picked the garden studio from you on Wednesday, October 7, 2026."],
+    ["Theo picked the garden studio from you on Oct 7."],
+  ])("cross-note: Marco's garden studio never attaches to Theo's pickup — %s", (answer) => {
+    expect(verdict(THEO_Q, [MARCO, THEO], answer)).toBe("reject");
+  });
+
+  it.each([
+    ["What date did I speak to Marco about his garden studio?", "You spoke to Marco about his garden studio on Tuesday, October 6, 2026."],
+    ["When did I last speak to Marco?", "You last spoke to Marco on Tuesday, October 6, 2026."],
+  ])("Marco: recording information about him is not a conversation — %s", (question, answer) => {
+    expect(verdict(question, [MARCO], answer)).toBe("reject");
+  });
+
+  it("an abbreviated month is a date, not an invented name", () => {
+    const check = validateRelationships({ answer: "Theo came by to pick the vacuum on Wednesday, Oct 7, 2026.", question: THEO_Q, evidence: pipeline(THEO_Q, [THEO]).built.evidence, now: NOW, eventEvidence: null });
+    expect(check.violations.map((v) => v.reason).join(" ")).not.toMatch(/oct/);
+  });
+
+  it("Related notes: only shown notes about the question, spelling variants included", () => {
+    const shown = pipeline(THEO_Q, [MARCO, THEO]).built.evidence;
+    expect(relatedEvidenceNotes(shown, THEO_Q, NOW)).toEqual([1]); // Theo's note, not Marco's
+    expect(relatedEvidenceNotes(shown, "When did I last speak to Marco?", NOW)).toEqual([0]);
+    expect(relatedEvidenceNotes(shown, "Where did I park the boat?", NOW)).toEqual([]);
+  });
+
+  it("spelling variants: one edit or swap between words of five or more letters", () => {
+    expect(isSpellingVariant("vaccum", "vacuum")).toBe(true); // one substitution
+    expect(isSpellingVariant("trialer", "trailer")).toBe(true); // one adjacent swap
+    expect(isSpellingVariant("pick", "puck")).toBe(false);
+    expect(isSpellingVariant("roller", "roll")).toBe(false);
+  });
+});
+
+describe("asked relationship — the answer must answer what was asked", () => {
+  const local = (y: number, m: number, d: number, h: number, mi: number) => Math.floor(new Date(y, m - 1, d, h, mi).getTime() / 1000);
+  const THEO = custom(
+    "theo",
+    "Theo just came by to pick the vacuum. He is painting the fence so went to Penrith Hardware to pick a roller. On the way back, he stopped by",
+    local(2026, 10, 7, 21, 32)
+  );
+  const MARCO = custom(
+    "marco",
+    "Marco was away for 3 weeks while he moved house. He moved from Kingsford to Mascot into a house that has a garden studio. " +
+      "He has just approved a tenant for it, a young couple. He is sorting out their internet connection. He returned to work today. " +
+      "Good to have him back. He keeps things calm at work.",
+    local(2026, 10, 6, 13, 8)
+  );
+  const SPOKE = custom("spoke", "Spoke to Marco about his garden studio today. He wants to rent it out.", local(2026, 10, 3, 11, 15));
+  const SPEAK = custom("speak", "I had a long speak with Marco at work about the garden studio.", local(2026, 10, 3, 11, 15));
+  const STUDIO_ONLY = custom("studioOnly", "Marco's new house has a garden studio.", local(2026, 10, 6, 13, 8));
+
+  it.each([
+    ["When did I speak to Marco?", [MARCO], "You last spoke to Marco when he was away for 3 weeks."],
+    ["When did I speak to Marco?", [MARCO], "You spoke to Marco on Tuesday, October 6, 2026."],
+    ["When did I last speak to Marco?", [MARCO], "You last spoke to Marco when he was away for 3 weeks."],
+    ["When did I speak to Marco about his garden studio?", [STUDIO_ONLY], "You spoke to Marco about his garden studio on Tuesday, October 6, 2026."],
+  ])("information about Marco is not a conversation with him: %s → %s", (question, notes, answer) => {
+    expect(verdict(question, notes, answer)).toBe("reject");
+  });
+
+  it.each([
+    ["When did I speak to Marco?", [SPOKE], "You spoke to Marco about his garden studio on Saturday, October 3, 2026."],
+    ["When did I speak to Marco?", [SPEAK], "You spoke with Marco at work on Saturday, October 3, 2026."],
+  ])("a recorded conversation is accepted, irregular verb forms included: %s → %s", (question, notes, answer) => {
+    expect(verdict(question, notes, answer)).toBe("accept");
+  });
+
+  it.each([["Theo picked the vacuum."], ["Theo picked up the vacuum from you."]])("'What did Theo pick from me?' → the vacuum: %s", (answer) => {
+    expect(verdict("What did Theo pick from me?", [THEO], answer)).toBe("accept");
+  });
+
+  it.each([["Theo picked a roller."], ["Theo picked a roller from you."]])("'What did Theo pick from me?' is not the Penrith Hardware roller: %s", (answer) => {
+    expect(verdict("What did Theo pick from me?", [THEO], answer)).toBe("reject");
+  });
+
+  it("'What did Theo pick at Penrith Hardware?' may be answered with the roller", () => {
+    expect(verdict("What did Theo pick at Penrith Hardware?", [THEO], "A roller.")).toBe("accept");
+  });
+
+  it("a paraphrased question about someone else is not refused for its wording", () => {
+    expect(verdict("Where does Marco live?", [MARCO], "Marco moved from Kingsford to Mascot.")).toBe("accept");
+  });
+
+  it("the irregular-verb table is grammar only — no synonyms", () => {
+    // "chat" is not "speak": a "did I…" question worded differently from the
+    // note is refused (fallback + Related notes), never answered by guessing.
+    expect(verdict("When did I chat with Marco?", [SPOKE], "You spoke to Marco on Saturday, October 3, 2026.")).toBe("reject");
   });
 });
