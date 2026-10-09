@@ -81,6 +81,17 @@ Raised 2026-10-02.
 
 ## Done
 
+### 1.0.40 UX/coherence pass (one-tap auto-finish and copy coherence)
+
+Not pre-listed backlog items — product/UX review findings, shipped in 1.0.40
+(versionCode 48) after on-device validation on Xayra Dev: one-tap voice
+auto-finish on trailing silence, Record/Ask frozen per utterance, explicit
+Cancel during processing, truthful post-recording status, mode-aware
+subtitle / idle cue / compose icon, internal note status hidden, starter
+prompt and empty-state copy corrected, onboarding privacy wording tightened,
+note-edit keyboard avoidance, starter prompts visible at normal tray
+positions. Details: `PROJECT_STATE_HANDOFF.md` → "1.0.40".
+
 ### Record/Ask tray expand-gesture asymmetry (0-50 mild swipe, 50-100 needed a hard drag)
 
 Not a pre-listed backlog item — a live, precisely-diagnosed UX report, logged
