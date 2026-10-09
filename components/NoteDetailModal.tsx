@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Feather } from "@expo/vector-icons";
 
 import { AudioPlayerControls } from "./AudioPlayerControls";
 import { colors } from "../constants/theme";
 import { useAudioPlayerControls } from "../services/audio/player";
-import { deleteNote, getNoteById, type Note } from "../services/notes/noteManager";
+import { deleteNote, getNoteById, updateNoteText, type Note } from "../services/notes/noteManager";
 import { copyTextWithFeedback } from "../utils/clipboard";
 
 /** Not in the shared theme: a backdrop scrim is a one-off for modals, not a
@@ -17,6 +18,8 @@ export type NoteDetailModalProps = {
   onClose: () => void;
   /** Called after the note is successfully deleted, so the caller can refresh its own list/state. */
   onDeleted?: (noteId: string) => void;
+  /** Called after the note's text is successfully corrected, so the caller can refresh its own list. */
+  onUpdated?: (noteId: string) => void;
 };
 
 function formatTimestamp(createdAt: number): string {
@@ -26,8 +29,11 @@ function formatTimestamp(createdAt: number): string {
   });
 }
 
-export function NoteDetailModal({ noteId, visible, onClose, onDeleted }: NoteDetailModalProps) {
+export function NoteDetailModal({ noteId, visible, onClose, onDeleted, onUpdated }: NoteDetailModalProps) {
   const [note, setNote] = useState<Note | null>(null);
+  /** Non-null while the note is being edited: the draft text. */
+  const [draft, setDraft] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -42,6 +48,7 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted }: NoteDet
   const player = useAudioPlayerControls(note?.audioUri ?? "");
 
   useEffect(() => {
+    setDraft(null);
     if (!visible || !noteId) {
       setNote(null);
       setLoadError(null);
@@ -72,6 +79,29 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted }: NoteDet
       cancelled = true;
     };
   }, [visible, noteId]);
+
+  /** Corrects this note in place (same id and recorded time) — see
+   * noteManager's updateNoteText for what gets re-indexed. */
+  const handleSave = () => {
+    if (!note || draft === null) return;
+    if (!draft.trim()) {
+      Alert.alert("Note is empty", "Add some text, or delete the note instead.");
+      return;
+    }
+    setIsSaving(true);
+    const targetId = note.id;
+    void updateNoteText(targetId, draft)
+      .then(() => getNoteById(targetId))
+      .then((updated) => {
+        if (updated) setNote(updated);
+        setDraft(null);
+        onUpdated?.(targetId);
+      })
+      .catch((err) => {
+        Alert.alert("Couldn't save", err instanceof Error ? err.message : "Failed to save the note.");
+      })
+      .finally(() => setIsSaving(false));
+  };
 
   const handleDelete = () => {
     if (!note) return;
@@ -116,14 +146,28 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted }: NoteDet
           <View style={styles.handle} />
 
           <View style={styles.header}>
-            <Text style={styles.headerTitle}>Note</Text>
-            <Pressable
-              onPress={onClose}
-              hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
-              style={styles.closeButton}
-            >
-              <Text style={styles.closeButtonText}>✕</Text>
-            </Pressable>
+            <Text style={styles.headerTitle}>{draft !== null ? "Edit note" : "Note"}</Text>
+            <View style={styles.headerActions}>
+              {note && draft === null && (
+                <Pressable
+                  onPress={() => setDraft(note.content || note.transcript || "")}
+                  accessibilityRole="button"
+                  accessibilityLabel="Edit note"
+                  testID="note-edit-button"
+                  hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                  style={styles.closeButton}
+                >
+                  <Feather name="edit-2" size={14} color={colors.textMuted} />
+                </Pressable>
+              )}
+              <Pressable
+                onPress={onClose}
+                hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+                style={styles.closeButton}
+              >
+                <Text style={styles.closeButtonText}>✕</Text>
+              </Pressable>
+            </View>
           </View>
 
           {isLoading && (
@@ -141,17 +185,49 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted }: NoteDet
                 </View>
               </View>
 
-              <ScrollView style={styles.transcriptScroll}>
-                <Pressable
-                  onLongPress={() =>
-                    void copyTextWithFeedback(note.content || note.transcript || "")
-                  }
-                >
-                  <Text style={styles.transcript} selectable>
-                    {note.content || note.transcript || "(empty note)"}
-                  </Text>
-                </Pressable>
-              </ScrollView>
+              {draft !== null ? (
+                <View>
+                  <TextInput
+                    testID="note-edit-input"
+                    value={draft}
+                    onChangeText={setDraft}
+                    multiline
+                    autoFocus
+                    editable={!isSaving}
+                    style={styles.editInput}
+                  />
+                  <View style={styles.editActions}>
+                    <Pressable
+                      testID="note-edit-cancel"
+                      onPress={() => setDraft(null)}
+                      disabled={isSaving}
+                      style={({ pressed }) => [styles.editButton, styles.editCancel, pressed && styles.deleteButtonPressed]}
+                    >
+                      <Text style={styles.editCancelText}>Cancel</Text>
+                    </Pressable>
+                    <Pressable
+                      testID="note-edit-save"
+                      onPress={handleSave}
+                      disabled={isSaving}
+                      style={({ pressed }) => [styles.editButton, styles.editSave, pressed && styles.deleteButtonPressed]}
+                    >
+                      <Text style={styles.editSaveText}>{isSaving ? "Saving…" : "Save"}</Text>
+                    </Pressable>
+                  </View>
+                </View>
+              ) : (
+                <ScrollView style={styles.transcriptScroll}>
+                  <Pressable
+                    onLongPress={() =>
+                      void copyTextWithFeedback(note.content || note.transcript || "")
+                    }
+                  >
+                    <Text style={styles.transcript} selectable>
+                      {note.content || note.transcript || "(empty note)"}
+                    </Text>
+                  </Pressable>
+                </ScrollView>
+              )}
 
               {/* A note recorded before audio was made text-only (or one
                   restored from a Drive backup, which never carries audio —
@@ -160,16 +236,18 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted }: NoteDet
                   player entirely rather than mounting it against an empty
                   uri, so opening a text note never attempts to load/play a
                   file that was never there. */}
-              {note.audioUri && (
+              {draft === null && note.audioUri && (
                 <AudioPlayerControls audioUri={note.audioUri} style={styles.player} />
               )}
 
-              <Pressable
-                onPress={handleDelete}
-                style={({ pressed }) => [styles.deleteButton, pressed && styles.deleteButtonPressed]}
-              >
-                <Text style={styles.deleteButtonText}>Delete Note</Text>
-              </Pressable>
+              {draft === null && (
+                <Pressable
+                  onPress={handleDelete}
+                  style={({ pressed }) => [styles.deleteButton, pressed && styles.deleteButtonPressed]}
+                >
+                  <Text style={styles.deleteButtonText}>Delete Note</Text>
+                </Pressable>
+              )}
             </>
           )}
         </Pressable>
@@ -213,6 +291,51 @@ const styles = StyleSheet.create({
   headerTitle: {
     color: colors.textPrimary,
     fontSize: 18,
+    fontWeight: "700",
+  },
+  headerActions: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10,
+  },
+  editInput: {
+    color: colors.textPrimary,
+    fontSize: 16,
+    lineHeight: 23,
+    minHeight: 120,
+    maxHeight: 260,
+    textAlignVertical: "top",
+    backgroundColor: colors.surface,
+    borderColor: colors.accent,
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 16,
+  },
+  editActions: {
+    flexDirection: "row",
+    gap: 12,
+  },
+  editButton: {
+    flex: 1,
+    borderRadius: 14,
+    paddingVertical: 14,
+    alignItems: "center",
+  },
+  editCancel: {
+    backgroundColor: colors.surface,
+  },
+  editCancelText: {
+    color: colors.textPrimary,
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  editSave: {
+    backgroundColor: colors.accent,
+  },
+  editSaveText: {
+    color: colors.background,
+    fontSize: 15,
     fontWeight: "700",
   },
   closeButton: {

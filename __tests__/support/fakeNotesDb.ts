@@ -121,6 +121,18 @@ export function createFakeNotesDb() {
       return { rows: matches.map((r) => ({ id: r.id, content: r.content, transcript: r.transcript })) };
     }
 
+    if (/^SELECT rowid, transcript FROM notes WHERE id = \?/i.test(q)) {
+      const [id] = params;
+      const row = findById(id);
+      return { rows: row ? [{ rowid: row.rowid, transcript: row.transcript }] : [] };
+    }
+
+    if (/^DELETE FROM note_embeddings WHERE rowid = \?/i.test(q)) {
+      const [rowid] = params;
+      embeddings = embeddings.filter((e) => e.rowid !== rowid);
+      return { rows: [] };
+    }
+
     if (/^SELECT id FROM notes/i.test(q)) {
       return { rows: rows.map((r) => ({ id: r.id })) };
     }

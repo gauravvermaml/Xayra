@@ -420,6 +420,50 @@ export async function createTextNote(text: string): Promise<Note> {
  * removed only after the transaction commits, since there's no way to
  * "roll back" a deleted file if the transaction were to fail afterward.
  */
+/**
+ * Corrects an existing note's text in place — same id, same `created_at`
+ * (the recorded date is the note's provenance and never changes), new
+ * `updated_at`. Everything that reads note text re-derives from it:
+ *  - keyword search: the `notes_fts_au` trigger re-indexes on UPDATE;
+ *  - vector search: the old embedding is dropped in the same transaction
+ *    (a stale vector would keep retrieving the note by its OLD wording),
+ *    then the corrected text is embedded; if embedding fails now, the note
+ *    is left `transcribed` and `retryPendingEmbeddings()` indexes it later;
+ *  - temporal resolution reads the stored text at question time, so it
+ *    sees the correction automatically.
+ * A voice note's `transcript` is replaced too, so the uncorrected wording
+ * is not kept anywhere. To-dos already extracted from the note are separate
+ * user records and are deliberately NOT re-extracted or changed.
+ */
+export async function updateNoteText(noteId: string, text: string): Promise<void> {
+  const corrected = text.trim();
+  if (!corrected) {
+    throw new Error("A note can't be empty — delete it instead.");
+  }
+  const db = await getRawDatabase();
+  await db.transaction(async (tx) => {
+    const lookup = await tx.execute("SELECT rowid, transcript FROM notes WHERE id = ?", [noteId]);
+    const row = lookup.rows[0];
+    if (!row) {
+      throw new Error("This note could not be found — it may have been deleted.");
+    }
+    await tx.execute("UPDATE notes SET content = ?, transcript = ?, status = ?, updated_at = ? WHERE id = ?", [
+      corrected,
+      row.transcript == null ? null : corrected,
+      "transcribed",
+      nowUnix(),
+      noteId,
+    ]);
+    await tx.execute("DELETE FROM note_embeddings WHERE rowid = ?", [row.rowid]);
+  });
+  try {
+    await insertEmbedding(noteId, await generateEmbeddingLocal(corrected));
+    await updateNoteStatus(noteId, "embedded");
+  } catch (err) {
+    console.warn("[Note] Re-embedding the edited note failed — it will be retried automatically.", noteId, err);
+  }
+}
+
 export async function deleteNote(noteId: string): Promise<void> {
   const db = await getRawDatabase();
   const ftsAvailable = await isFtsAvailable();

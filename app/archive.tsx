@@ -201,6 +201,7 @@ export default function ArchiveScreen() {
           setSelectedNoteId(null);
           void refreshNotes();
         }}
+        onUpdated={() => void refreshNotes()}
       />
     </SafeAreaView>
   );

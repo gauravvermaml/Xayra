@@ -52,14 +52,15 @@ export function NoteCard({
         <Text style={styles.deleteIcon}>🗑</Text>
       </Pressable>
 
-      <View style={styles.tagRow}>
-        <View style={styles.tagPill}>
-          <Text style={styles.tagPillText}>{audioUri ? "#Voice" : "#Text"}</Text>
+      {/* No "#Text"/"#Voice" tag: voice and typed Record both produce a text
+          journal entry, so the input method carries no information. */}
+      {createdAt !== undefined && (
+        <View style={styles.metaRow}>
+          <Text testID="note-card-date" style={styles.metaText}>
+            {formatTimestamp(createdAt)}
+          </Text>
         </View>
-        {createdAt !== undefined && (
-          <Text style={styles.metaText}>{formatTimestamp(createdAt)}</Text>
-        )}
-      </View>
+      )}
 
       {/* Build 22: `selectable` removed — inside a BottomSheetFlatList, RN's
           text-selection long-press gesture competes with the sheet/list's
@@ -99,23 +100,12 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surfaceElevated,
     borderColor: colors.borderStrong,
   },
-  tagRow: {
+  // Keeps clear of the absolutely positioned delete button (top-right).
+  metaRow: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
     marginBottom: spacing.sm,
     paddingRight: 36,
-  },
-  tagPill: {
-    backgroundColor: colors.accentMuted,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 3,
-  },
-  tagPillText: {
-    color: colors.accent,
-    fontSize: 11,
-    fontWeight: "700",
   },
   metaText: {
     color: colors.textMuted,

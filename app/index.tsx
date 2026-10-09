@@ -1387,6 +1387,7 @@ export default function HomeScreen() {
         visible={selectedNoteId !== null}
         onClose={() => setSelectedNoteId(null)}
         onDeleted={() => setSelectedNoteId(null)}
+        onUpdated={refreshNotes}
       />
     </Pressable>
 
