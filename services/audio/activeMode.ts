@@ -8,6 +8,7 @@ import AudioRecord from "@fugood/react-native-audio-pcm-stream";
 import { setMicInUse } from "./audioInputState";
 import { pausePlayback } from "./player";
 import { stopSpeech } from "./tts";
+import { TrailingSilenceDetector } from "./silenceDetector";
 import { preloadWakeChime, releaseWakeChime } from "./wakeChime";
 import { BITS_PER_SAMPLE, CHANNELS, SAMPLE_RATE, computeRms, writePcmChunksAsWav } from "./wav";
 
@@ -31,48 +32,10 @@ export type ActiveModeCallbacks = {
 };
 
 /**
- * Simple energy-threshold VAD: distinguishes "someone is talking" from
- * "quiet room" by raw loudness alone. This is a real, known limitation —
- * it cannot distinguish a loud voice from loud *non-voice* noise (running
- * shower water, in particular, is close to continuous white noise loud
- * enough to sit above almost any reasonable threshold). It works well
- * hands-free in an ordinarily quiet room; a genuinely shower-safe VAD would
- * need spectral/energy-in-speech-band analysis or a real ML VAD model,
- * neither of which is implemented here. Documented rather than silently
- * pretended away — see PROJECT_STATE_HANDOFF.md.
- *
- * ADAPTIVE THRESHOLD (was a single fixed constant): confirmed on-device that
- * a fixed 0.02 RMS floor requires the phone to be within roughly arm's
- * length — speech from 2-3 meters away simply never crosses it, so
- * `hasDetectedSpeech` never flips true and `finalizeUtterance` silently
- * discards the whole recording as "nothing said" before Whisper ever runs
- * (see the `!hadSpeech` branch below). Root cause: mic input power falls off
- * sharply with distance, and one fixed threshold can't be right for both a
- * close, quiet room and a far, still-quiet room.
- *
- * Fix: each listen cycle (`armListening`) samples the room's own ambient
- * noise floor for `NOISE_FLOOR_CALIBRATION_MS` before evaluating speech at
- * all, then sets that cycle's actual threshold to
- * `noiseFloor * SPEECH_ABOVE_FLOOR_MULTIPLIER`, clamped to
- * [`MIN_SPEECH_RMS_THRESHOLD`, `MAX_SPEECH_RMS_THRESHOLD`]. The upper clamp
- * is the OLD fixed value — a loud room can never end up needing a louder
- * trigger than before, only a quiet one can end up needing a much quieter
- * (i.e. farther-away-friendly) one. This is still raw-energy VAD, not a real
- * ML model — it still can't tell a distant quiet voice from distant quiet
- * non-voice noise any better than before; it can now hear a distant quiet
- * ANYTHING that's clearly above that room's own silence, which a fixed
- * threshold tuned for "close to the mic" could not.
+ * Handsfree's voice-activity timings. The adaptive noise-floor / RMS speech
+ * detection itself lives in silenceDetector.ts (shared with the manual
+ * recorder's auto-finish); these values are Handsfree's own.
  */
-const MIN_SPEECH_RMS_THRESHOLD = 0.006;
-const MAX_SPEECH_RMS_THRESHOLD = 0.02;
-const SPEECH_ABOVE_FLOOR_MULTIPLIER = 2.5;
-/** How long each listen cycle spends sampling ambient noise before it starts
- * evaluating those samples as speech/silence. Short enough that a user who
- * starts talking immediately after the wake gesture only loses a fraction of
- * a word to mis-calibration (worst case: that fraction gets folded into the
- * noise floor, nudging the threshold up slightly for the rest of THIS
- * utterance only — the next armListening() cycle recalibrates from zero). */
-const NOISE_FLOOR_CALIBRATION_MS = 300;
 const SILENCE_HOLD_MS = 1500;
 /** Guards against a stray tap/cough finalizing a near-empty "utterance". */
 const MIN_UTTERANCE_MS = 400;
@@ -258,15 +221,12 @@ export class ActiveModeManager {
   private subscription: { remove: () => void } | null = null;
   private silenceCheckTimer: ReturnType<typeof setInterval> | null = null;
 
-  private hasDetectedSpeech = false;
-  private lastVoiceAt = 0;
-  private utteranceStartedAt = 0;
-
-  // Adaptive noise-floor calibration state — see the constants' own doc
-  // comment above. Reset at the top of every `armListening()` call.
-  private calibrationEndsAt = 0;
-  private noiseFloorSamples: number[] = [];
-  private speechRmsThreshold = MAX_SPEECH_RMS_THRESHOLD;
+  // Speech / trailing-silence state for the current listen cycle — reset
+  // at the top of every `armListening()` call.
+  private readonly detector = new TrailingSilenceDetector({
+    trailingSilenceMs: SILENCE_HOLD_MS,
+    minUtteranceMs: MIN_UTTERANCE_MS,
+  });
 
   /**
    * Confirmed on-device via adb logcat: the wake word was being dropped
@@ -398,31 +358,7 @@ export class ActiveModeManager {
     }
     const chunk = Buffer.from(base64Chunk, "base64");
     this.chunks.push(chunk);
-    const rms = computeRms(chunk);
-
-    if (Date.now() < this.calibrationEndsAt) {
-      // Still sampling ambient noise — a speech-or-not decision isn't made
-      // on this chunk at all yet, it just feeds the floor estimate.
-      this.noiseFloorSamples.push(rms);
-      return;
-    }
-    if (this.noiseFloorSamples.length > 0) {
-      // Calibration window just ended — fold the samples into this cycle's
-      // actual threshold exactly once, then clear them so this branch
-      // doesn't re-run every chunk for the rest of the utterance.
-      const noiseFloor =
-        this.noiseFloorSamples.reduce((sum, sample) => sum + sample, 0) / this.noiseFloorSamples.length;
-      this.speechRmsThreshold = Math.min(
-        MAX_SPEECH_RMS_THRESHOLD,
-        Math.max(MIN_SPEECH_RMS_THRESHOLD, noiseFloor * SPEECH_ABOVE_FLOOR_MULTIPLIER)
-      );
-      this.noiseFloorSamples = [];
-    }
-
-    if (rms > this.speechRmsThreshold) {
-      this.hasDetectedSpeech = true;
-      this.lastVoiceAt = Date.now();
-    }
+    this.detector.push(computeRms(chunk), Date.now());
   }
 
   /**
@@ -448,7 +384,7 @@ export class ActiveModeManager {
    * act on.
    */
   cancelCurrentUtterance(): boolean {
-    if (this.stopped || !this.capturing || !this.hasDetectedSpeech) {
+    if (this.stopped || !this.capturing || !this.detector.hasDetectedSpeech) {
       return false;
     }
     this.armListening();
@@ -464,17 +400,8 @@ export class ActiveModeManager {
       return;
     }
     this.chunks = [];
-    this.hasDetectedSpeech = false;
-    this.utteranceStartedAt = Date.now();
-    this.lastVoiceAt = Date.now();
-
-    // Fresh calibration every cycle — a re-armed session after an utterance
-    // may be in a physically different, differently-noisy moment (someone
-    // started the shower, a fan kicked in, etc.), so the noise floor is
-    // never carried over from a previous cycle.
-    this.calibrationEndsAt = Date.now() + NOISE_FLOOR_CALIBRATION_MS;
-    this.noiseFloorSamples = [];
-    this.speechRmsThreshold = MAX_SPEECH_RMS_THRESHOLD;
+    // Fresh calibration every cycle — see TrailingSilenceDetector.reset.
+    this.detector.reset(Date.now());
 
     this.capturing = true;
     this.setState("listening");
@@ -495,12 +422,8 @@ export class ActiveModeManager {
       return;
     }
     const now = Date.now();
-    const elapsed = now - this.utteranceStartedAt;
-    const silentFor = now - this.lastVoiceAt;
-
-    const hitMaxDuration = elapsed >= MAX_UTTERANCE_MS;
-    const finishedSpeaking =
-      this.hasDetectedSpeech && elapsed >= MIN_UTTERANCE_MS && silentFor >= SILENCE_HOLD_MS;
+    const hitMaxDuration = this.detector.elapsed(now) >= MAX_UTTERANCE_MS;
+    const finishedSpeaking = this.detector.hasFinishedSpeaking(now);
 
     if (hitMaxDuration || finishedSpeaking) {
       void this.finalizeUtterance();
@@ -518,7 +441,7 @@ export class ActiveModeManager {
     // chunks as part of an utterance until the next `armListening()`.
     this.capturing = false;
 
-    const hadSpeech = this.hasDetectedSpeech;
+    const hadSpeech = this.detector.hasDetectedSpeech;
     const chunks = this.chunks;
     this.chunks = [];
 
