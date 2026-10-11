@@ -2,7 +2,46 @@
 
 *(The app was originally built and shipped internally as "Silent Confidant," then briefly "Remi," before the full rebrand to **Xayra** documented below. Historical sections further down in this file predate the rename and refer to the app by whichever name was current at the time — that's intentional, not an inconsistency to fix; each section is an accurate record of what was true when it was written.)*
 
-**Last updated:** 1.0.40 — UX/coherence release (versionCode 48, production AAB for Google Play Internal Testing — see its own section below: one-tap voice auto-finish, frozen Record/Ask intent, explicit Cancel, truthful status, mode-aware copy, note-edit keyboard avoidance; also ships the UX patch after 1.0.39). Previously: One-tap voice auto-finish (shipped in 1.0.40 — see its own section below). Previously: UX patch after 1.0.39 (shipped in 1.0.40 — see its own section below: journal editing + backup consistency, temporary input audio, #Text removed, a release-blocking false-attribution fix). Previously: RC1 patch — 1.0.39 (see its own section below: reminder date/time fixes, grounding fixes from real-world reports, Related notes). Previously: RC1 — Grounding v1 (1.0.38/46, shipped to Internal Testing — see its own section below: deterministic temporal resolution, relationship-aware answer validation, no unvalidated text on screen; release-candidate freeze in effect). Previously: Build 57 (not yet built — see its own section below: fixed an asymmetric drag-commit threshold in the Record/Ask tray's 50%→100% expand gesture). Build 49 (Handsfree cancel-tap latency chain, splash sizing) and Build 48 + the Hybrid Extraction Architecture (fine-tuned model wired in) already shipped together in production 1.0.37; Build 50 through 57 are not yet built or shipped.
+**Last updated:** 1.0.41 — launcher shortcuts + immediate Cancel (versionCode 49, production AAB for Google Play Internal Testing — see its own section below; roadmap locked there too). Previously: 1.0.40 — UX/coherence release (versionCode 48, production AAB for Google Play Internal Testing — see its own section below: one-tap voice auto-finish, frozen Record/Ask intent, explicit Cancel, truthful status, mode-aware copy, note-edit keyboard avoidance; also ships the UX patch after 1.0.39). Previously: One-tap voice auto-finish (shipped in 1.0.40 — see its own section below). Previously: UX patch after 1.0.39 (shipped in 1.0.40 — see its own section below: journal editing + backup consistency, temporary input audio, #Text removed, a release-blocking false-attribution fix). Previously: RC1 patch — 1.0.39 (see its own section below: reminder date/time fixes, grounding fixes from real-world reports, Related notes). Previously: RC1 — Grounding v1 (1.0.38/46, shipped to Internal Testing — see its own section below: deterministic temporal resolution, relationship-aware answer validation, no unvalidated text on screen; release-candidate freeze in effect). Previously: Build 57 (not yet built — see its own section below: fixed an asymmetric drag-commit threshold in the Record/Ask tray's 50%→100% expand gesture). Build 49 (Handsfree cancel-tap latency chain, splash sizing) and Build 48 + the Hybrid Extraction Architecture (fine-tuned model wired in) already shipped together in production 1.0.37; Build 50 through 57 are not yet built or shipped.
+
+## 1.0.41 — Launcher shortcuts + immediate Cancel (Internal Testing)
+
+Version **1.0.41**, versionCode **49**, application ID `com.anonymous.silentconfidant`, scheme `xayra` (Xayra Dev stays `com.anonymous.silentconfidant.dev` / `xayra-dev`). No model, prompt, grounding or retrieval change — the only RAG-path edit is one cancellation guard before generation in `rag.ts`. Every item below was validated on the Redmi with a **standalone** (release-type, JS bundled, no Metro/dev launcher) Xayra Dev build before this release.
+
+**Launcher shortcuts — "Record with Xayra" / "Ask Xayra"** (long-press the icon; tap → speak):
+- `plugins/withAppShortcuts.js` declares static shortcuts (`<scheme>://shortcut?mode=record|ask`) and generates a **native trampoline**, `ShortcutLaunchActivity`. Root cause it fixes: Android adds `NEW_TASK|CLEAR_TASK` to static-shortcut intents, which destroyed and re-created a running MainActivity — a full React remount that wiped Home's state, read the OUTGOING activity's intent (each warm launch got the *previous* shortcut), and orphaned a recorder mid-start (a "ghost" capture that later auto-finished and said "Saved."). The trampoline lives in its own task (absorbing CLEAR_TASK) and forwards the link to the singleTask MainActivity.
+- Warm delivery is a normal `onNewIntent` link (same activity, no remount); cold launches carry the link as the activity's own intent. `app/+native-intent.tsx` turns it into a pending shortcut; Home renders the requested mode on its **first frame** (cold) or adopts it the moment the link lands (warm), and the shortcut's mode is passed explicitly to the recording — authoritative before recording begins.
+- **One mic owner**: a shortcut never starts a competing capture (busy check includes the app-wide mic-in-use flag) and never changes the mode under an active utterance, processing or Handsfree. **No ghost recorder**: a recorder whose start is cancelled or whose screen unmounts aborts before opening the mic / closes its session; a disposed screen's utterance is never processed.
+- **Launch-transaction validity** replaced the 20 s expiry: a shortcut stays valid until consumed (once), replaced by a newer one, dropped by incomplete setup, or the app is backgrounded after that launch reached the foreground. The fingerprint prompt does not background the app (confirmed: BiometricPrompt takes focus without pausing the activity), so a slow unlock still works. A Recents relaunch after process death drops the replayed intent natively (`FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY`).
+- The recorder now checks mic permission before requesting it — requesting launched the system permission activity on every start even when granted (a pause + ~300–400 ms).
+
+**Honest "Saved."** — spoken only after a note was actually written (it was also said for recordings discarded as empty/silent). Applies to the central button too.
+
+**Immediate-feeling Cancel** (`services/ai/processingJob.ts`): every utterance/typed request is a `ProcessingJob`. On tap the UI goes idle with "Cancelled" and the manual utterance is released synchronously; underneath, the job's own aborts run (Whisper decode, LLM generation; a not-yet-started generation is skipped; a cancel during the uninterruptible Whisper model load now skips decoding), and every later step checks its own job — no note, no answer, no speech, no stale UI, no cross-job cancellation. Note writes are the point of no return (Cancel disappears just before). **Whisper decodes queue** on the native context, so a new job never runs on a context still busy with a cancelled decode.
+
+**Privacy logging**: Handsfree rejection logs and to-do extraction logs printed transcript/task text in production; they now log metadata only (`services/logging/redact.ts`), guarded by a source-scan test.
+
+Measured on the Redmi (standalone Xayra Dev, logcat):
+
+| Shortcut | Result |
+|---|---|
+| Warm Ask, tap → mic open | ~156 ms (after the permission fix) |
+| Warm Record, tap → mic open | ~723 ms (measured before the permission fix; should also benefit) |
+| Cold, tap → mic open | ~2.8–3.0 s including the fingerprint unlock; ~1.7–1.9 s excluding it (measured before the permission fix — likely ~300–400 ms faster now, not re-measured) |
+| Mic open → first audio | ~238–266 ms |
+| Warm delivery | trampoline → existing MainActivity `onNewIntent` in 17–22 ms |
+
+| Cancel | Result |
+|---|---|
+| Tap handler → idle UI committed | ~43–125 ms |
+| Finger down → idle UI | ~94–209 ms |
+| Cancelled Whisper decode keeps native Whisper busy | ~3.48–3.61 s (one encoder pass isn't interruptible); its result is discarded and never saves/shows/speaks |
+
+Validation: `tsc --noEmit` clean; 613 unit tests in 39 suites; Android export bundles.
+
+### Locked plan of action (2026-10-11)
+
+Near-term: (1) ship this build; (2) dogfood ~a week via Internal Testing on the Redmi and a Pixel 9; (3) Quick Settings tile + restricted lock-screen **Record**; (4) subscription infrastructure; (5) launch / retention measurement; (6) entity timeline; (7) temporal personal memory graph. Post-launch moat: personal memory layer (entities, events, provenance back to source notes, chronological retrieval, identity resolution, longitudinal reasoning), Whisper background-reload performance, later capture channels (headset, share sheet; VoiceInteractionService as optional research only). **Locked Ask is not planned.** Details: `BACKLOG.md` → "Roadmap".
 
 ## 1.0.40 — UX/coherence release (Internal Testing)
 

@@ -8,6 +8,78 @@ if there's nothing worth keeping) when it ships.
 
 ## Open
 
+## Roadmap (locked 2026-10-11)
+
+Near-term, in order:
+1. Ship the launcher-shortcut + immediate-Cancel production build (1.0.41).
+2. Dogfood it for about a week via Google Play Internal Testing on the
+   Redmi and a Pixel 9.
+3. Quick Settings tile + restricted lock-screen **Record** (below).
+4. Subscription infrastructure.
+5. Launch / retention measurement.
+6. Entity timeline.
+7. Temporal personal memory graph.
+
+Post-launch moat-building: the personal memory layer, performance and
+later capture channels, below. **Locked Ask is not planned** — Xayra never
+answers from private memories while the device is locked.
+
+### Quick Settings tile + restricted lock-screen Record (near-term, roadmap item 3)
+
+Goal: "wake phone → tile → speak" instead of "wake phone → unlock → find
+Xayra/shortcut → tap". Investigate before building:
+- A "Record with Xayra" Quick Settings tile (TileService), usable while
+  Keyguard is showing (`isLocked()` tells the tile; a tile can launch an
+  activity over the lock screen for actions safe while locked).
+- **Record only while locked.** No Ask, no vault browsing, no private
+  answer or note content on the lock screen.
+- A restricted/minimal capture activity (`showWhenLocked`) if needed:
+  listening/recording state only, captures a new thought, reveals no
+  existing note content, stores securely, returns to the lock screen.
+- Open question: microphone access and an encrypted-vault write while
+  Keyguard is locked, given the biometric-gated database key
+  (`keyManager.ts`) — e.g. hold the capture encrypted and index it after
+  the next unlock.
+- Prioritised ahead of any VoiceInteractionService work (see Later capture
+  channels).
+
+### Personal memory layer (post-launch moat)
+
+- Entity timeline: people / organisations / places.
+- Event extraction from notes.
+- Note provenance — every derived fact must point back to its original
+  source note.
+- Chronological retrieval.
+- Identity resolution (the same person across spellings/nicknames —
+  without fuzzy-matching names in grounding).
+- Longitudinal change reasoning ("how has X changed since…").
+
+### Performance: Whisper reload after backgrounding
+
+Xayra deliberately releases the Whisper (and Llama) native contexts whenever
+the app goes to the background (`app/_layout.tsx` →
+`useReleaseNativeContextsOnBackground`). When a shortcut brings Xayra back
+and the utterance finishes, Whisper may need to reload: observed roughly
+4–9 s of additional model readiness + transcription on the Redmi, depending
+on state. Capture itself is fast (warm tap → mic ≈0.16–0.7 s); this is
+completion latency. Performance work only — not part of the shortcut patch.
+
+Investigate (measure; don't change as a side effect):
+- whether Whisper must be released on every ordinary short background
+  transition; a short grace period before release;
+- preload/reload while the user is still speaking (recording start is the
+  earliest moment we know a transcription is coming);
+- memory-pressure / LMKD trade-offs (Build 40 kill, `memoryGuard.ts`);
+- Redmi vs Pixel-class production targets.
+
+### Later capture channels
+
+- Headset / earbud invocation.
+- Share-sheet capture (see "Share-to-Xayra from other apps" below).
+- VoiceInteractionService — later optional research only, not near-term:
+  whether Xayra would need to be the default assistant, the user setup
+  burden, Play policy implications, and whether the gain justifies it.
+
 ### Tray scrolling at 50% — reported, NOT reproduced (2026-10-09)
 Reported: light vertical drags in the Record/Ask tray at 50% sometimes moved the tray instead of scrolling. A dev-only diagnostic (logging, at each content-drag start, the sheet state, scrollable lock status, position vs detent and keyboard state from `useBottomSheetInternal()`) showed all 21 observed drags with the sheet EXTENDED and scrolling UNLOCKED, and the list did scroll. Reopen only with evidence: re-add that logging in `useExpandOverdragGestureHandlers.ts`'s `handleOnStart` (use a module-level JS function with `runOnJS` — Worklets rejects `runOnJS(console.log)`), reproduce on Xayra Dev, read the failing drag's line.
 
