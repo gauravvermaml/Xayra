@@ -1,6 +1,5 @@
 import { IDLE_TAP_CUE } from "../../constants/copy";
-import { cancelActiveLlamaCompletion } from "../ai/localLlama";
-import { cancelActiveTranscription } from "../ai/localWhisper";
+import type { ProcessingJob } from "../ai/processingJob";
 import { PIPELINE_STAGE_LABELS, type PipelineStage } from "../ai/pipelineStage";
 import type { StartRecordingOptions } from "./recorder";
 
@@ -183,14 +182,14 @@ export function decideCentralTap(state: {
 }
 
 /**
- * Cancel whatever is processing: the flag is checked by the pipeline before
- * a note is saved or a query routed, and transcription / generation are cut
- * off immediately if running (both are no-ops when nothing is in flight).
+ * Cancel the job that's processing, if it still can be: the job's own
+ * listeners start the real aborts (Whisper decode, LLM generation) and
+ * every later step discards its result. Returns whether anything was
+ * cancelled — false for no job, an already-cancelled job, or one past its
+ * point of no return.
  */
-export function cancelProcessing(cancelRequested: { current: boolean }): void {
-  cancelRequested.current = true;
-  cancelActiveTranscription();
-  cancelActiveLlamaCompletion();
+export function cancelProcessing(job: ProcessingJob | null): boolean {
+  return job?.cancel() ?? false;
 }
 
 /**

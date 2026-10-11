@@ -3,6 +3,7 @@ import { ExpoSpeechRecognitionModule } from "expo-speech-recognition";
 import { getCurrentModelDownloadStatus } from "./modelDownloadManager";
 import { transcribeAudioLocal } from "./localWhisper";
 import { logDuration, nowMs } from "./perf";
+import type { ProcessingJob } from "./processingJob";
 import type { WhisperModelId } from "./whisperModels";
 import { showToast } from "../../components/Toast";
 
@@ -156,7 +157,7 @@ let hasWarnedAboutDownloadContention = false;
  * (or null if none was captured). Prefers the Tier 1 transcript if the
  * native session produced one; otherwise runs local Whisper on the WAV file.
  */
-export async function transcribe(audioUri: string | null): Promise<ASRTranscriptionResult> {
+export async function transcribe(audioUri: string | null, job?: ProcessingJob): Promise<ASRTranscriptionResult> {
   if (!hasWarnedAboutDownloadContention && getCurrentModelDownloadStatus().status === "downloading") {
     hasWarnedAboutDownloadContention = true;
     showToast("Setup is still finishing in the background — transcription may be a bit slower than usual");
@@ -180,7 +181,7 @@ export async function transcribe(audioUri: string | null): Promise<ASRTranscript
     return { transcript: "", tier: "whisper" };
   }
   const start = nowMs();
-  const { transcript, modelId } = await transcribeAudioLocal(audioUri);
+  const { transcript, modelId } = await transcribeAudioLocal(audioUri, job);
   logDuration("[ASRRouter] Tier 2 (local Whisper) transcription", start);
   console.log(`[ASRRouter] Used Tier 2: local Whisper (${modelId})`);
   return { transcript, tier: "whisper", whisperModelId: modelId };

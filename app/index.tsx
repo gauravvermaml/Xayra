@@ -32,6 +32,8 @@ import { colors } from "../constants/theme";
 import { useLaunchShortcut } from "../hooks/useLaunchShortcut";
 import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
+import { cancelActiveLlamaCompletion } from "../services/ai/localLlama";
+import { ProcessingJob } from "../services/ai/processingJob";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
 import {
   setPipelineStage,
@@ -579,8 +581,10 @@ export default function HomeScreen() {
       text: string,
       audioUri: string | null,
       whisperModelId: string | null,
-      mode: UtteranceMode
+      mode: UtteranceMode,
+      job: ProcessingJob
     ): Promise<{ intent: "RECORD" | "ASK"; saved?: boolean; answerText?: string; assistantId?: string }> => {
+      if (job.cancelled) return { intent: mode === "record" ? "RECORD" : "ASK" };
       setProcessingState("processing");
       // ASK auto-peeks to 50% to show the answer card; RECORD snaps back to
       // the resting peek once saved (see routeRecord). Snapped immediately —
@@ -592,9 +596,17 @@ export default function HomeScreen() {
       try {
         setProcessingLabel(intent === "RECORD" ? "note" : "query");
         if (intent === "RECORD") {
+          // Point of no return: from here the note is written, so Cancel
+          // stops being offered (a write in progress can't be un-done
+          // cleanly). A job cancelled before this point never saves.
+          if (!job.commit()) return { intent, saved: false };
+          if (currentJobRef.current === job) setCancellableJobId(null);
           const saved = await routeRecord(text, audioUri, whisperModelId);
           return { intent, saved };
         }
+        // Generation already running is stopped on cancel; one not started
+        // yet is skipped (rag.ts), and a finished answer is discarded.
+        job.onCancel(() => cancelActiveLlamaCompletion());
         if (audioUri) {
           // Voice-sourced: run the RAG exchange via `ask()`, which has no
           // speech side effect of its own — the caller (finishUtterance)
@@ -602,14 +614,18 @@ export default function HomeScreen() {
           // re-arms the mic, which `submitQuery`'s own fire-and-forget
           // speech can't provide. This is now the ONLY RAG call for a voice
           // query — see this function's doc comment above.
-          const { assistantId, text: answerText } = await chatSession.ask(text);
+          const { assistantId, text: answerText } = await chatSession.ask(text, () => job.cancelled);
           return { intent, answerText, assistantId };
         }
-        await chatSession.submitQuery(text, "text");
+        await chatSession.submitQuery(text, "text", () => job.cancelled);
         return { intent };
       } finally {
-        setProcessingState("idle");
-        setProcessingLabel(null);
+        // Only the job that still owns the screen may reset it — a
+        // cancelled job unwinding late must not clear a newer job's state.
+        if (currentJobRef.current === job) {
+          setProcessingState("idle");
+          setProcessingLabel(null);
+        }
       }
     },
     [routeRecord, chatSession]
@@ -622,7 +638,7 @@ export default function HomeScreen() {
   // "Hey Xayra" gap below.
 
   // Build 25 ATOMIC VOICE LOCK: fixes a real double-submission/double-RAG-
-  // response bug. `isProcessingVoiceQueryRef` is a plain ref, not React
+  // response bug. `processingVoiceJobRef` is a plain ref, not React
   // state — checked and set SYNCHRONOUSLY, immune to the render-batching
   // window that made the previous guard (useChatSession's `isSending`
   // STATE, read from a `useCallback` closure) unreliable: two calls into
@@ -632,7 +648,9 @@ export default function HomeScreen() {
   // letting both proceed and run the RAG pipeline twice for one utterance.
   // (useChatSession.ts's `ask`/`submitQuery` now also guard on their own
   // ref for the same reason — this is defense in depth, not either/or.)
-  const isProcessingVoiceQueryRef = useRef(false);
+  // Holds the job that owns the lock, so a CANCELLED job still unwinding
+  // never blocks the next utterance.
+  const processingVoiceJobRef = useRef<ProcessingJob | null>(null);
   // Belt-and-suspenders against a second, LATER call for what's really the
   // same phrase (e.g. a duplicate "result" event firing after the first one
   // already completed processing, rather than while it was still in
@@ -643,13 +661,25 @@ export default function HomeScreen() {
   const lastVoiceQueryRef = useRef<{ normalizedText: string; at: number } | null>(null);
   const DUPLICATE_VOICE_QUERY_WINDOW_MS = 3000;
 
-  // Build 39 "stop, don't execute this": set by the explicit Cancel action
-  // (or a tap during Handsfree's own processing — see handleRecordPress). Checked at the one checkpoint that actually
-  // matters for a note (right after transcription resolves, before a note
-  // is ever created or a query ever routed) — a plain ref, not state, since
-  // it has to be visible synchronously inside `finishUtterance`'s own
-  // still-running closure, not on the next render.
-  const cancelRequestedRef = useRef(false);
+  // The processing job that currently owns the screen (see
+  // services/ai/processingJob.ts). Cancel acts on it synchronously; a job
+  // that's been cancelled or replaced can never touch the UI again.
+  // `cancellableJobId` drives whether Cancel is offered.
+  const currentJobRef = useRef<ProcessingJob | null>(null);
+  const [cancellableJobId, setCancellableJobId] = useState<number | null>(null);
+  const beginJob = useCallback(() => {
+    const job = new ProcessingJob();
+    currentJobRef.current = job;
+    setCancellableJobId(job.id);
+    return job;
+  }, []);
+  const endJob = useCallback((job: ProcessingJob | null) => {
+    if (!job || currentJobRef.current !== job) return;
+    currentJobRef.current = null;
+    setCancellableJobId(null);
+    setProcessingState("idle");
+    setProcessingLabel(null);
+  }, []);
 
   const finishUtterance = useCallback(
     async (
@@ -658,6 +688,7 @@ export default function HomeScreen() {
       reportState?: (state: "processing" | "speaking") => void,
       options?: { isHandsfree?: boolean; onRouted?: () => void }
     ) => {
+      let job: ProcessingJob | null = null;
       // TEXT-ONLY STORAGE (enforced, no exceptions): this raw WAV
       // (services/audio/recorder.ts, written to the cache folder's recordings/)
       // is ALWAYS deleted once this function is done with it, regardless of
@@ -688,23 +719,23 @@ export default function HomeScreen() {
         // that's genuinely happening right now. `mode` is this utterance's
         // own frozen Record/Ask choice, so it's safe to set the label this
         // early.
+        job = beginJob();
+        const thisJob = job;
+        // A cancelled utterance releases its manual-utterance slot at once
+        // (the mic is already closed by now), so the central button works
+        // again without waiting for Whisper/RAG to unwind.
+        thisJob.onCancel(() => options?.onRouted?.());
         setProcessingState("processing");
         setProcessingLabel(mode === "record" ? "note" : "query");
         // QA Phase 3, P2-2: tag this write with the flow THIS utterance
         // actually belongs to, not a shared untagged value — see the
         // `noteStage`/`chatStage` split above for the read side of this fix.
         setPipelineStage(mode === "record" ? "note" : "chat", "transcribing");
-        cancelRequestedRef.current = false;
-        const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri);
-        if (cancelRequestedRef.current) {
-          // The user tapped cancel while transcription was still running —
-          // transcription itself has no interrupt API (whisper.cpp runs to
-          // completion once started), but nothing REQUIRES acting on its
-          // result once it's back. Bailing here means no note is ever
-          // created and no query is ever routed — the cleanest possible
-          // "as if it never happened" for this stage, since there's nothing
-          // to undo yet.
-          showToast("Cancelled");
+        const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri, thisJob);
+        if (thisJob.cancelled) {
+          // Cancelled during transcription: the UI already returned to idle
+          // and said "Cancelled" on the tap itself — nothing is routed,
+          // saved or spoken.
           return;
         }
         if (isSilentTranscript(transcript)) {
@@ -752,10 +783,12 @@ export default function HomeScreen() {
       const previous = lastVoiceQueryRef.current;
       const isDuplicateOfRecent =
         !!previous && previous.normalizedText === normalizedText && now - previous.at < DUPLICATE_VOICE_QUERY_WINDOW_MS;
-      if (isProcessingVoiceQueryRef.current || isDuplicateOfRecent) {
+      // A cancelled job still unwinding doesn't hold the lock.
+      const lockHolder = processingVoiceJobRef.current;
+      if ((lockHolder && !lockHolder.cancelled) || isDuplicateOfRecent) {
         return;
       }
-      isProcessingVoiceQueryRef.current = true;
+      processingVoiceJobRef.current = thisJob;
       // "Immediately clear the active transcription buffer the exact
       // millisecond the phrase is accepted" (per the task): this app has no
       // separate live transcription-buffer state to clear (asrRouter.
@@ -772,8 +805,12 @@ export default function HomeScreen() {
           transcript.trim(),
           audioUri,
           whisperModelId ?? null,
-          mode
+          mode,
+          thisJob
         );
+        if (thisJob.cancelled) {
+          return;
+        }
         // Saved / answered: speaking the result below no longer holds a
         // manual utterance open.
         options?.onRouted?.();
@@ -808,26 +845,26 @@ export default function HomeScreen() {
           await chatSession.speakMessageAndWait({ id: assistantId, text: answerText });
         }
       } finally {
-        isProcessingVoiceQueryRef.current = false;
+        if (processingVoiceJobRef.current === thisJob) processingVoiceJobRef.current = null;
       }
       } finally {
         // Always — see this function's opening comment. `idempotent: true`
         // makes this a safe no-op if the file was somehow already gone.
         await FileSystem.deleteAsync(audioUri, { idempotent: true }).catch(() => {});
         // Safety net for every early-return path above (too-short/silent/
-        // no-wake-word/duplicate) that flips processing state on at the top
-        // of this function but never reaches `routeFreeformInput`'s own
-        // matching reset below — without this, one of those rejections
-        // would leave the canvas stuck on "Got it" forever. A
-        // no-op on the normal success path, where routeFreeformInput's own
-        // `finally` has already reset all three.
-        setProcessingState("idle");
-        setProcessingLabel(null);
-        // Matches the flow this same utterance's "transcribing" write used.
-        setPipelineStage(mode === "record" ? "note" : "chat", null);
+        // no-wake-word/duplicate): resets the screen — but only if this job
+        // still owns it (a cancelled or superseded job never touches it).
+        if (!job || currentJobRef.current === job) {
+          setPipelineStage(mode === "record" ? "note" : "chat", null);
+        }
+        if (job) endJob(job);
+        else {
+          setProcessingState("idle");
+          setProcessingLabel(null);
+        }
       }
     },
-    [routeFreeformInput, chatSession]
+    [routeFreeformInput, chatSession, beginJob, endJob]
   );
 
   // ---- Handsfree Mode -----------------------------------------------------
@@ -985,12 +1022,22 @@ export default function HomeScreen() {
   //
   // Declared here, after `activeMode` exists, specifically so it can guard
   // against the single-native-session collision described above.
-  // The explicit way to abort processing (manual or typed) — the central
-  // button no longer does it — and a tap during Handsfree's processing.
-  // The pipeline's checkpoint flag, plus cutting off transcription /
-  // generation if running.
+  // Cancel, split in two (see services/ai/processingJob.ts):
+  //  A. Right now, on the tap: the screen returns to idle, Cancel goes
+  //     away and "Cancelled" shows — never waiting on Whisper/RAG.
+  //  B. Underneath: cancelling the job starts the real aborts it supports
+  //     (Whisper decode, LLM generation) and releases the manual utterance;
+  //     everything else it was doing finishes into a discarded result.
+  // The explicit Cancel button and a tap during Handsfree's processing
+  // both come here.
   const handleCancelProcessing = useCallback(() => {
-    cancelProcessing(cancelRequestedRef);
+    const job = currentJobRef.current;
+    if (!cancelProcessing(job)) return;
+    currentJobRef.current = null;
+    setCancellableJobId(null);
+    setProcessingState("idle");
+    setProcessingLabel(null);
+    showToast("Cancelled");
   }, []);
 
   // The one way a manual utterance starts — a central-button tap or a
@@ -1214,7 +1261,7 @@ export default function HomeScreen() {
     isHandsfreeActive: activeMode.isActive,
     mode: inputMode,
   });
-  const showCancelProcessing = canvasState === "transcribing" && !activeMode.isActive;
+  const showCancelProcessing = canvasState === "transcribing" && !activeMode.isActive && cancellableJobId !== null;
   // Record/Ask can't change while a manual utterance is in flight — its
   // meaning was frozen when recording began.
   const isModeLocked = manualUtterance.phase !== "idle";
@@ -1283,13 +1330,17 @@ export default function HomeScreen() {
     (text: string) => {
       setInputText("");
       setIsComposing(false);
-      void routeFreeformInput(text, null, null, inputMode).catch((err) => {
-        const message = err instanceof Error ? err.message : "Something went wrong.";
-        setError(message);
-        Alert.alert("Failed", message);
-      });
+      const job = beginJob();
+      void routeFreeformInput(text, null, null, inputMode, job)
+        .catch((err) => {
+          if (job.cancelled) return;
+          const message = err instanceof Error ? err.message : "Something went wrong.";
+          setError(message);
+          Alert.alert("Failed", message);
+        })
+        .finally(() => endJob(job));
     },
-    [routeFreeformInput, inputMode]
+    [routeFreeformInput, inputMode, beginJob, endJob]
   );
 
   if (!isReady) {

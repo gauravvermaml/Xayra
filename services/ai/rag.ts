@@ -1,4 +1,4 @@
-import { generateLocalRAGAnswer } from "./localLlama";
+import { generateLocalRAGAnswer, LlamaCancelledError } from "./localLlama";
 import { setPipelineStage } from "./pipelineStage";
 import { buildNoteContext, finalizeAnswer, resolveNoteText } from "./ragFormatting";
 import { relatedEvidenceNotes } from "./relationshipGrounding";
@@ -88,10 +88,15 @@ export type RagAnswer = {
  *
  * `onChunk` is kept for the caller's signature but no longer receives raw
  * tokens — unvalidated text is never shown (see the generation call below).
+ *
+ * `isCancelled` lets a cancelled request stop before generation starts
+ * (retrieval itself isn't interruptible; generation that's already running
+ * is stopped separately via cancelActiveLlamaCompletion).
  */
 export async function generateRAGAnswer(
   userQuery: string,
-  onChunk?: (chunk: string) => void
+  onChunk?: (chunk: string) => void,
+  isCancelled?: () => boolean
 ): Promise<RagAnswer> {
   setPipelineStage("chat", "retrieving");
   trace("question", userQuery);
@@ -161,6 +166,10 @@ export async function generateRAGAnswer(
   // checks below reject must never be visible, not even transiently. The
   // bubble stays empty — so ChatSheetContent.tsx keeps showing the
   // "answering" stage label — until the validated text replaces it.
+  if (isCancelled?.()) {
+    setPipelineStage("chat", null);
+    throw new LlamaCancelledError();
+  }
   setPipelineStage("chat", "answering");
   try {
     const rawText = await generateLocalRAGAnswer(groundedQuestion, noteContext, () => {});

@@ -45,6 +45,7 @@ jest.mock("../services/ai/localWhisper", () => ({ cancelActiveTranscription: () 
 jest.mock("../services/ai/localLlama", () => ({ cancelActiveLlamaCompletion: () => mockCancelCompletion() }));
 
 import AudioRecord from "@fugood/react-native-audio-pcm-stream";
+import { ProcessingJob } from "../services/ai/processingJob";
 import { useVoiceRecorder, type VoiceRecorder } from "../services/audio/recorder";
 import {
   AUTO_STOP_TRAILING_SILENCE_MS,
@@ -267,17 +268,18 @@ describe("manual finish and the habitual second tap", () => {
     ).toBe("ignore");
   });
 
-  it("the explicit Cancel action still cancels processing", async () => {
-    const cancelRequested = { current: false };
+  it("the explicit Cancel acknowledges at once — utterance released, abort signalled — and nothing is saved", async () => {
+    const job = new ProcessingJob();
     let transcriptionDone!: () => void;
     const saved: string[] = [];
     const { start, controller } = await setup({
-      // Mirrors finishUtterance's checkpoint: the cancel flag is checked
-      // once transcription returns, before anything is saved.
-      processUtterance: async ({ uri }) => {
-        cancelRequested.current = false;
+      // Mirrors finishUtterance: a cancelled job releases the utterance
+      // and its transcription result is discarded.
+      processUtterance: async ({ uri }, release) => {
+        job.onCancel(release);
+        job.onCancel(() => mockCancelTranscription());
         await new Promise<void>((resolve) => (transcriptionDone = resolve));
-        if (cancelRequested.current) return;
+        if (job.cancelled) return;
         saved.push(uri);
       },
     });
@@ -288,16 +290,48 @@ describe("manual finish and the habitual second tap", () => {
     await advance(300);
     expect(controller.snapshot.phase).toBe("processing");
 
-    cancelProcessing(cancelRequested);
+    act(() => {
+      expect(cancelProcessing(job)).toBe(true);
+    });
+    // Synchronously, before transcription has unwound:
     expect(mockCancelTranscription).toHaveBeenCalledTimes(1);
-    expect(mockCancelCompletion).toHaveBeenCalledTimes(1);
+    expect(controller.snapshot.phase).toBe("idle");
+    expect(tap(controller)).toBe("start-manual"); // the mic is already closed
 
     await act(async () => {
-      transcriptionDone();
+      transcriptionDone(); // the late result
       await flush();
     });
     expect(saved).toEqual([]);
-    expect(controller.snapshot.phase).toBe("idle");
+    expect(cancelProcessing(job)).toBe(false); // already cancelled
+  });
+
+  it("a cancelled job finishing late can't disturb the next utterance", async () => {
+    const job = new ProcessingJob();
+    let lateFinish!: () => void;
+    let calls = 0;
+    const { start, controller } = await setup({
+      processUtterance: async (_p, release) => {
+        if (++calls > 1) return;
+        job.onCancel(release);
+        await new Promise<void>((resolve) => (lateFinish = resolve));
+      },
+    });
+    await start("record");
+    await act(async () => {
+      void controller.finish("tap");
+      await flush();
+    });
+    await advance(300);
+    act(() => {
+      cancelProcessing(job);
+    });
+    await start("ask"); // the user starts again right away
+    await act(async () => {
+      lateFinish();
+      await flush();
+    });
+    expect(controller.snapshot).toEqual({ phase: "recording", mode: "ask" });
   });
 
   it("releases the utterance once routed, so a tap while the answer is spoken starts a new one", async () => {

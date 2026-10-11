@@ -7,6 +7,7 @@ import * as FileSystem from "expo-file-system/legacy";
 import { initWhisper, type WhisperContext } from "whisper.rn/index";
 
 import { logDuration, nowMs } from "./perf";
+import type { ProcessingJob } from "./processingJob";
 import { getActiveWhisperModel, getWhisperModelPath, type WhisperModelId } from "./whisperModels";
 
 export type LocalTranscriptionResult = {
@@ -234,13 +235,46 @@ export async function releaseWhisperContext(): Promise<void> {
   await loaded?.context.release();
 }
 
-export async function transcribeAudioLocal(fileUri: string): Promise<LocalTranscriptionResult> {
+/**
+ * One native decode at a time on the shared Whisper context. A cancelled
+ * transcription's result is discarded at once, but whisper.cpp only checks
+ * its abort flag between decode steps — a short utterance is one encoder
+ * pass, so a "cancelled" decode can keep the context busy for seconds
+ * (measured ~3.5 s on the Redmi). The next transcription waits for it
+ * rather than running on a context that's still occupied.
+ */
+let whisperDecodeTail: Promise<unknown> = Promise.resolve();
+
+export async function transcribeAudioLocal(fileUri: string, job?: ProcessingJob): Promise<LocalTranscriptionResult> {
+  const previousDecode = whisperDecodeTail;
+  let releaseDecodeSlot!: () => void;
+  whisperDecodeTail = new Promise<void>((resolve) => (releaseDecodeSlot = resolve));
+  try {
+    await previousDecode.catch(() => {});
+    return await transcribeOnFreeContext(fileUri, job);
+  } finally {
+    releaseDecodeSlot();
+  }
+}
+
+async function transcribeOnFreeContext(fileUri: string, job?: ProcessingJob): Promise<LocalTranscriptionResult> {
   const start = nowMs();
   activeTranscriptionCount += 1;
   try {
     const { context, modelId } = await getWhisperContext();
+    // Loading the model (after a background release it reloads) can't be
+    // interrupted, and a cancel during it used to be lost — there was no
+    // stop handle yet — so the full transcription then ran anyway. A job
+    // cancelled by now skips decoding altogether.
+    if (job?.cancelled) {
+      logDuration("Whisper STT transcription (skipped — cancelled during model load)", start);
+      return { transcript: "", modelId };
+    }
     const { stop, promise } = context.transcribe(fileUri, { language: "en", prompt: INITIAL_PROMPT });
     activeTranscriptionStop = stop;
+    // This job's own cancel aborts this decode (native abort_callback,
+    // checked between decode steps) — never some later job's.
+    job?.onCancel(() => void stop().catch(() => {}));
     const { result, isAborted } = await promise;
     logDuration(isAborted ? "Whisper STT transcription (aborted)" : "Whisper STT transcription", start);
     // A cancel tap that lands here is already recorded via
