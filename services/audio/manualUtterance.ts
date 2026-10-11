@@ -37,7 +37,8 @@ export type ManualUtteranceSnapshot = {
 export type FinishTrigger = "tap" | "silence";
 
 export type ManualUtteranceDeps = {
-  startRecording: (options: StartRecordingOptions) => Promise<void>;
+  /** False when the start was cancelled before the microphone opened. */
+  startRecording: (options: StartRecordingOptions) => Promise<boolean | void>;
   /** Stops capture and returns the WAV uri (null if nothing was recording). */
   stopRecording: () => Promise<string | null>;
   /** Runs the shared transcribe → save/answer pipeline for one utterance,
@@ -59,6 +60,7 @@ export class ManualUtteranceController {
   private readonly deps: ManualUtteranceDeps;
   private phase: ManualUtterancePhase = "idle";
   private mode: UtteranceMode | null = null;
+  private disposed = false;
 
   constructor(deps: ManualUtteranceDeps) {
     this.deps = deps;
@@ -71,21 +73,33 @@ export class ManualUtteranceController {
   private set(phase: ManualUtterancePhase, mode: UtteranceMode | null): void {
     this.phase = phase;
     this.mode = mode;
-    this.deps.onChange?.(this.snapshot);
+    if (!this.disposed) this.deps.onChange?.(this.snapshot);
+  }
+
+  /** The owning screen is gone: an utterance it started must never be
+   * finished or processed later by it (its recorder stops capture itself). */
+  dispose(): void {
+    this.disposed = true;
+    this.phase = "idle";
+    this.mode = null;
   }
 
   /** Begins recording an utterance that will mean `mode` — whatever the
    * Record/Ask control says by the time it's processed. */
   async start(mode: UtteranceMode): Promise<void> {
-    if (this.phase !== "idle") {
+    if (this.phase !== "idle" || this.disposed) {
       return;
     }
     this.set("starting", mode);
     try {
-      await this.deps.startRecording({
+      const started = await this.deps.startRecording({
         autoStopAfterSilenceMs: AUTO_STOP_TRAILING_SILENCE_MS[mode],
         onAutoStop: () => void this.finish("silence"),
       });
+      if (started === false || this.disposed) {
+        if (!this.disposed) this.set("idle", null);
+        return;
+      }
       this.set("recording", mode);
     } catch (err) {
       this.set("idle", null);
@@ -99,7 +113,7 @@ export class ManualUtteranceController {
    * captured at `start`, never re-read.
    */
   async finish(trigger: FinishTrigger): Promise<void> {
-    if (this.phase !== "recording" || !this.mode) {
+    if (this.phase !== "recording" || !this.mode || this.disposed) {
       return;
     }
     const mode = this.mode;
@@ -219,4 +233,10 @@ export function centralStatusText(state: {
   // Handsfree keeps its "tap to cancel" gesture and hint; everything else
   // cancels through the explicit Cancel action.
   return state.isHandsfreeActive ? `${label} · tap to cancel` : label;
+}
+
+/** What Xayra says after a Record utterance: "Saved." only when a note was
+ * actually written — never for a recording discarded as empty or silent. */
+export function recordCompletionSpeech(noteSaved: boolean | undefined): string | null {
+  return noteSaved ? "Saved." : null;
 }

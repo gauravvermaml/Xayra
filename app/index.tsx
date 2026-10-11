@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, Dimensions, Image, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
+import { getRecordingPermissionsAsync } from "expo-audio";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import BottomSheet, { useBottomSheetSpringConfigs } from "@gorhom/bottom-sheet";
@@ -28,6 +29,7 @@ import { showToast } from "../components/Toast";
 import { TodosOverlay } from "../components/TodosOverlay";
 import { HOME_SUBTITLE } from "../constants/copy";
 import { colors } from "../constants/theme";
+import { useLaunchShortcut } from "../hooks/useLaunchShortcut";
 import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
@@ -52,6 +54,7 @@ import {
   centralStatusText,
   decideCentralTap,
   idleTapCue,
+  recordCompletionSpeech,
   ManualUtteranceController,
   type ManualUtteranceSnapshot,
   type UtteranceMode,
@@ -75,6 +78,13 @@ import {
   SilentRecordingError,
   type Note,
 } from "../services/notes/noteManager";
+import { isMicInUse } from "../services/audio/audioInputState";
+import {
+  canAdoptShortcutMode,
+  decideShortcutLaunch,
+  peekPendingShortcut,
+  type PendingShortcut,
+} from "../services/shortcuts/launchShortcut";
 import { getGreetingFirstName } from "../services/sync/driveSync";
 import { getTimeBasedGreeting } from "../utils/greeting";
 
@@ -309,7 +319,9 @@ export default function HomeScreen() {
   // submission does — no classification, just this. Defaults to "record"
   // (the more common action — most sessions are jotting a thought, not
   // asking a question of past ones).
-  const [inputMode, setInputMode] = useState<UtteranceMode>("record");
+  // A launcher shortcut that opened the app sets the starting mode, so the
+  // first frame already shows it (no Record→Ask flip after render).
+  const [inputMode, setInputMode] = useState<UtteranceMode>(() => peekPendingShortcut()?.mode ?? "record");
   // Read only at the moment Handsfree hands an utterance off — every
   // utterance then carries that mode explicitly (see finishUtterance).
   const inputModeRef = useRef(inputMode);
@@ -507,13 +519,17 @@ export default function HomeScreen() {
   // already-started utterance means.
 
   const routeRecord = useCallback(
-    async (text: string, audioUri: string | null, whisperModelId: string | null) => {
+    async (text: string, audioUri: string | null, whisperModelId: string | null): Promise<boolean> => {
+      // Only a note actually written counts as saved — a near-empty or
+      // silent recording is discarded, and must not be announced as saved.
+      let savedNote = false;
       try {
         const note = audioUri
           ? await createVoiceNote(audioUri, text, whisperModelId)
           : await createTextNote(text);
         showToast("Saved thought to memory");
         sheetRef.current?.snapToIndex(0);
+        savedNote = true;
         // So the Record-mode drawer list shows the new note immediately,
         // not just after the next screen-focus refresh.
         refreshNotes();
@@ -528,6 +544,7 @@ export default function HomeScreen() {
           throw err;
         }
       }
+      return savedNote;
     },
     [refreshNotes]
   );
@@ -563,7 +580,7 @@ export default function HomeScreen() {
       audioUri: string | null,
       whisperModelId: string | null,
       mode: UtteranceMode
-    ): Promise<{ intent: "RECORD" | "ASK"; answerText?: string; assistantId?: string }> => {
+    ): Promise<{ intent: "RECORD" | "ASK"; saved?: boolean; answerText?: string; assistantId?: string }> => {
       setProcessingState("processing");
       // ASK auto-peeks to 50% to show the answer card; RECORD snaps back to
       // the resting peek once saved (see routeRecord). Snapped immediately —
@@ -575,8 +592,8 @@ export default function HomeScreen() {
       try {
         setProcessingLabel(intent === "RECORD" ? "note" : "query");
         if (intent === "RECORD") {
-          await routeRecord(text, audioUri, whisperModelId);
-          return { intent };
+          const saved = await routeRecord(text, audioUri, whisperModelId);
+          return { intent, saved };
         }
         if (audioUri) {
           // Voice-sourced: run the RAG exchange via `ask()`, which has no
@@ -751,7 +768,7 @@ export default function HomeScreen() {
 
       try {
         reportState?.("processing");
-        const { intent, answerText, assistantId } = await routeFreeformInput(
+        const { intent, saved, answerText, assistantId } = await routeFreeformInput(
           transcript.trim(),
           audioUri,
           whisperModelId ?? null,
@@ -763,7 +780,12 @@ export default function HomeScreen() {
 
         reportState?.("speaking");
         if (intent === "RECORD") {
-          await speakTextAndWait("Saved.");
+          // Spoken only when a note was really written (it used to be said
+          // even when the recording was discarded as empty/silent).
+          const completion = recordCompletionSpeech(saved);
+          if (completion) {
+            await speakTextAndWait(completion);
+          }
         } else if (answerText && assistantId) {
           // `chatSession.speakMessageAndWait` — not chatSession's other
           // (fire-and-forget) speech path, and not a raw `speakTextAndWait`
@@ -937,6 +959,10 @@ export default function HomeScreen() {
     });
   }
   const manualController = manualControllerRef.current;
+  // If this screen unmounts mid-utterance (e.g. the activity is re-created),
+  // that utterance must die with it — never finish or be processed by a
+  // screen nobody can see. (The recorder hook closes the mic itself.)
+  useEffect(() => () => manualControllerRef.current?.dispose(), []);
 
   useFocusEffect(
     useCallback(() => {
@@ -959,6 +985,36 @@ export default function HomeScreen() {
   //
   // Declared here, after `activeMode` exists, specifically so it can guard
   // against the single-native-session collision described above.
+  // The explicit way to abort processing (manual or typed) — the central
+  // button no longer does it — and a tap during Handsfree's processing.
+  // The pipeline's checkpoint flag, plus cutting off transcription /
+  // generation if running.
+  const handleCancelProcessing = useCallback(() => {
+    cancelProcessing(cancelRequestedRef);
+  }, []);
+
+  // The one way a manual utterance starts — a central-button tap or a
+  // launcher shortcut — with the mode it will mean.
+  const startManualUtterance = useCallback(
+    async (mode: UtteranceMode) => {
+      setError(null);
+      // Starting a recording collapses the sheet to its resting peek
+      // immediately.
+      sheetRef.current?.snapToIndex(0);
+      try {
+        // Build 39: the PCM recorder starts FIRST, then Tier 1 — confirmed
+        // on-device (Pixel 9) that reconfiguring the audio session
+        // (`setAudioModeAsync`, inside startRecording) while Tier 1's
+        // SpeechRecognizer was already listening starved it of audio.
+        await manualController.start(mode);
+        asrRouter.startListening();
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "Recording failed.");
+      }
+    },
+    [manualController]
+  );
+
   const handleRecordPress = useCallback(async () => {
     const action = decideCentralTap({
       manualPhase: manualController.snapshot.phase,
@@ -982,7 +1038,7 @@ export default function HomeScreen() {
         // Build 39/48, unchanged for Handsfree: a tap during Handsfree's own
         // transcribing/answering cancels it. Checked before the Handsfree
         // capture branch so it isn't swallowed by it.
-        cancelProcessing(cancelRequestedRef);
+        handleCancelProcessing();
         return;
       case "cancel-handsfree-capture":
         // Build 48 fix #2, unchanged: a tap while Handsfree is capturing an
@@ -994,30 +1050,88 @@ export default function HomeScreen() {
         }
         return;
       case "start-manual":
-        setError(null);
-        // Tapping to start recording collapses the sheet to its resting
-        // peek immediately.
-        sheetRef.current?.snapToIndex(0);
-        try {
-          // Build 39: the PCM recorder starts FIRST, then Tier 1 — confirmed
-          // on-device (Pixel 9) that reconfiguring the audio session
-          // (`setAudioModeAsync`, inside startRecording) while Tier 1's
-          // SpeechRecognizer was already listening starved it of audio.
-          await manualController.start(inputMode);
-          asrRouter.startListening();
-        } catch (err) {
-          setError(err instanceof Error ? err.message : "Recording failed.");
-        }
+        await startManualUtterance(inputMode);
         return;
     }
-  }, [manualController, processingState, activeMode, recorder.isTransitioning, inputMode]);
+  }, [manualController, processingState, activeMode, recorder.isTransitioning, inputMode, startManualUtterance, handleCancelProcessing]);
 
-  // The explicit way to abort processing (manual or typed) — the central
-  // button no longer does it. Same cancellation as always: the pipeline's
-  // checkpoint flag, plus cutting off transcription / generation if running.
-  const handleCancelProcessing = useCallback(() => {
-    cancelProcessing(cancelRequestedRef);
-  }, []);
+  // ---- Launcher shortcuts ("Record with Xayra" / "Ask Xayra") -------------
+  //
+  // A shortcut carries its own mode and, when it's safe, starts the same
+  // manual utterance a central tap does — so the user just speaks. See
+  // services/shortcuts/launchShortcut.ts (decideShortcutLaunch) for when it
+  // only selects the mode instead, and plugins/withAppShortcuts.js for the
+  // shortcuts themselves. State is read through refs because the decision
+  // runs after an await.
+  const processingStateRef = useRef(processingState);
+  processingStateRef.current = processingState;
+  const isHandsfreeActiveRef = useRef(activeMode.isActive);
+  isHandsfreeActiveRef.current = activeMode.isActive;
+  const [isFocused, setIsFocused] = useState(false);
+  useFocusEffect(
+    useCallback(() => {
+      setIsFocused(true);
+      return () => setIsFocused(false);
+    }, [])
+  );
+  const handleLaunchShortcut = useCallback(
+    async (shortcut: PendingShortcut) => {
+      let micPermissionGranted = false;
+      try {
+        micPermissionGranted = (await getRecordingPermissionsAsync()).granted;
+      } catch {
+        // Unknown → treat as not granted: the user's tap then goes through
+        // the normal permission prompt.
+      }
+      const action = decideShortcutLaunch({
+        manualPhase: manualController.snapshot.phase,
+        isProcessing: processingStateRef.current === "processing",
+        isRecorderBusy: recorderRef.current.isRecording || recorderRef.current.isTransitioning,
+        isHandsfreeActive: isHandsfreeActiveRef.current,
+        isMicInUse: isMicInUse(),
+        micPermissionGranted,
+      });
+      switch (action) {
+        case "start":
+          setInputMode(shortcut.mode);
+          await startManualUtterance(shortcut.mode);
+          return;
+        case "select-only":
+          setInputMode(shortcut.mode);
+          showToast(shortcut.mode === "record" ? "Tap Xayra to record" : "Tap Xayra to ask");
+          return;
+        case "busy":
+          showToast("Xayra is busy — finish or cancel the current one first.");
+          return;
+        case "handsfree":
+          showToast(`Handsfree is on — say "${WAKE_PHRASE_DISPLAY}"`);
+          return;
+      }
+    },
+    [manualController, startManualUtterance]
+  );
+  // A warm launch's link lands before the app is visible: adopt its mode
+  // right away (unless an utterance, processing or Handsfree is active), so
+  // the first visible frame already shows it.
+  const handleShortcutArrived = useCallback(
+    (shortcut: PendingShortcut) => {
+      const canAdopt = canAdoptShortcutMode({
+        manualPhase: manualController.snapshot.phase,
+        isProcessing: processingStateRef.current === "processing",
+        isRecorderBusy: recorderRef.current.isRecording || recorderRef.current.isTransitioning,
+        isHandsfreeActive: isHandsfreeActiveRef.current,
+        isMicInUse: isMicInUse(),
+      });
+      if (canAdopt) setInputMode(shortcut.mode);
+    },
+    [manualController]
+  );
+  useLaunchShortcut({
+    enabled: isReady && isFocused,
+    onShortcut: (s) => void handleLaunchShortcut(s),
+    onArrive: handleShortcutArrived,
+  });
+
 
   // 10-minute no-speech safety timeout (Requirement 5) — armed the moment
   // Handsfree engages, and re-armed on every utterance ActiveModeManager

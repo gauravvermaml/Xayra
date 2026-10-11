@@ -41,6 +41,7 @@
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      "./plugins/withAppShortcuts",
       "expo-secure-store",
       "expo-router",
       "expo-local-authentication",

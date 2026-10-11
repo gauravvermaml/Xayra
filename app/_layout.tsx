@@ -11,6 +11,7 @@ import { releaseLocalLlamaOnBackground } from "../services/ai/localLlama";
 import { releaseWhisperContext } from "../services/ai/localWhisper";
 import { initModelDownloads } from "../services/ai/modelDownloadManager";
 import { isSetupComplete } from "../services/settings/appSettings";
+import { useDiscardShortcutsDuringSetup, useShortcutLaunchTransaction } from "../hooks/useLaunchShortcut";
 
 const colors = {
   // True jet black — the unified Apple-Maps-style canvas (see app/index.tsx)
@@ -114,6 +115,8 @@ function useReleaseNativeContextsOnBackground(): void {
 export default function RootLayout() {
   const [setupComplete, markSetupGateComplete] = useSetupGate();
   useReleaseNativeContextsOnBackground();
+  useDiscardShortcutsDuringSetup(setupComplete);
+  useShortcutLaunchTransaction();
 
   return (
     // Required once anywhere above any react-native-gesture-handler consumer

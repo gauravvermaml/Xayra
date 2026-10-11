@@ -452,3 +452,95 @@ describe("Handsfree taps keep their meaning", () => {
     );
   });
 });
+
+describe("no orphaned capture (launcher-shortcut ghost recording)", () => {
+  const expoAudio = require("expo-audio") as { requestRecordingPermissionsAsync: jest.Mock };
+  const { isMicInUse } = require("../services/audio/audioInputState") as { isMicInUse: () => boolean };
+
+  /** Holds the permission step open so a start is genuinely "in flight". */
+  function holdPermission() {
+    let release!: () => void;
+    expoAudio.requestRecordingPermissionsAsync.mockImplementationOnce(
+      () => new Promise((resolve) => (release = () => resolve({ granted: true })))
+    );
+    return () => release();
+  }
+
+  async function mountRecorder() {
+    const recorderRef: { current: VoiceRecorder | null } = { current: null };
+    function Harness() {
+      recorderRef.current = useVoiceRecorder();
+      return null;
+    }
+    let tree!: ReturnType<typeof create>;
+    await act(async () => {
+      tree = create(<Harness />);
+    });
+    return { tree, recorder: () => recorderRef.current! };
+  }
+
+  it("a stop during an in-flight start cancels it: the mic never opens", async () => {
+    const { recorder } = await mountRecorder();
+    const release = holdPermission();
+    let started: boolean | undefined;
+    await act(async () => {
+      const p = recorder().startRecording();
+      expect(await recorder().stopRecording()).toBeNull();
+      release();
+      started = await p;
+    });
+    expect(started).toBe(false);
+    expect(mockAudioRecord.start).not.toHaveBeenCalled();
+    expect(isMicInUse()).toBe(false);
+  });
+
+  it("a screen unmounting mid-start never leaves the mic opening behind it", async () => {
+    const { tree, recorder } = await mountRecorder();
+    const release = holdPermission();
+    let p!: Promise<boolean>;
+    act(() => {
+      p = recorder().startRecording();
+    });
+    act(() => tree.unmount());
+    await act(async () => {
+      release();
+      expect(await p).toBe(false);
+    });
+    expect(mockAudioRecord.start).not.toHaveBeenCalled();
+  });
+
+  it("a screen unmounting while recording closes the native session", async () => {
+    const { tree, recorder } = await mountRecorder();
+    await act(async () => {
+      await recorder().startRecording({ autoStopAfterSilenceMs: 1500, onAutoStop: jest.fn() });
+    });
+    expect(isMicInUse()).toBe(true);
+    act(() => tree.unmount());
+    expect(mockAudioRecord.stop).toHaveBeenCalledTimes(1);
+    expect(isMicInUse()).toBe(false);
+  });
+
+  it("an utterance whose screen went away is never finished or processed", async () => {
+    const { start, processed, controller } = await setup();
+    await start("record");
+    controller.dispose();
+    await feed(QUIET, 320);
+    await feed(SPEECH, 1000);
+    await feed(QUIET, 3000);
+    await advance(300);
+    expect(processed).toHaveLength(0);
+  });
+
+  it("a cancelled start leaves the controller idle, not 'recording'", async () => {
+    const processed: string[] = [];
+    const controller = new ManualUtteranceController({
+      startRecording: async () => false,
+      stopRecording: async () => null,
+      processUtterance: async (_u, mode) => {
+        processed.push(mode);
+      },
+    });
+    await controller.start("ask");
+    expect(controller.snapshot).toEqual({ phase: "idle", mode: null });
+  });
+});

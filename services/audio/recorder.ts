@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, AppState, type AppStateStatus } from "react-native";
 import { Buffer } from "buffer";
-import { requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
+import { getRecordingPermissionsAsync, requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
 import AudioRecord from "@fugood/react-native-audio-pcm-stream";
 
 import { logDuration, nowMs } from "../ai/perf";
@@ -30,7 +30,10 @@ export type VoiceRecorder = {
    * animates off of, not a canned/synthetic pulse. */
   amplitude: number;
   requestPermissions: () => Promise<boolean>;
-  startRecording: (options?: StartRecordingOptions) => Promise<void>;
+  /** Resolves true once the microphone is capturing; false if the start
+   * was cancelled (stopRecording called, or the screen went away) before
+   * the native session opened — no capture is left running. */
+  startRecording: (options?: StartRecordingOptions) => Promise<boolean>;
   stopRecording: () => Promise<string | null>;
 };
 
@@ -71,7 +74,36 @@ export function useVoiceRecorder(): VoiceRecorder {
       autoStopTimerRef.current = null;
     }
   }, []);
-  useEffect(() => clearAutoStop, [clearAutoStop]);
+  // A start can be cancelled while it's still awaiting permissions/audio
+  // session setup: stopRecording() or the screen unmounting sets this, and
+  // startRecording bails out before opening the native session. Without
+  // it, a start in flight when its screen unmounted kept the mic running
+  // as an orphan nothing could stop (confirmed on-device: a launcher
+  // shortcut's activity re-creation left a "ghost" recording that later
+  // auto-finished and was processed by the dead screen).
+  const startAbortRef = useRef(false);
+  useEffect(
+    () => () => {
+      // Whoever owned this recorder is gone: never leave its capture open.
+      startAbortRef.current = true;
+      clearAutoStop();
+      if (isRecordingRef.current) {
+        try {
+          AudioRecord.stop();
+        } catch {
+          // Already stopped.
+        }
+        isRecordingRef.current = false;
+        chunksRef.current = [];
+        setMicInUse(false);
+      }
+      subscriptionRef.current?.remove();
+      subscriptionRef.current = null;
+      errorSubscriptionRef.current?.remove();
+      errorSubscriptionRef.current = null;
+    },
+    [clearAutoStop]
+  );
 
   /**
    * Build 42 P1-4 fix: recording has no real backgrounding resilience (no
@@ -109,12 +141,24 @@ export function useVoiceRecorder(): VoiceRecorder {
 
   const startRecording = useCallback(async (options?: StartRecordingOptions) => {
     if (isBusyRef.current) {
-      return;
+      return false;
     }
     isBusyRef.current = true;
+    startAbortRef.current = false;
     setIsTransitioning(true);
     try {
-      const granted = await requestPermissions();
+      // Check before asking: requesting launches the system permission
+      // activity even when permission is already granted (confirmed in the
+      // event log — it paused the app and cost ~300-400 ms per start).
+      let granted = false;
+      try {
+        granted = (await getRecordingPermissionsAsync()).granted;
+      } catch {
+        // Unknown — fall through to the normal request.
+      }
+      if (!granted) {
+        granted = await requestPermissions();
+      }
       if (!granted) {
         throw new Error("Microphone permission was not granted.");
       }
@@ -143,6 +187,11 @@ export function useVoiceRecorder(): VoiceRecorder {
         playsInSilentMode: true,
         interruptionMode: "doNotMix",
       });
+
+      // The last moment before the native session opens.
+      if (startAbortRef.current) {
+        return false;
+      }
 
       chunksRef.current = [];
       backgroundedDuringRecordingRef.current = false;
@@ -199,6 +248,7 @@ export function useVoiceRecorder(): VoiceRecorder {
           options?.onAutoStop?.();
         }, SILENCE_POLL_INTERVAL_MS);
       }
+      return true;
     } catch (err) {
       Alert.alert("Recording Error", err instanceof Error ? err.message : String(err));
       throw err;
@@ -209,6 +259,12 @@ export function useVoiceRecorder(): VoiceRecorder {
   }, [requestPermissions, clearAutoStop]);
 
   const stopRecording = useCallback(async () => {
+    if (isBusyRef.current && !isRecordingRef.current) {
+      // A start is still in flight: cancel it rather than let it open the
+      // microphone after the caller has given up on it.
+      startAbortRef.current = true;
+      return null;
+    }
     if (isBusyRef.current || !isRecordingRef.current) {
       return null;
     }
