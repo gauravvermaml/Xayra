@@ -39,6 +39,8 @@ Measured on the Redmi (standalone Xayra Dev, logcat):
 
 Validation: `tsc --noEmit` clean; 613 unit tests in 39 suites; Android export bundles.
 
+Build: EAS production build `4ea3e7fc-f928-471f-8756-25be4c4b08cf` (1.0.41 / 49, from `a049142`), finished 2026-10-11; for manual upload to Google Play Internal Testing.
+
 ### Locked plan of action (2026-10-11)
 
 Near-term: (1) ship this build; (2) dogfood ~a week via Internal Testing on the Redmi and a Pixel 9; (3) Quick Settings tile + restricted lock-screen **Record**; (4) subscription infrastructure; (5) launch / retention measurement; (6) entity timeline; (7) temporal personal memory graph. Post-launch moat: personal memory layer (entities, events, provenance back to source notes, chronological retrieval, identity resolution, longitudinal reasoning), Whisper background-reload performance, later capture channels (headset, share sheet; VoiceInteractionService as optional research only). **Locked Ask is not planned.** Details: `BACKLOG.md` → "Roadmap".
