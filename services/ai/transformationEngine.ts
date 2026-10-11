@@ -34,6 +34,7 @@ import {
 } from "./localLlama";
 import { isTranscriptionInProgress } from "./localWhisper";
 import { logDuration, nowMs } from "./perf";
+import { redactForLog } from "../logging/redact";
 
 /** Delays tried, in order, while the device reports itself at or above
  * `ThermalStatus.MODERATE` before firing an extraction anyway — extraction
@@ -219,7 +220,8 @@ export async function extractToDosFromText(rawText: string): Promise<ExtractedTo
       // a date_phrase the model got right (a date-resolution bug) — normalize
       // Extracted's return value only exposes the already-resolved
       // actionDate, which collapses both cases to the same "today" result.
-      console.log("[transformationEngine] Raw extracted items (pre-date-resolution):", parsed);
+      // Shape only (field lengths, counts) — never the to-do text itself.
+      console.log("[transformationEngine] Raw extracted items (pre-date-resolution):", JSON.stringify(redactForLog(parsed)));
       // `true`: containsExtractionTrigger already confirmed above that this
       // note was explicitly flagged for extraction — see normalizeExtracted's
       // own doc comment on this parameter for why that changes the

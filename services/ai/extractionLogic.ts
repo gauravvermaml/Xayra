@@ -1687,7 +1687,7 @@ export function normalizeExtracted(
 
     if (!taskIsAnchoredInNote(task, rawNoteText)) {
       console.warn(
-        `[transformationEngine] Dropping fabricated task "${task}" — shares no content word with the note.`
+        `[transformationEngine] Dropping fabricated task (${task.length} chars) — shares no content word with the note.`
       );
       continue;
     }
@@ -1700,7 +1700,7 @@ export function normalizeExtracted(
     let recurrence: Recurrence = isRecurrence(record.recurrence) ? record.recurrence : "none";
     if (recurrence !== "none" && !noteHasRecurrenceEvidence) {
       console.warn(
-        `[transformationEngine] Model classified "${task}" as recurrence "${recurrence}" but the note ` +
+        `[transformationEngine] Model classified a task (${task.length} chars) as recurrence "${recurrence}" but the note ` +
           "contains no actual repeating language — overriding to \"none\"."
       );
       recurrence = "none";
@@ -1722,7 +1722,7 @@ export function normalizeExtracted(
         // every possible phrasing is expected and fine, hallucinating text
         // that was never written is not.)
         console.warn(
-          `[transformationEngine] Dropping hallucinated date_phrase "${datePhrase}" for "${task}" — ` +
+          `[transformationEngine] Dropping hallucinated date_phrase (${datePhrase.length} chars) for a task (${task.length} chars) — ` +
             "not found anywhere in the note."
         );
         datePhrase = "";

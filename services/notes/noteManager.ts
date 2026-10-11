@@ -11,6 +11,7 @@ import { rankNotesForTarget, type QueryTemporalTarget } from "../ai/temporalReso
 import { setPipelineStage } from "../ai/pipelineStage";
 import { extractToDosFromText } from "../ai/transformationEngine";
 import { addToDo } from "../todos/todoManager";
+import { redactForLog } from "../logging/redact";
 
 export type Note = {
   id: string;
@@ -233,12 +234,12 @@ function scheduleToDoExtraction(noteId: string, text: string): void {
           // the model's raw completion text isn't persisted anywhere and the
           // encrypted DB can't be inspected directly outside the app.
           console.log(
-            `[Note] Extracted to-do for note ${noteId}: "${item.task}" on ${item.actionDate}` +
+            `[Note] Extracted to-do for note ${noteId}: task (${item.task.length} chars) on ${item.actionDate}` +
               `${item.toDate ? ` to ${item.toDate}` : ""} at ${item.notificationTime} ` +
               `(recurrence: ${item.recurrence}, interval: ${item.recurrenceInterval})`
           );
         } catch (err) {
-          console.error("[Note] Failed to save an extracted to-do", noteId, item, err);
+          console.error("[Note] Failed to save an extracted to-do", noteId, JSON.stringify(redactForLog(item)), err);
         }
       }
       console.log(`[Note] To-do extraction complete for note ${noteId}: ${added}/${extracted.length} saved.`);

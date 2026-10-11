@@ -87,6 +87,7 @@ import {
   peekPendingShortcut,
   type PendingShortcut,
 } from "../services/shortcuts/launchShortcut";
+import { wordCount } from "../services/logging/redact";
 import { getGreetingFirstName } from "../services/sync/driveSync";
 import { getTimeBasedGreeting } from "../utils/greeting";
 
@@ -740,7 +741,8 @@ export default function HomeScreen() {
         }
         if (isSilentTranscript(transcript)) {
           if (options?.isHandsfree) {
-            console.log(`[Handsfree] Rejected — transcript counted as silent: "${transcript}"`);
+            // Metadata only — never the transcript itself (privacy rule).
+            console.log(`[Handsfree] Rejected — transcript counted as silent (${transcript.length} chars)`);
           }
           return;
         }
@@ -754,14 +756,13 @@ export default function HomeScreen() {
       // either pipeline: no note saved, no query run, no card appended to
       // "Recorded notes" or "Searched notes".
       if (options?.isHandsfree && !containsWakeWord(transcript)) {
-        // DIAGNOSTIC: the actual transcript text is otherwise never logged
-        // anywhere (asrRouter.ts only logs which tier/timing, not the
-        // string itself), and the audio that produced it is deleted right
-        // after this — without this log, a rejected Handsfree utterance
-        // leaves literally no trace of what Whisper actually heard, making
-        // "why did it reject this" undiagnosable after the fact. adb logcat
-        // only, never sent anywhere.
-        console.log(`[Handsfree] Rejected — no wake word match in transcript: "${transcript}"`);
+        // DIAGNOSTIC, metadata only: what was heard is never logged (the
+        // privacy rule covers every build), but its size still tells a
+        // "heard nothing useful" rejection apart from "heard a sentence
+        // without the wake word".
+        console.log(
+          `[Handsfree] Rejected — no wake word match (${wordCount(transcript)} words, ${transcript.length} chars)`
+        );
         showToast(`Ignored — say "${WAKE_PHRASE_DISPLAY}" to be heard`);
         return;
       }
