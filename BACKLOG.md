@@ -54,6 +54,21 @@ Xayra/shortcut → tap". Investigate before building:
   without fuzzy-matching names in grounding).
 - Longitudinal change reasoning ("how has X changed since…").
 
+### Performance: Pixel 9 timing pass for Ask progress (pending)
+
+1.0.42's Ask progress thresholds (2.5 s transcription, 3 s / 8 s inference
+phrases) were set from Redmi measurements. Run the same `[AskTiming]` /
+`[VoiceAskTiming]` lines on a Pixel 9 (any Xayra Dev build) and compare
+retrieval, model ready, first token, validated answer visible and total
+latency; retune the constants if needed — no architecture change.
+
+### Performance: Whisper transcription latency (voice Ask's dominant wait)
+
+Measured in 1.0.42 on the Redmi: capture end → transcript 4.1–8.4 s, now the
+longest part of a warm voice Ask (retrieval ~0.2 s, warm inference ~1.5–6 s).
+Investigate on Pixel-class hardware first; options include starting the
+Whisper load while the user is still speaking (see the next item).
+
 ### Performance: Whisper reload after backgrounding
 
 Xayra deliberately releases the Whisper (and Llama) native contexts whenever
@@ -71,6 +86,8 @@ Investigate (measure; don't change as a side effect):
   earliest moment we know a transcription is coming);
 - memory-pressure / LMKD trade-offs (Build 40 kill, `memoryGuard.ts`);
 - Redmi vs Pixel-class production targets.
+- The same applies to the Llama context: a voice Ask after backgrounding
+  paid a ~5.0–5.2 s model reload before inference (measured in 1.0.42).
 
 ### Later capture channels
 

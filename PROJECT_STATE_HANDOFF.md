@@ -2,7 +2,48 @@
 
 *(The app was originally built and shipped internally as "Silent Confidant," then briefly "Remi," before the full rebrand to **Xayra** documented below. Historical sections further down in this file predate the rename and refer to the app by whichever name was current at the time — that's intentional, not an inconsistency to fix; each section is an accurate record of what was true when it was written.)*
 
-**Last updated:** 1.0.41 — launcher shortcuts + immediate Cancel (versionCode 49, production AAB for Google Play Internal Testing — see its own section below; roadmap locked there too). Previously: 1.0.40 — UX/coherence release (versionCode 48, production AAB for Google Play Internal Testing — see its own section below: one-tap voice auto-finish, frozen Record/Ask intent, explicit Cancel, truthful status, mode-aware copy, note-edit keyboard avoidance; also ships the UX patch after 1.0.39). Previously: One-tap voice auto-finish (shipped in 1.0.40 — see its own section below). Previously: UX patch after 1.0.39 (shipped in 1.0.40 — see its own section below: journal editing + backup consistency, temporary input audio, #Text removed, a release-blocking false-attribution fix). Previously: RC1 patch — 1.0.39 (see its own section below: reminder date/time fixes, grounding fixes from real-world reports, Related notes). Previously: RC1 — Grounding v1 (1.0.38/46, shipped to Internal Testing — see its own section below: deterministic temporal resolution, relationship-aware answer validation, no unvalidated text on screen; release-candidate freeze in effect). Previously: Build 57 (not yet built — see its own section below: fixed an asymmetric drag-commit threshold in the Record/Ask tray's 50%→100% expand gesture). Build 49 (Handsfree cancel-tap latency chain, splash sizing) and Build 48 + the Hybrid Extraction Architecture (fine-tuned model wired in) already shipped together in production 1.0.37; Build 50 through 57 are not yet built or shipped.
+**Last updated:** 1.0.42 — Ask progress UX (versionCode 50, production AAB for Google Play Internal Testing — see its own section below: one Ask progress surface in the tray, voice Ask tray rises at capture end, truthful hybrid progress, zero-note fast path). Previously: 1.0.41 — launcher shortcuts + immediate Cancel (versionCode 49, production AAB for Google Play Internal Testing — see its own section below; roadmap locked there too). Previously: 1.0.40 — UX/coherence release (versionCode 48, production AAB for Google Play Internal Testing — see its own section below: one-tap voice auto-finish, frozen Record/Ask intent, explicit Cancel, truthful status, mode-aware copy, note-edit keyboard avoidance; also ships the UX patch after 1.0.39). Previously: One-tap voice auto-finish (shipped in 1.0.40 — see its own section below). Previously: UX patch after 1.0.39 (shipped in 1.0.40 — see its own section below: journal editing + backup consistency, temporary input audio, #Text removed, a release-blocking false-attribution fix). Previously: RC1 patch — 1.0.39 (see its own section below: reminder date/time fixes, grounding fixes from real-world reports, Related notes). Previously: RC1 — Grounding v1 (1.0.38/46, shipped to Internal Testing — see its own section below: deterministic temporal resolution, relationship-aware answer validation, no unvalidated text on screen; release-candidate freeze in effect). Previously: Build 57 (not yet built — see its own section below: fixed an asymmetric drag-commit threshold in the Record/Ask tray's 50%→100% expand gesture). Build 49 (Handsfree cancel-tap latency chain, splash sizing) and Build 48 + the Hybrid Extraction Architecture (fine-tuned model wired in) already shipped together in production 1.0.37; Build 50 through 57 are not yet built or shipped.
+
+## 1.0.42 — Ask progress UX (Internal Testing)
+
+Version **1.0.42**, versionCode **50**, application ID `com.anonymous.silentconfidant`, scheme `xayra` (Xayra Dev stays `com.anonymous.silentconfidant.dev` / `xayra-dev`). Perceived-speed work only: **no model, prompt, retrieval, grounding threshold, validation, citation, fallback-wording or note-limit change.** Validated on the Redmi with a standalone Xayra Dev build.
+
+**One Ask progress surface — the tray's answer bubble.** The status line under the Xayra button no longer carries Ask progress (Handsfree shows "Tap to cancel"; the Cancel button stays). Record's status is unchanged.
+
+**Voice Ask: the tray rises at capture end.** The moment a manual voice Ask's recording stops (silence or tap, before the audio is finalized) the tray rises **once** and the answer bubble appears — its question turn is reserved (renders nothing) until transcription returns, then filled in place, so nothing jumps. The retrieval-time snap is skipped for that Ask, so a manual drag isn't overridden. Typed Ask and Handsfree are unchanged.
+
+**Truthful hybrid progress** (`AskProgress` in `services/ai/pipelineStage.ts`, one owner per Ask, created by the request itself; UI only observes):
+- Voice: **"Got it…"** at capture end → **"Turning that into text…"** only if Whisper is still transcribing at **2.5 s** (`TRANSCRIPTION_SLOW_MS`).
+- **"Looking through your memories…"** — event-driven, while retrieval runs.
+- **"Found N related memories · Piecing it together…"** ("Found a related memory · …" for one) — shown when generation starts; N = the final notes after `buildNoteContext`, exactly what the model is shown. "Related", not "relevant": validation may still reject the answer ("I found related notes, but couldn't verify…"). A separate count line was dropped — generation starts 0–11 ms after the count is known, so it was never visible, and no artificial hold was added.
+- **"Connecting the dots…"** at **3 s** of inference, **"Working through your memories…"** at **8 s** (`ASK_INFERENCE_PHRASES`, tunable). These are alternate wordings of one state, not milestones; no "Almost there" (nothing signals it).
+- A two-step `setTimeout` chain per Ask — never an interval. It stops immediately on the validated answer, fallback, error or Cancel; a newer Ask supersedes an older one; a stage can only be cleared by the Ask that set it; a cancelled job can't update progress.
+
+**Raw token streaming is intentionally not exposed.** llama.rn delivers tokens incrementally, but every check in `finalizeAnswer` (refusal mapping, "Yes"/unsupported-denial checks, whole-answer word grounding, the addendum) needs the complete answer — streaming would show text that can later be rejected. Only the first token's *time* is recorded.
+
+**Zero-note fast path** (`rag.ts`): when no notes remain after `buildNoteContext`, the model is not run — `finalizeAnswer` already returns "No information found in your notes." for zero notes. Same text, citations and related notes; seconds sooner.
+
+**Cancel / stale jobs**: Ask now receives its `ProcessingJob` as a `CancelSignal`; Cancel ends the Ask's progress synchronously, removes the reserved bubble during transcription, and a late transcript/answer can't repopulate anything.
+
+**Instrumentation** (development builds only — `__DEV__` or the Xayra Dev package; never the production app): `[AskTiming]` per request (path, candidate/included counts, context length, model ready, first token, generation, validation outcome/ms, answer ready) and `[VoiceAskTiming]` (capture end, tray animation start, transcription start/end). Counts, lengths and ids only — no text.
+
+Measured on the Redmi (standalone Xayra Dev):
+
+| | Result |
+|---|---|
+| Capture end → tray starts rising | 7–86 ms |
+| Capture end → transcription complete (Whisper) | 4.1–8.4 s |
+| Transcription → retrieval start | 1–24 ms |
+| Retrieval | ~0.2 s warm (0.9–1.8 s with a cold embedding-model load) |
+| Warm inference (model ready → answer) | ~1.5–6 s (first token 0.4–3.6 s) |
+| After background: model reload | ~5.0–5.2 s before inference |
+| Zero-note answer (vs a full generation before) | ~0.2–1.8 s after transcription (was an extra ~4–7 s) |
+| Typed Ask, submit → answer | ~2.9 s warm |
+| Known-good cited answer ("What did Eli recommend?") | shown, 1 citation |
+
+Still open: **Whisper transcription latency (~4–8 s on the Redmi) and the post-background model reload (~5 s)** are now the dominant waits — backlog performance items. **Pixel 9 measurements are pending** (the same timing lines work in any Xayra Dev build); thresholds may be retuned from them without architecture changes.
+
+Validation: `tsc --noEmit` clean; 647 unit tests in 41 suites; Android export bundles.
 
 ## 1.0.41 — Launcher shortcuts + immediate Cancel (Internal Testing)
 
