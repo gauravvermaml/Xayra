@@ -2,7 +2,7 @@
   "expo": {
     "name": "Xayra",
     "slug": "silent-confidant",
-    "version": "1.0.41",
+    "version": "1.0.42",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
