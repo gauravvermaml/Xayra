@@ -17,7 +17,7 @@ import {
 } from "../services/ai/pipelineStage";
 
 /** Ask progress stages this row shows (its single progress surface). */
-const ASK_PROGRESS_STAGES: ReadonlySet<PipelineStage> = new Set<PipelineStage>(["retrieving", "answering"]);
+const ASK_PROGRESS_STAGES: ReadonlySet<PipelineStage> = new Set<PipelineStage>(["transcribing", "retrieving", "answering"]);
 
 function currentAskProgressLabel(): string {
   const stage = getPipelineStage("chat");
@@ -287,6 +287,10 @@ export function ChatSheetContent({
     }
 
     const message = item.message;
+    // A voice Ask's question turn before transcription returns has no text
+    // yet — show nothing rather than placeholder words; its answer bubble
+    // (with the progress line) is already there.
+    if (message.pending) return null;
     return (
       <Pressable
         onLongPress={() => void copyTextWithFeedback(message.text)}

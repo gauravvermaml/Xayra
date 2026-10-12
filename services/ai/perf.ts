@@ -27,3 +27,13 @@ export function logDuration(label: string, startMs: number): number {
 export function isDevelopmentBuild(): boolean {
   return __DEV__ || (Constants.expoConfig?.android?.package ?? "").endsWith(".dev");
 }
+
+/**
+ * Development-only timing line (logcat timestamps give the correlation):
+ * event names and safe metadata only — never note, question or transcript
+ * text. Silent in the production app.
+ */
+export function devTiming(tag: string, event: string, meta?: Record<string, string | number | boolean>): void {
+  if (!isDevelopmentBuild()) return;
+  console.log(`[${tag}] ${event}${meta ? ` ${JSON.stringify(meta)}` : ""}`);
+}

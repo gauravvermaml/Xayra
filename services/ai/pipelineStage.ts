@@ -147,6 +147,16 @@ export function firstAnsweringLabel(includedNotes: number): string {
   return evidence ? `${evidence} · ${first}` : first;
 }
 
+/**
+ * Voice Ask, after capture: "Got it…" the moment the recording ends, and —
+ * only while transcription is genuinely still running past this point —
+ * "Turning that into text…". Product-tuning value; no other transcription
+ * phrases.
+ */
+export const VOICE_ASK_CAPTURED_LABEL = "Got it…";
+export const VOICE_ASK_TRANSCRIBING_LABEL = "Turning that into text…";
+export const TRANSCRIPTION_SLOW_MS = 2500;
+
 let activeAsk: AskProgress | null = null;
 
 /**
@@ -174,8 +184,18 @@ export class AskProgress {
     signal?.onCancel(() => this.end());
   }
 
+  /** Voice capture ended and transcription is under way (voice Ask only).
+   * The next stage of this Ask supersedes it. */
+  transcribing(): void {
+    if (!this.isLive()) return;
+    this.clearTimers();
+    this.publish("transcribing", VOICE_ASK_CAPTURED_LABEL);
+    this.timers.push(setTimeout(() => this.publish("transcribing", VOICE_ASK_TRANSCRIBING_LABEL), TRANSCRIPTION_SLOW_MS));
+  }
+
   /** Retrieval has started. */
   retrieving(): void {
+    this.clearTimers();
     this.publish("retrieving");
   }
 

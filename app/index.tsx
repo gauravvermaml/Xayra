@@ -33,6 +33,8 @@ import { useLaunchShortcut } from "../hooks/useLaunchShortcut";
 import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
 import { cancelActiveLlamaCompletion } from "../services/ai/localLlama";
+import { devTiming } from "../services/ai/perf";
+import { discardVoiceAskReservation, reserveVoiceAsk, type VoiceAskReservation } from "../services/ai/voiceAsk";
 import { ProcessingJob } from "../services/ai/processingJob";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
 import {
@@ -583,7 +585,8 @@ export default function HomeScreen() {
       audioUri: string | null,
       whisperModelId: string | null,
       mode: UtteranceMode,
-      job: ProcessingJob
+      job: ProcessingJob,
+      voiceAsk?: VoiceAskReservation
     ): Promise<{ intent: "RECORD" | "ASK"; saved?: boolean; answerText?: string; assistantId?: string }> => {
       if (job.cancelled) return { intent: mode === "record" ? "RECORD" : "ASK" };
       setProcessingState("processing");
@@ -591,8 +594,9 @@ export default function HomeScreen() {
       // the resting peek once saved (see routeRecord). Snapped immediately —
       // there's no classification step to wait on anymore, but the sheet
       // still moves right away rather than only after the note/answer
-      // pipeline finishes.
-      sheetRef.current?.snapToIndex(1);
+      // pipeline finishes. A manual voice Ask already raised it when its
+      // recording ended — not again, so a manual drag isn't overridden.
+      if (!voiceAsk) sheetRef.current?.snapToIndex(1);
       const intent: "RECORD" | "ASK" = mode === "record" ? "RECORD" : "ASK";
       try {
         setProcessingLabel(intent === "RECORD" ? "note" : "query");
@@ -615,7 +619,7 @@ export default function HomeScreen() {
           // re-arms the mic, which `submitQuery`'s own fire-and-forget
           // speech can't provide. This is now the ONLY RAG call for a voice
           // query — see this function's doc comment above.
-          const { assistantId, text: answerText } = await chatSession.ask(text, job);
+          const { assistantId, text: answerText } = await chatSession.ask(text, job, voiceAsk?.pending);
           return { intent, answerText, assistantId };
         }
         await chatSession.submitQuery(text, "text", job);
@@ -666,6 +670,15 @@ export default function HomeScreen() {
   // services/ai/processingJob.ts). Cancel acts on it synchronously; a job
   // that's been cancelled or replaced can never touch the UI again.
   // `cancellableJobId` drives whether Cancel is offered.
+  // A manual voice Ask's reserved tray bubble, from capture end until
+  // finishUtterance takes it (see VoiceAskReservation).
+  const pendingVoiceAskRef = useRef<VoiceAskReservation | null>(null);
+  const chatSessionRef = useRef(chatSession);
+  chatSessionRef.current = chatSession;
+  const discardVoiceAsk = useCallback((reservation: VoiceAskReservation) => {
+    discardVoiceAskReservation(reservation, chatSessionRef.current.discardPendingAsk);
+  }, []);
+
   const currentJobRef = useRef<ProcessingJob | null>(null);
   const [cancellableJobId, setCancellableJobId] = useState<number | null>(null);
   const beginJob = useCallback(() => {
@@ -687,8 +700,9 @@ export default function HomeScreen() {
       audioUri: string,
       mode: UtteranceMode,
       reportState?: (state: "processing" | "speaking") => void,
-      options?: { isHandsfree?: boolean; onRouted?: () => void }
+      options?: { isHandsfree?: boolean; onRouted?: () => void; voiceAsk?: VoiceAskReservation }
     ) => {
+      const voiceAsk = options?.voiceAsk;
       let job: ProcessingJob | null = null;
       // TEXT-ONLY STORAGE (enforced, no exceptions): this raw WAV
       // (services/audio/recorder.ts, written to the cache folder's recordings/)
@@ -726,13 +740,19 @@ export default function HomeScreen() {
         // (the mic is already closed by now), so the central button works
         // again without waiting for Whisper/RAG to unwind.
         thisJob.onCancel(() => options?.onRouted?.());
+        // Cancel clears the reserved answer bubble and its progress at once.
+        if (voiceAsk) thisJob.onCancel(() => discardVoiceAsk(voiceAsk));
         setProcessingState("processing");
         setProcessingLabel(mode === "record" ? "note" : "query");
         // QA Phase 3, P2-2: tag this write with the flow THIS utterance
         // actually belongs to, not a shared untagged value — see the
         // `noteStage`/`chatStage` split above for the read side of this fix.
-        setPipelineStage(mode === "record" ? "note" : "chat", "transcribing");
+        // (A manual voice Ask's transcription progress is already owned and
+        // shown in the tray — see onCaptureEnd.)
+        if (!voiceAsk) setPipelineStage(mode === "record" ? "note" : "chat", "transcribing");
+        if (voiceAsk) devTiming("VoiceAskTiming", "transcription start");
         const { transcript, whisperModelId } = await asrRouter.transcribe(audioUri, thisJob);
+        if (voiceAsk) devTiming("VoiceAskTiming", "transcription complete", { chars: transcript.length, cancelled: thisJob.cancelled });
         if (thisJob.cancelled) {
           // Cancelled during transcription: the UI already returned to idle
           // and said "Cancelled" on the tap itself — nothing is routed,
@@ -807,7 +827,8 @@ export default function HomeScreen() {
           audioUri,
           whisperModelId ?? null,
           mode,
-          thisJob
+          thisJob,
+          voiceAsk
         );
         if (thisJob.cancelled) {
           return;
@@ -852,6 +873,9 @@ export default function HomeScreen() {
         // Always — see this function's opening comment. `idempotent: true`
         // makes this a safe no-op if the file was somehow already gone.
         await FileSystem.deleteAsync(audioUri, { idempotent: true }).catch(() => {});
+        // A reservation that never became a question (silent, too short,
+        // duplicate, cancelled, failed) goes; one ask() took over stays.
+        if (voiceAsk) discardVoiceAsk(voiceAsk);
         // Safety net for every early-return path above (too-short/silent/
         // no-wake-word/duplicate): resets the screen — but only if this job
         // still owns it (a cancelled or superseded job never touches it).
@@ -865,7 +889,7 @@ export default function HomeScreen() {
         }
       }
     },
-    [routeFreeformInput, chatSession, beginJob, endJob]
+    [routeFreeformInput, chatSession, beginJob, endJob, discardVoiceAsk]
   );
 
   // ---- Handsfree Mode -----------------------------------------------------
@@ -984,8 +1008,10 @@ export default function HomeScreen() {
         if (__DEV__) {
           console.log(`[Recorder] Finished by ${trigger === "silence" ? "trailing silence" : "tap"} (${mode})`);
         }
+        const voiceAsk = pendingVoiceAskRef.current ?? undefined;
+        pendingVoiceAskRef.current = null;
         try {
-          await finishUtteranceRef.current(audioUri, mode, undefined, { onRouted: release });
+          await finishUtteranceRef.current(audioUri, mode, undefined, { onRouted: release, voiceAsk });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           setError(message);
@@ -994,6 +1020,22 @@ export default function HomeScreen() {
       },
       onChange: setManualUtterance,
       onError: (err) => setError(err instanceof Error ? err.message : "Recording failed."),
+      // VOICE ASK: the moment the recording ends, the tray rises (once) and
+      // its answer bubble appears with "Got it…" — the single surface for
+      // this Ask's whole wait, transcription included. Record is untouched.
+      onCaptureEnd: (mode) => {
+        if (mode !== "ask") return;
+        devTiming("VoiceAskTiming", "capture end — tray snap requested");
+        pendingVoiceAskRef.current = reserveVoiceAsk(mode, {
+          beginPendingAsk: () => chatSessionRef.current.beginPendingAsk(),
+          raiseTray: () => sheetRef.current?.snapToIndex(1),
+        });
+      },
+      onCaptureDiscarded: () => {
+        const reservation = pendingVoiceAskRef.current;
+        pendingVoiceAskRef.current = null;
+        if (reservation) discardVoiceAsk(reservation);
+      },
     });
   }
   const manualController = manualControllerRef.current;
@@ -1254,6 +1296,9 @@ export default function HomeScreen() {
           : "idle",
     pipelineStage,
     isHandsfreeActive: activeMode.isActive,
+    // From the moment a manual voice Ask's recording ends, its progress
+    // lives in the tray (Cancel stays under the button).
+    isVoiceAskInTray: manualUtterance.mode === "ask" && manualUtterance.phase === "processing",
   });
   // When nothing is happening, say what a tap will do in the current mode.
   const idleCue = idleTapCue({

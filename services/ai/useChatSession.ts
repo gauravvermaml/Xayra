@@ -18,7 +18,13 @@ export type ChatMessage = {
    * for the user to check, never as sources (see RagAnswer.relatedNotes). */
   relatedNotes?: RagCitation[];
   isStreaming?: boolean;
+  /** A voice Ask's question turn reserved before transcription returns: it
+   * has no text yet and renders nothing (never placeholder words). */
+  pending?: boolean;
 };
+
+/** The exchange reserved for a voice Ask while it's still being transcribed. */
+export type PendingAsk = { userId: string; assistantId: string };
 
 /** How often buffered streaming tokens are flushed into visible state — 80ms
  * is frequent enough that the text still reads as a smooth live stream, but
@@ -46,7 +52,13 @@ export type ChatSession = {
    * can't be reused for that: its own speech is fire-and-forget, which
    * would let the mic re-arm mid-sentence and transcribe the assistant's
    * own voice as the next "question" (no echo cancellation exists here). */
-  ask: (text: string, signal?: CancelSignal) => Promise<{ assistantId: string; text: string }>;
+  ask: (text: string, signal?: CancelSignal, pending?: PendingAsk) => Promise<{ assistantId: string; text: string }>;
+  /** Reserves the answer bubble (its progress line shows at once) the moment
+   * a voice Ask's recording ends, before its question text exists. */
+  beginPendingAsk: () => PendingAsk;
+  /** Removes a reserved exchange that never became a question (cancelled,
+   * silent, rejected or failed). No-op once `ask()` has taken it over. */
+  discardPendingAsk: (pending: PendingAsk) => void;
   toggleSpeech: (message: Pick<ChatMessage, "id" | "text">) => void;
   /** Like `toggleSpeech`'s own "start" branch, but awaits playback actually
    * finishing (or being stopped) instead of firing-and-forgetting — for a
@@ -139,12 +151,36 @@ export function useChatSession(): ChatSession {
     [speakingMessageId, playMessageSpeech]
   );
 
+  const pendingAskRef = useRef<PendingAsk | null>(null);
+  const beginPendingAsk = useCallback((): PendingAsk => {
+    const pending: PendingAsk = { userId: Crypto.randomUUID(), assistantId: Crypto.randomUUID() };
+    pendingAskRef.current = pending;
+    setMessages((prev) => [
+      ...prev,
+      { id: pending.userId, role: "user", text: "", pending: true },
+      { id: pending.assistantId, role: "assistant", text: "", isStreaming: true },
+    ]);
+    return pending;
+  }, []);
+  const discardPendingAsk = useCallback((pending: PendingAsk) => {
+    if (pendingAskRef.current?.assistantId !== pending.assistantId) return; // already a real question
+    pendingAskRef.current = null;
+    setMessages((prev) => prev.filter((message) => message.id !== pending.userId && message.id !== pending.assistantId));
+  }, []);
+
   const runRagExchange = useCallback(
-    async (query: string, signal?: CancelSignal): Promise<{ assistantId: string; text: string }> => {
-      const userMessage: ChatMessage = { id: Crypto.randomUUID(), role: "user", text: query };
-      const assistantId = Crypto.randomUUID();
+    async (query: string, signal?: CancelSignal, pending?: PendingAsk): Promise<{ assistantId: string; text: string }> => {
+      const userMessage: ChatMessage = { id: pending?.userId ?? Crypto.randomUUID(), role: "user", text: query };
+      const assistantId = pending?.assistantId ?? Crypto.randomUUID();
       const assistantMessage: ChatMessage = { id: assistantId, role: "assistant", text: "", isStreaming: true };
-      setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      if (pending && pendingAskRef.current?.assistantId === pending.assistantId) {
+        // The reserved exchange becomes this question in place — same
+        // bubbles, so the tray doesn't jump or re-create its progress line.
+        pendingAskRef.current = null;
+        setMessages((prev) => prev.map((message) => (message.id === userMessage.id ? userMessage : message)));
+      } else {
+        setMessages((prev) => [...prev, userMessage, assistantMessage]);
+      }
 
       let pendingText = "";
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -217,7 +253,7 @@ export function useChatSession(): ChatSession {
   );
 
   const ask = useCallback(
-    async (rawText: string, signal?: CancelSignal): Promise<{ assistantId: string; text: string }> => {
+    async (rawText: string, signal?: CancelSignal, pending?: PendingAsk): Promise<{ assistantId: string; text: string }> => {
       const query = rawText.trim();
       if (!query || isSendingRef.current || !isModelReady) {
         return { assistantId: "", text: "" };
@@ -227,7 +263,7 @@ export function useChatSession(): ChatSession {
       setSpeakingMessageId(null);
       setIsSending(true);
       try {
-        const { assistantId, text } = await runRagExchange(query, signal);
+        const { assistantId, text } = await runRagExchange(query, signal, pending);
         return { assistantId, text };
       } catch {
         return { assistantId: "", text: "" };
@@ -275,6 +311,8 @@ export function useChatSession(): ChatSession {
     isModelReady,
     submitQuery,
     ask,
+    beginPendingAsk,
+    discardPendingAsk,
     toggleSpeech,
     speakMessageAndWait,
   };

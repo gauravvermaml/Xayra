@@ -7,6 +7,7 @@ import { ModelDownloadCard } from "./ModelDownloadCard";
 import { createExpandOverdragGestureHandlersHook } from "./useExpandOverdragGestureHandlers";
 import { spacing } from "../constants/theme";
 import type { ModelDownloadStatus } from "../services/ai/modelDownloadManager";
+import { devTiming } from "../services/ai/perf";
 
 /**
  * Build 24 STRICTLY CAP BOTTOM SHEET AT 50% MAX HEIGHT: the old third stage
@@ -227,6 +228,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       snapPoints={SHEET_SNAP_POINTS}
       animatedIndex={animatedIndex}
       onChange={onIndexChange}
+      onAnimate={(from: number, to: number) => devTiming("VoiceAskTiming", "tray animation start", { from, to })}
       enableDynamicSizing={false}
       keyboardBehavior="interactive"
       // "restore" (the library's own default-adjacent option — snap back to

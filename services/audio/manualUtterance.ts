@@ -53,6 +53,12 @@ export type ManualUtteranceDeps = {
   ) => Promise<void>;
   onChange?: (snapshot: ManualUtteranceSnapshot) => void;
   onError?: (error: unknown) => void;
+  /** The recording has just ended (silence or tap) — before the audio is
+   * finalized — with the utterance's mode. */
+  onCaptureEnd?: (mode: UtteranceMode) => void;
+  /** The ended recording produced nothing to process (no audio / stop
+   * failed), so whatever onCaptureEnd prepared should be undone. */
+  onCaptureDiscarded?: () => void;
 };
 
 export class ManualUtteranceController {
@@ -117,6 +123,7 @@ export class ManualUtteranceController {
     }
     const mode = this.mode;
     this.set("processing", mode);
+    this.deps.onCaptureEnd?.(mode);
     // Idempotent, so a late release can never clobber a newer utterance
     // started after this one was released.
     let released = false;
@@ -130,8 +137,11 @@ export class ManualUtteranceController {
       const audioUri = await this.deps.stopRecording();
       if (audioUri) {
         await this.deps.processUtterance(audioUri, mode, trigger, release);
+      } else {
+        this.deps.onCaptureDiscarded?.();
       }
     } catch (err) {
+      this.deps.onCaptureDiscarded?.();
       this.deps.onError?.(err);
     } finally {
       release();
@@ -229,9 +239,14 @@ export function centralStatusText(state: {
   phase: "recording" | "stopping" | "processing" | "idle";
   pipelineStage: PipelineStage | null;
   isHandsfreeActive: boolean;
+  /** A manual voice Ask whose recording has ended: from that moment its
+   * whole progress (Got it… onwards) lives in the tray, so this line stays
+   * empty (the Cancel button remains). */
+  isVoiceAskInTray?: boolean;
 }): string | null {
   if (state.phase === "recording") return LISTENING_STATUS;
   if (state.phase === "idle") return null;
+  if (state.isVoiceAskInTray) return null;
   if (state.phase === "processing" && state.pipelineStage && ASK_TRAY_STAGES.has(state.pipelineStage)) {
     return state.isHandsfreeActive ? "Tap to cancel" : null;
   }
