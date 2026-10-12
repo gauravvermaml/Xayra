@@ -8,7 +8,21 @@ import { RelatedNotesSection } from "./RelatedNotesSection";
 import { ASK_STARTER_PROMPTS, NOTES_EMPTY_TITLE, RECORD_EMPTY_SUBTEXT } from "../constants/copy";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { allowCellularDownloadAndResume, resumeDownloads, type ModelDownloadStatus } from "../services/ai/modelDownloadManager";
-import { PIPELINE_STAGE_LABELS, subscribeToPipelineStage } from "../services/ai/pipelineStage";
+import {
+  getPipelineStage,
+  getPipelineStageLabel,
+  PIPELINE_STAGE_LABELS,
+  subscribeToPipelineStage,
+  type PipelineStage,
+} from "../services/ai/pipelineStage";
+
+/** Ask progress stages this row shows (its single progress surface). */
+const ASK_PROGRESS_STAGES: ReadonlySet<PipelineStage> = new Set<PipelineStage>(["retrieving", "answering"]);
+
+function currentAskProgressLabel(): string {
+  const stage = getPipelineStage("chat");
+  return (stage && ASK_PROGRESS_STAGES.has(stage) && getPipelineStageLabel("chat")) || PIPELINE_STAGE_LABELS.retrieving;
+}
 import type { ChatMessage } from "../services/ai/useChatSession";
 import type { Note } from "../services/notes/noteManager";
 import { copyTextWithFeedback } from "../utils/clipboard";
@@ -48,16 +62,20 @@ function StreamingCursor({ color }: { color: string }) {
  * that skips straight to generation.
  */
 function StreamingStageLabel({ color }: { color: string }) {
-  const [stage, setStage] = useState(() => PIPELINE_STAGE_LABELS.retrieving);
+  // Words come from the Ask's own progress owner (pipelineStage.ts
+  // AskProgress): retrieval, then "Found N related memories · Piecing it
+  // together…", then the inference phrases. This row only observes; it
+  // owns no timers.
+  const [stage, setStage] = useState(currentAskProgressLabel);
   const opacity = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
     // QA Phase 3, P2-2: this row only ever reflects the "chat" flow — a
     // concurrent note save on the Home screen ("note" flow) can no longer
     // overwrite this label. See pipelineStage.ts's own doc comment.
-    return subscribeToPipelineStage("chat", (next) => {
-      if (next === "retrieving" || next === "answering") {
-        setStage(PIPELINE_STAGE_LABELS[next]);
+    return subscribeToPipelineStage("chat", (next, label) => {
+      if (next && ASK_PROGRESS_STAGES.has(next) && label) {
+        setStage(label);
       }
     });
   }, []);

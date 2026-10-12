@@ -27,7 +27,7 @@ const run = (steps: Step[], isHandsfreeActive = false) =>
   steps.map((s) => centralStatusText({ phase: s.phase, pipelineStage: s.stage ?? null, isHandsfreeActive }));
 
 describe("status line after capture ends", () => {
-  it("Ask: listening → got it → looking through notes → piecing it together", () => {
+  it("Ask: listening → got it, then quiet — retrieval/inference progress lives in the tray", () => {
     // The real order: capture, recorder drain, transcription (index.tsx),
     // retrieval and generation (rag.ts), rag's own clear, pipeline unwind.
     const shown = run([
@@ -43,8 +43,8 @@ describe("status line after capture ends", () => {
       LISTENING_STATUS,
       "Got it",
       "Got it",
-      "Reading through your notes",
-      "Piecing it together",
+      null, // retrieving — shown in the tray's answer bubble instead
+      null, // answering — ditto
       "Got it",
       null,
     ]);
@@ -92,7 +92,10 @@ describe("status line after capture ends", () => {
 
   it("keeps Handsfree's 'tap to cancel' hint", () => {
     expect(centralStatusText({ phase: "processing", pipelineStage: "retrieving", isHandsfreeActive: true })).toBe(
-      "Reading through your notes · tap to cancel"
+      "Tap to cancel"
+    );
+    expect(centralStatusText({ phase: "processing", pipelineStage: "transcribing", isHandsfreeActive: true })).toBe(
+      "Got it · tap to cancel"
     );
   });
 });

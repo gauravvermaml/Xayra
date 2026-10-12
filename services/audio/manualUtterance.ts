@@ -213,12 +213,17 @@ export const LISTENING_STATUS = "Listening… I’ll finish when you’re done";
  * stages — never implies work that isn't happening. */
 export const ACKNOWLEDGED_STATUS = "Got it";
 
+/** Ask's retrieval/inference progress is shown in ONE place — the pending
+ * answer bubble in the tray — never duplicated under the central button. */
+const ASK_TRAY_STAGES: ReadonlySet<PipelineStage> = new Set<PipelineStage>(["retrieving", "answering"]);
+
 /**
  * The status line under the central button. Listening copy only while the
  * mic is actually capturing; once capture has ended it acknowledges ("Got
- * it", which is also the transcription stage's label) and then follows
- * the real pipeline stages — Ask: retrieving → answering; Record:
- * understanding → saving.
+ * it", which is also the transcription stage's label). Record then follows
+ * its real stages (understanding → saving) here; Ask's retrieval and
+ * inference progress lives in the tray's answer bubble instead, so this
+ * line goes quiet (Handsfree keeps its tap-to-cancel hint).
  */
 export function centralStatusText(state: {
   phase: "recording" | "stopping" | "processing" | "idle";
@@ -227,6 +232,9 @@ export function centralStatusText(state: {
 }): string | null {
   if (state.phase === "recording") return LISTENING_STATUS;
   if (state.phase === "idle") return null;
+  if (state.phase === "processing" && state.pipelineStage && ASK_TRAY_STAGES.has(state.pipelineStage)) {
+    return state.isHandsfreeActive ? "Tap to cancel" : null;
+  }
   const label =
     state.phase === "processing" && state.pipelineStage ? PIPELINE_STAGE_LABELS[state.pipelineStage] : ACKNOWLEDGED_STATUS;
   // Handsfree keeps its "tap to cancel" gesture and hint; everything else

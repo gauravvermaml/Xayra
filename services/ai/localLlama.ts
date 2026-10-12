@@ -1191,11 +1191,13 @@ export function runExclusiveLlamaTask<T>(task: () => Promise<T>, priority: Compl
 export async function generateLocalRAGAnswer(
   prompt: string,
   noteContext: string,
-  onToken: (token: string) => void
+  onToken: (token: string) => void,
+  hooks?: { onContextReady?: () => void }
 ): Promise<string> {
   const contextReadyStart = nowMs();
   await getContext();
   logDuration("Llama context ready (warm reuse if already loaded)", contextReadyStart);
+  hooks?.onContextReady?.();
 
   const fullPrompt = buildPrompt(prompt, noteContext);
   // Character count only, never content — this is what actually explains a

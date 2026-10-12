@@ -25,11 +25,11 @@ describe("pipelineStage flow isolation (Phase 3 P2-2)", () => {
     const unsubscribeChat = subscribeToPipelineStage("chat", chatListener);
 
     setPipelineStage("note", "understanding");
-    expect(noteListener).toHaveBeenCalledWith("understanding");
+    expect(noteListener).toHaveBeenCalledWith("understanding", "Finding where this belongs");
     expect(chatListener).not.toHaveBeenCalled();
 
     setPipelineStage("chat", "retrieving");
-    expect(chatListener).toHaveBeenCalledWith("retrieving");
+    expect(chatListener).toHaveBeenCalledWith("retrieving", "Looking through your memories…");
     // Still exactly one call — the chat write didn't also reach the note
     // listener.
     expect(noteListener).toHaveBeenCalledTimes(1);

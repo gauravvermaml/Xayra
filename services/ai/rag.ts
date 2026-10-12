@@ -1,5 +1,7 @@
 import { generateLocalRAGAnswer, LlamaCancelledError } from "./localLlama";
-import { setPipelineStage } from "./pipelineStage";
+import { isDevelopmentBuild, nowMs } from "./perf";
+import { AskProgress } from "./pipelineStage";
+import type { CancelSignal } from "./processingJob";
 import { buildNoteContext, finalizeAnswer, resolveNoteText } from "./ragFormatting";
 import { relatedEvidenceNotes } from "./relationshipGrounding";
 import { getNotesForTarget, getRecentNotes, hybridSearchNotes, type HybridSearchResult } from "../notes/noteManager";
@@ -24,6 +26,25 @@ function trace(label: string, data: unknown): void {
   if (__DEV__) {
     console.log(`[RAG_TRACE] ${label}`, typeof data === "string" ? data : JSON.stringify(data));
   }
+}
+
+let askTimingSeq = 0;
+
+/**
+ * Development-only timing for one Ask, tagged with a request id. Logs ONLY
+ * event names, elapsed milliseconds and safe metadata (path, counts,
+ * lengths, outcome ids) — never question, note or answer text. Off in the
+ * production app (see isDevelopmentBuild).
+ */
+function askTimer(): (event: string, meta?: Record<string, string | number | boolean>) => void {
+  const requestId = ++askTimingSeq;
+  const start = nowMs();
+  const enabled = isDevelopmentBuild();
+  return (event, meta) => {
+    if (!enabled) return;
+    const extra = meta ? ` ${JSON.stringify(meta)}` : "";
+    console.log(`[AskTiming] #${requestId} +${(nowMs() - start).toFixed(0)}ms ${event}${extra}`);
+  };
 }
 
 // Re-exported so existing importers (and the UI) keep their current import
@@ -89,16 +110,41 @@ export type RagAnswer = {
  * `onChunk` is kept for the caller's signature but no longer receives raw
  * tokens — unvalidated text is never shown (see the generation call below).
  *
- * `isCancelled` lets a cancelled request stop before generation starts
- * (retrieval itself isn't interruptible; generation that's already running
- * is stopped separately via cancelActiveLlamaCompletion).
+ * `signal` (the request's ProcessingJob) lets a cancelled request stop
+ * before generation starts (retrieval itself isn't interruptible;
+ * generation already running is stopped via cancelActiveLlamaCompletion)
+ * and ends its progress display the moment it's cancelled.
+ *
+ * Progress is owned by this request (AskProgress): "Looking through your
+ * memories…" during retrieval, then "Found N related memories · Piecing it
+ * together…" as generation starts (N = the final notes the model is shown),
+ * then the inference phrases until the validated answer or fallback — the
+ * answer itself is never shown before validation.
  */
 export async function generateRAGAnswer(
   userQuery: string,
   onChunk?: (chunk: string) => void,
-  isCancelled?: () => boolean
+  signal?: CancelSignal
 ): Promise<RagAnswer> {
-  setPipelineStage("chat", "retrieving");
+  const progress = new AskProgress(signal);
+  const mark = askTimer();
+  try {
+    return await answerQuery(userQuery, progress, mark, signal);
+  } finally {
+    // Answer, fallback, error or cancel — every path ends this request's
+    // progress immediately (and only this request's).
+    progress.end();
+  }
+}
+
+async function answerQuery(
+  userQuery: string,
+  progress: AskProgress,
+  mark: ReturnType<typeof askTimer>,
+  signal?: CancelSignal
+): Promise<RagAnswer> {
+  mark("query received");
+  progress.retrieving();
   trace("question", userQuery);
   // Priority: a real past-date/period reference ("27th September", "October
   // last year", "in 2024", "2025 compared with 2024") beats everything else —
@@ -118,6 +164,7 @@ export async function generateRAGAnswer(
   const eventTerms = verification?.eventTerms ?? [];
   const retrievalPath = target ? "temporal" : isRecentNotesQuery(userQuery) ? "recent" : "hybrid";
   trace("resolved target", { target, retrievalPath, verification });
+  mark("retrieval start", { path: retrievalPath });
   const retrieved =
     retrievalPath === "temporal" && target
       ? await getNotesForTarget(target, { question: questionTerms(userQuery, now), event: eventTerms }, CONTEXT_NOTE_LIMIT)
@@ -131,11 +178,15 @@ export async function generateRAGAnswer(
   // temporalResolver.ts). For a temporal question, a note can contribute no
   // lines at all (everything in it is about another period); it is then
   // dropped from the citations too.
+  mark("retrieval complete", { candidates: retrieved.length });
   const built = retrieved.length > 0 ? buildNoteContext(retrieved, target, { eventTerms }) : null;
   const included = built ? built.includedIndices : [];
   const notes = included.map((i) => retrieved[i]);
   const memories = built ? included.map((i) => built.memories[i]) : [];
   trace("notes in context", { retrieved: retrieved.length, included: notes.map((n) => n.id) });
+  // The final evidence: exactly the notes the model will be shown.
+  mark("evidence ready", { included: notes.length });
+  progress.evidence(notes.length);
 
   // What the notes establish about the asked-about event: on the queried
   // date, on a different date, or nothing at all — the last is not proof
@@ -161,58 +212,93 @@ export async function generateRAGAnswer(
   const noteContext =
     built && notes.length > 0 ? built.contextText : "--- NOTE CONTEXT ---\nNo relevant voice notes were found.";
   trace("context", noteContext);
+  mark("context ready", { contextChars: noteContext.length });
 
   // Raw tokens are deliberately NOT forwarded to `onChunk`: an answer the
   // checks below reject must never be visible, not even transiently. The
   // bubble stays empty — so ChatSheetContent.tsx keeps showing the
   // "answering" stage label — until the validated text replaces it.
-  if (isCancelled?.()) {
-    setPipelineStage("chat", null);
+  if (signal?.cancelled) {
     throw new LlamaCancelledError();
   }
-  setPipelineStage("chat", "answering");
-  try {
-    const rawText = await generateLocalRAGAnswer(groundedQuestion, noteContext, () => {});
-    trace("raw model output", rawText);
 
-    // Shared with the eval scripts — see finalizeAnswer for the order of
-    // checks (no notes → refusal mapping → unsupported denial → verification
-    // contradiction → date check → relationship check → word grounding →
-    // verification addendum). Grounding is checked against the grounded question, since
-    // that is what the model actually answered; a correct answer echoing the
-    // user's own phrasing was a live bug once, and the inline date the app
-    // itself added is equally not something the model invented. Citations are
-    // cleared on any replacement: chips next to a rejected answer would imply
-    // they back content that was thrown out.
+  // ZERO-NOTE FAST PATH: with no notes left after buildNoteContext the
+  // outcome is already fixed — finalizeAnswer returns "No information found
+  // in your notes." for notesIncluded === 0 whatever the model says — so the
+  // model is not run just to produce it. Same text, same empty citations and
+  // related notes, through the same finalizeAnswer path; seconds sooner.
+  if (notes.length === 0) {
     const result = finalizeAnswer({
-      raw: rawText,
-      notesIncluded: notes.length,
+      raw: "",
+      notesIncluded: 0,
       contextText: noteContext,
       question: groundedQuestion,
       memories,
-      evidence: built ? built.evidence : [],
+      evidence: [],
       target,
       now,
       eventEvidence,
     });
-    trace("validation", {
-      outcome: result.outcome,
-      reason: result.reason,
-      dateCheck: result.dateCheck,
-      violations: result.relationships?.violations,
-      support: result.relationships?.support,
-      final: result.text,
-    });
-    const keepCitations = result.outcome === "shown";
-    // No notes shown → no related notes; a verified answer keeps its normal
-    // citations instead.
-    const relatedIndices =
-      keepCitations || result.outcome === "no-notes" || !built ? [] : relatedEvidenceNotes(built.evidence, userQuery, now);
-    const relatedNotes = citations.filter((_, k) => relatedIndices.includes(included[k]));
-    return { text: result.text, citations: keepCitations ? citations : [], relatedNotes };
-  } finally {
-    // Ends the answering stage on every path: a validated answer, a thrown
-    // error, or the user's cancel (LlamaCancelledError).
-    setPipelineStage("chat", null);
+    mark("inference skipped (no notes)", { outcome: result.outcome });
+    mark("answer ready", { outcome: result.outcome });
+    return { text: result.text, citations: [], relatedNotes: [] };
   }
+
+  progress.answering();
+  mark("inference start");
+  let firstTokenMarked = false;
+  const rawText = await generateLocalRAGAnswer(
+    groundedQuestion,
+    noteContext,
+    // Raw tokens are never forwarded anywhere (see above) — only the time
+    // of the first one is noted, for dev timing.
+    () => {
+      if (!firstTokenMarked) {
+        firstTokenMarked = true;
+        mark("first token");
+      }
+    },
+    { onContextReady: () => mark("model ready") }
+  );
+  mark("generation complete", { rawChars: rawText.length });
+  trace("raw model output", rawText);
+
+  // Shared with the eval scripts — see finalizeAnswer for the order of
+  // checks (no notes → refusal mapping → unsupported denial → verification
+  // contradiction → date check → relationship check → word grounding →
+  // verification addendum). Grounding is checked against the grounded question, since
+  // that is what the model actually answered; a correct answer echoing the
+  // user's own phrasing was a live bug once, and the inline date the app
+  // itself added is equally not something the model invented. Citations are
+  // cleared on any replacement: chips next to a rejected answer would imply
+  // they back content that was thrown out.
+  const validationStart = nowMs();
+  const result = finalizeAnswer({
+    raw: rawText,
+    notesIncluded: notes.length,
+    contextText: noteContext,
+    question: groundedQuestion,
+    memories,
+    evidence: built ? built.evidence : [],
+    target,
+    now,
+    eventEvidence,
+  });
+  mark("validation complete", { outcome: result.outcome, ms: Math.round(nowMs() - validationStart) });
+  trace("validation", {
+    outcome: result.outcome,
+    reason: result.reason,
+    dateCheck: result.dateCheck,
+    violations: result.relationships?.violations,
+    support: result.relationships?.support,
+    final: result.text,
+  });
+  const keepCitations = result.outcome === "shown";
+  // No notes shown → no related notes; a verified answer keeps its normal
+  // citations instead.
+  const relatedIndices =
+    keepCitations || result.outcome === "no-notes" || !built ? [] : relatedEvidenceNotes(built.evidence, userQuery, now);
+  const relatedNotes = citations.filter((_, k) => relatedIndices.includes(included[k]));
+  mark("answer ready", { outcome: result.outcome, citations: keepCitations ? citations.length : 0 });
+  return { text: result.text, citations: keepCitations ? citations : [], relatedNotes };
 }

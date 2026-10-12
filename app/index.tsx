@@ -615,10 +615,10 @@ export default function HomeScreen() {
           // re-arms the mic, which `submitQuery`'s own fire-and-forget
           // speech can't provide. This is now the ONLY RAG call for a voice
           // query — see this function's doc comment above.
-          const { assistantId, text: answerText } = await chatSession.ask(text, () => job.cancelled);
+          const { assistantId, text: answerText } = await chatSession.ask(text, job);
           return { intent, answerText, assistantId };
         }
-        await chatSession.submitQuery(text, "text", () => job.cancelled);
+        await chatSession.submitQuery(text, "text", job);
         return { intent };
       } finally {
         // Only the job that still owns the screen may reset it — a

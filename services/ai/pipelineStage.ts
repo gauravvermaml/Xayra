@@ -36,28 +36,53 @@ export type PipelineStage =
   | "transcribing" // Whisper turning speech into text (capture has already ended)
   | "understanding" // the embedding model placing a note in semantic space
   | "saving" // the encrypted write finishing
-  | "retrieving" // hybrid vector+keyword search for a query
-  | "answering"; // the LLM composing an answer, before its first token streams in
+  | "retrieving" // looking for the notes a question is about
+  | "answering"; // the model producing an answer (hidden until validated)
 
-type Listener = (stage: PipelineStage | null) => void;
+/** Listeners get the stage plus the exact words to show for it (the stage
+ * label, a count-specific evidence line, or the current inference phrase). */
+type Listener = (stage: PipelineStage | null, label: string | null) => void;
+
+type FlowState = { stage: PipelineStage | null; label: string | null; owner: object | null };
 
 const listenersByFlow: Record<PipelineFlow, Set<Listener>> = {
   note: new Set(),
   chat: new Set(),
 };
 
-const currentByFlow: Record<PipelineFlow, PipelineStage | null> = {
-  note: null,
-  chat: null,
+const stateByFlow: Record<PipelineFlow, FlowState> = {
+  note: { stage: null, label: null, owner: null },
+  chat: { stage: null, label: null, owner: null },
 };
 
-export function setPipelineStage(flow: PipelineFlow, stage: PipelineStage | null): void {
-  currentByFlow[flow] = stage;
-  listenersByFlow[flow].forEach((listener) => listener(stage));
+/**
+ * Sets a flow's stage. `label` overrides the stage's default words; `owner`
+ * marks who set it, so an owner can later clear only its own stage (see
+ * AskProgress) — an unowned write (owner null) is never clearable by a
+ * stale owner.
+ */
+export function setPipelineStage(
+  flow: PipelineFlow,
+  stage: PipelineStage | null,
+  options?: { label?: string; owner?: object }
+): void {
+  const label = stage ? (options?.label ?? PIPELINE_STAGE_LABELS[stage]) : null;
+  stateByFlow[flow] = { stage, label, owner: stage ? (options?.owner ?? null) : null };
+  listenersByFlow[flow].forEach((listener) => listener(stage, label));
+}
+
+/** Clears the flow only if `owner` still owns its current stage. */
+function clearPipelineStageIfOwner(flow: PipelineFlow, owner: object): void {
+  if (stateByFlow[flow].owner === owner) setPipelineStage(flow, null);
 }
 
 export function getPipelineStage(flow: PipelineFlow): PipelineStage | null {
-  return currentByFlow[flow];
+  return stateByFlow[flow].stage;
+}
+
+/** The words currently shown for a flow's stage (null when idle). */
+export function getPipelineStageLabel(flow: PipelineFlow): string | null {
+  return stateByFlow[flow].label;
 }
 
 /** Returns an unsubscribe function — call it on unmount. */
@@ -80,6 +105,126 @@ export const PIPELINE_STAGE_LABELS: Record<PipelineStage, string> = {
   transcribing: "Got it",
   understanding: "Finding where this belongs",
   saving: "Tucked away safely",
-  retrieving: "Reading through your notes",
-  answering: "Piecing it together",
+  retrieving: "Looking through your memories…",
+  answering: "Piecing it together…",
 };
+
+/**
+ * The evidence line for the final notes an answer will be built from (the
+ * notes after buildNoteContext — exactly what the model is shown). Says
+ * "related", not "relevant": validation may still reject the answer ("I found
+ * related notes, but couldn't verify…"). Null when no notes remain.
+ */
+export function evidenceLabel(includedNotes: number): string | null {
+  if (includedNotes <= 0) return null;
+  return includedNotes === 1 ? "Found a related memory" : `Found ${includedNotes} related memories`;
+}
+
+/**
+ * Wording while the model genuinely hasn't produced a usable answer yet.
+ * These are alternate descriptions of that ONE state — not milestones: a
+ * phrase change never means a backend step finished. Times are from when
+ * answering began; product-tuning values, to be revisited with Pixel 9 vs
+ * Redmi dogfood timings. (No "Almost there": nothing signals that.) The
+ * first phrase carries the evidence count (see AskProgress.answering).
+ */
+export const ASK_INFERENCE_PHRASES: readonly { afterMs: number; label: string }[] = [
+  { afterMs: 0, label: "Piecing it together…" },
+  { afterMs: 3000, label: "Connecting the dots…" },
+  { afterMs: 8000, label: "Working through your memories…" },
+];
+
+/**
+ * The first answering line: the evidence count and the first inference
+ * phrase together. Inference starts within milliseconds of the evidence
+ * being known, so a separate count line would never be seen — and holding
+ * it artificially would delay nothing real but would be theatre. Both facts
+ * are already true when this shows.
+ */
+export function firstAnsweringLabel(includedNotes: number): string {
+  const evidence = evidenceLabel(includedNotes);
+  const first = ASK_INFERENCE_PHRASES[0].label;
+  return evidence ? `${evidence} · ${first}` : first;
+}
+
+let activeAsk: AskProgress | null = null;
+
+/**
+ * Owns the chat flow's progress for ONE Ask, from retrieval to its answer,
+ * fallback, error or cancel. Created by the RAG exchange itself, so the
+ * lifecycle never depends on how many screens are watching — UI only
+ * observes via subscribeToPipelineStage.
+ *
+ * - A newer Ask supersedes this one at once (its timers stop; it can no
+ *   longer write or clear the stage).
+ * - Cancelling its job ends it immediately (signal.onCancel), and every
+ *   write re-checks it, so a cancelled job never updates progress.
+ * - `end()` clears the stage only if this Ask still owns it.
+ * - The inference phrases are a short setTimeout chain (one timer per
+ *   phrase change), never an interval.
+ */
+export class AskProgress {
+  private ended = false;
+  private timers: ReturnType<typeof setTimeout>[] = [];
+  private includedNotes = 0;
+
+  constructor(private readonly signal?: { readonly cancelled: boolean; onCancel(fn: () => void): void }) {
+    activeAsk?.supersede();
+    activeAsk = this;
+    signal?.onCancel(() => this.end());
+  }
+
+  /** Retrieval has started. */
+  retrieving(): void {
+    this.publish("retrieving");
+  }
+
+  /** The final notes are known; shown with the first inference phrase. */
+  evidence(includedNotes: number): void {
+    this.includedNotes = includedNotes;
+  }
+
+  /** The model has started producing the answer. */
+  answering(): void {
+    if (!this.isLive()) return;
+    this.clearTimers();
+    const [first, ...later] = ASK_INFERENCE_PHRASES;
+    this.publish("answering", firstAnsweringLabel(this.includedNotes));
+    for (const phrase of later) {
+      this.timers.push(setTimeout(() => this.publish("answering", phrase.label), phrase.afterMs - first.afterMs));
+    }
+  }
+
+  /** Answer, fallback, error or cancel: stop now and clear our stage. */
+  end(): void {
+    if (this.ended) return;
+    this.ended = true;
+    this.clearTimers();
+    if (activeAsk === this) activeAsk = null;
+    clearPipelineStageIfOwner("chat", this);
+  }
+
+  private supersede(): void {
+    this.ended = true;
+    this.clearTimers();
+  }
+
+  private isLive(): boolean {
+    if (this.ended) return false;
+    if (this.signal?.cancelled) {
+      this.end();
+      return false;
+    }
+    return true;
+  }
+
+  private publish(stage: PipelineStage, label?: string): void {
+    if (!this.isLive()) return;
+    setPipelineStage("chat", stage, { label, owner: this });
+  }
+
+  private clearTimers(): void {
+    this.timers.forEach(clearTimeout);
+    this.timers = [];
+  }
+}

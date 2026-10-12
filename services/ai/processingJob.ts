@@ -68,3 +68,10 @@ export class ProcessingJob {
 
 /** Lets a job-scoped async step ask "should I still act on my result?". */
 export type CancelCheck = () => boolean;
+
+/**
+ * What a job-scoped async step (e.g. one Ask's RAG exchange) needs from its
+ * job: whether it's been cancelled, and a way to react the moment it is.
+ * A ProcessingJob satisfies this structurally.
+ */
+export type CancelSignal = Pick<ProcessingJob, "cancelled" | "onCancel">;

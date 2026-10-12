@@ -3,6 +3,7 @@ import * as Crypto from "expo-crypto";
 
 import { LLAMA_MODEL_MISSING_ERROR_PREFIX, LlamaCancelledError } from "./localLlama";
 import { useModelDownload, type ModelDownloadStatus } from "./modelDownloadManager";
+import type { CancelSignal } from "./processingJob";
 import { generateRAGAnswer, type RagCitation } from "./rag";
 import { isMicInUse } from "../audio/audioInputState";
 import { speakText, speakTextAndWait, stopSpeech } from "../audio/tts";
@@ -36,8 +37,8 @@ export type ChatSession = {
    * speaks the answer back once it lands (fire-and-forget: doesn't wait for
    * the speech itself to finish), since a spoken question getting a silent
    * text-only answer would be a broken hands-free loop. */
-  /** `isCancelled`: a cancelled request's answer is never shown. */
-  submitQuery: (text: string, source?: "text" | "voice", isCancelled?: () => boolean) => Promise<void>;
+  /** `signal`: the request's job — a cancelled request's answer is never shown. */
+  submitQuery: (text: string, source?: "text" | "voice", signal?: CancelSignal) => Promise<void>;
   /** The same RAG exchange `submitQuery` runs, minus any TTS side effect —
    * for callers (Active/hands-free Mode's continuous loop) that need to
    * control speech playback themselves, specifically so they can `await`
@@ -45,7 +46,7 @@ export type ChatSession = {
    * can't be reused for that: its own speech is fire-and-forget, which
    * would let the mic re-arm mid-sentence and transcribe the assistant's
    * own voice as the next "question" (no echo cancellation exists here). */
-  ask: (text: string, isCancelled?: () => boolean) => Promise<{ assistantId: string; text: string }>;
+  ask: (text: string, signal?: CancelSignal) => Promise<{ assistantId: string; text: string }>;
   toggleSpeech: (message: Pick<ChatMessage, "id" | "text">) => void;
   /** Like `toggleSpeech`'s own "start" branch, but awaits playback actually
    * finishing (or being stopped) instead of firing-and-forgetting — for a
@@ -139,7 +140,7 @@ export function useChatSession(): ChatSession {
   );
 
   const runRagExchange = useCallback(
-    async (query: string, isCancelled?: () => boolean): Promise<{ assistantId: string; text: string }> => {
+    async (query: string, signal?: CancelSignal): Promise<{ assistantId: string; text: string }> => {
       const userMessage: ChatMessage = { id: Crypto.randomUUID(), role: "user", text: query };
       const assistantId = Crypto.randomUUID();
       const assistantMessage: ChatMessage = { id: assistantId, role: "assistant", text: "", isStreaming: true };
@@ -168,7 +169,7 @@ export function useChatSession(): ChatSession {
               flushTimer = setTimeout(flushPendingText, STREAM_FLUSH_INTERVAL_MS);
             }
           },
-          isCancelled
+          signal
         );
         if (flushTimer) {
           clearTimeout(flushTimer);
@@ -176,7 +177,7 @@ export function useChatSession(): ChatSession {
         }
         // Cancelled while the answer was being finished: it must never
         // appear (handled exactly like a cancel mid-generation, below).
-        if (isCancelled?.()) {
+        if (signal?.cancelled) {
           throw new LlamaCancelledError();
         }
         updateMessage(assistantId, {
@@ -216,7 +217,7 @@ export function useChatSession(): ChatSession {
   );
 
   const ask = useCallback(
-    async (rawText: string, isCancelled?: () => boolean): Promise<{ assistantId: string; text: string }> => {
+    async (rawText: string, signal?: CancelSignal): Promise<{ assistantId: string; text: string }> => {
       const query = rawText.trim();
       if (!query || isSendingRef.current || !isModelReady) {
         return { assistantId: "", text: "" };
@@ -226,7 +227,7 @@ export function useChatSession(): ChatSession {
       setSpeakingMessageId(null);
       setIsSending(true);
       try {
-        const { assistantId, text } = await runRagExchange(query, isCancelled);
+        const { assistantId, text } = await runRagExchange(query, signal);
         return { assistantId, text };
       } catch {
         return { assistantId: "", text: "" };
@@ -239,7 +240,7 @@ export function useChatSession(): ChatSession {
   );
 
   const submitQuery = useCallback(
-    async (rawText: string, source: "text" | "voice" = "text", isCancelled?: () => boolean) => {
+    async (rawText: string, source: "text" | "voice" = "text", signal?: CancelSignal) => {
       const query = rawText.trim();
       if (!query || isSendingRef.current || !isModelReady) {
         return;
@@ -251,7 +252,7 @@ export function useChatSession(): ChatSession {
       setIsSending(true);
 
       try {
-        const { assistantId, text } = await runRagExchange(query, isCancelled);
+        const { assistantId, text } = await runRagExchange(query, signal);
         if (source === "voice") {
           playMessageSpeech({ id: assistantId, text });
         }

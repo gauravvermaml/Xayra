@@ -27,11 +27,11 @@ jest.mock("../services/ai/perf", () => ({ logDuration: jest.fn(), nowMs: jest.fn
 // --- Chat session (RAG mocked at its boundary) -------------------------------
 let mockResolveAnswer: ((a: { text: string; citations: []; relatedNotes: [] }) => void) | null = null;
 const mockGenerate = jest.fn(
-  (_q: string, _onChunk?: unknown, _isCancelled?: () => boolean) =>
+  (_q: string, _onChunk?: unknown, _signal?: unknown) =>
     new Promise((resolve) => (mockResolveAnswer = resolve))
 );
 jest.mock("../services/ai/rag", () => ({
-  generateRAGAnswer: (q: string, c: unknown, x?: () => boolean) => mockGenerate(q, c, x),
+  generateRAGAnswer: (q: string, c: unknown, x?: unknown) => mockGenerate(q, c, x),
 }));
 jest.mock("../services/ai/localLlama", () => {
   class LlamaCancelledError extends Error {}
@@ -199,7 +199,7 @@ describe("Ask: a cancelled answer never appears or speaks", () => {
     const job = new ProcessingJob();
     let result!: { assistantId: string; text: string };
     await act(async () => {
-      const p = session().ask("What did I record about work?", () => job.cancelled);
+      const p = session().ask("What did I record about work?", job);
       await flush();
       expect(mockGenerate).toHaveBeenCalledTimes(1); // exchange under way
       cancelProcessing(job);
@@ -215,13 +215,13 @@ describe("Ask: a cancelled answer never appears or speaks", () => {
     const { session } = await mountSession();
     const job = new ProcessingJob();
     await act(async () => {
-      void session().ask("Any reminders?", () => job.cancelled);
+      void session().ask("Any reminders?", job);
       await flush();
     });
-    const isCancelled = mockGenerate.mock.calls[0][2] as () => boolean;
-    expect(isCancelled()).toBe(false);
+    const signal = mockGenerate.mock.calls[0][2] as { cancelled: boolean };
+    expect(signal.cancelled).toBe(false);
     cancelProcessing(job);
-    expect(isCancelled()).toBe(true);
+    expect(signal.cancelled).toBe(true);
     await act(async () => {
       mockResolveAnswer?.({ text: "x", citations: [], relatedNotes: [] });
       await flush();
@@ -233,7 +233,7 @@ describe("Ask: a cancelled answer never appears or speaks", () => {
     const job = new ProcessingJob();
     let result!: { assistantId: string; text: string };
     await act(async () => {
-      const p = session().ask("What did I record about work?", () => job.cancelled);
+      const p = session().ask("What did I record about work?", job);
       await flush();
       mockResolveAnswer?.({ text: "You noted a meeting with Theo.", citations: [], relatedNotes: [] });
       result = await p;
