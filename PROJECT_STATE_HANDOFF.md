@@ -45,6 +45,8 @@ Still open: **Whisper transcription latency (~4–8 s on the Redmi) and the post
 
 Validation: `tsc --noEmit` clean; 647 unit tests in 41 suites; Android export bundles.
 
+Build: EAS production build `70e9c41f-675b-469e-a191-15888ba64fca` (1.0.42 / 50, from `1491d41`), finished 2026-10-13; for manual upload to Google Play Internal Testing.
+
 ## 1.0.41 — Launcher shortcuts + immediate Cancel (Internal Testing)
 
 Version **1.0.41**, versionCode **49**, application ID `com.anonymous.silentconfidant`, scheme `xayra` (Xayra Dev stays `com.anonymous.silentconfidant.dev` / `xayra-dev`). No model, prompt, grounding or retrieval change — the only RAG-path edit is one cancellation guard before generation in `rag.ts`. Every item below was validated on the Redmi with a **standalone** (release-type, JS bundled, no Metro/dev launcher) Xayra Dev build before this release.
