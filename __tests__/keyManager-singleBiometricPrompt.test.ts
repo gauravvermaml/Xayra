@@ -48,7 +48,8 @@ describe("getOrCreateDatabaseKey triggers exactly one biometric gate, never a se
   });
 
   it("first call (key doesn't exist yet): reads then writes SecureStore with requireAuthentication, and never calls authenticateAsync directly", async () => {
-    await getOrCreateDatabaseKey();
+    // First run: db/client.ts opts in to creation only when no vault exists.
+    await getOrCreateDatabaseKey({ allowCreate: true });
 
     expect(mockGetItemAsync).toHaveBeenCalledTimes(1);
     expect(mockGetItemAsync.mock.calls[0][1]).toMatchObject({ requireAuthentication: true });
@@ -74,7 +75,7 @@ describe("getOrCreateDatabaseKey triggers exactly one biometric gate, never a se
     mockHasHardwareAsync.mockResolvedValue(false);
     mockIsEnrolledAsync.mockResolvedValue(false);
 
-    await getOrCreateDatabaseKey();
+    await getOrCreateDatabaseKey({ allowCreate: true });
 
     expect(mockGetItemAsync.mock.calls[0][1]).not.toMatchObject({ requireAuthentication: true });
     expect(mockAuthenticateAsync).not.toHaveBeenCalled();

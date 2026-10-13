@@ -1,15 +1,22 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, type AppStateStatus } from "react-native";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import * as SplashScreen from "expo-splash-screen";
 
-import { AppSplashScreen } from "../components/AppSplashScreen";
+import { AppSplashScreen, releaseNativeSplash } from "../components/AppSplashScreen";
 import { OnboardingSetupScreen } from "../components/OnboardingSetupScreen";
 import { ToastHost } from "../components/Toast";
 import { releaseLocalLlamaOnBackground } from "../services/ai/localLlama";
 import { releaseWhisperContext } from "../services/ai/localWhisper";
 import { initModelDownloads } from "../services/ai/modelDownloadManager";
+import {
+  isExpectedLockReason,
+  singleFlight,
+  vaultLockReasonFor,
+  type VaultLockReason,
+} from "../services/crypto/vaultLockState";
 import { isSetupComplete } from "../services/settings/appSettings";
 import { useDiscardShortcutsDuringSetup, useShortcutLaunchTransaction } from "../hooks/useLaunchShortcut";
 
@@ -28,6 +35,20 @@ const colors = {
 // waiting for RootLayout's first render pass.
 initModelDownloads();
 
+// Keep the native splash up until AppSplashScreen has drawn its identical
+// logo underneath (see that file). Must run at module load, before React's
+// first frame, or the native splash auto-hides on content-appeared.
+// Exit fade of the native splash. React's first real draw only starts once
+// the splash is released, and on a slow device it lands ~150ms later; the
+// default 400ms accelerate fade had already uncovered an empty frame by then
+// (measured on the Redmi). 600ms keeps the native logo near full opacity
+// until the identical React logo is drawn underneath. This is only the
+// overlay's animation — startup and JS are not held back by it.
+SplashScreen.setOptions({ duration: 600 });
+SplashScreen.preventAutoHideAsync().catch((err: unknown) => {
+  console.warn("[Splash] preventAutoHideAsync failed:", err);
+});
+
 /**
  * "One Door, Opens Once" root guard. `null` while the flag is still being
  * read from SQLite (a handful of milliseconds — rendered as `AppSplashScreen`,
@@ -38,45 +59,88 @@ initModelDownloads();
  * once true, so a later launch can't accidentally re-trigger onboarding for
  * a device that's already set up.
  *
- * Build 39/40 splash history, worth keeping straight: the native splash
- * (`expo-splash-screen`) can only ever show a small icon — confirmed by
- * reading its actual Android implementation, it calls Android 12+'s own
- * `installSplashScreen()` platform API, which forcibly constrains any icon
- * to a fixed ~240dp window regardless of the source image's real size. A
- * first attempt baked "Xayra"/"Your Pocket Companion" text directly into
- * the splash image itself to get a single native screen — that text was
- * silently squeezed into the same tiny icon frame and never actually
- * legible. `AppSplashScreen` (this file) is the real fix: it can't make the
- * OS's own icon bigger, but it can show full-size branding the instant that
- * constrained icon hands off, with an identical background color so the two
- * read as one continuous reveal rather than a visible seam.
+ * Locked: reading the flag opens the encrypted database, which needs the
+ * biometric-gated key. Every way that attempt can end without opening the
+ * vault maps to an explicit state (services/crypto/vaultLockState.ts) — an
+ * authentication outcome shows Unlock, a key or database failure shows Try
+ * again. Either way nothing is opened, created or reset, and nothing
+ * re-prompts on its own (not even on returning to the foreground — a prompt
+ * the user just dismissed must not reappear unasked).
+ *
+ * Splash: the native splash can only show an icon (Android 12+ masks it to a
+ * 192dp circle inside a 288dp canvas), so the wordmark lives in
+ * `AppSplashScreen`, which draws the same icon at the same size and centre
+ * and releases the native splash once it has. RootLayout also releases it as
+ * soon as the gate resolves, so onboarding or the app can never be left
+ * hidden behind it.
  */
-function useSetupGate(): [boolean | null, () => void] {
-  const [ready, setReady] = useState<boolean | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    // Diagnostic addition: `isSetupComplete()` previously had no `.catch()`
-    // here at all — a genuine failure (rather than just "still loading")
-    // would leave `ready` stuck at `null` forever, rendering nothing, with
-    // no error surfaced anywhere to explain why. Confirmed the hard way:
-    // on a device whose screen is locked, first-ever encryption-key
-    // creation (services/crypto/keyManager.ts, biometric-gated) can never
-    // complete — a completely different, pre-existing constraint, unrelated
-    // to this gate itself, but this gate had no way to ever report it.
-    void isSetupComplete()
+type SetupGate = {
+  /** `null` until the vault has been opened and the flag read. */
+  setupComplete: boolean | null;
+  /** Why the vault is still closed, once an attempt has ended without opening it. */
+  lockReason: VaultLockReason | null;
+  /** An unlock attempt (and so possibly a biometric prompt) is in flight. */
+  unlocking: boolean;
+  unlock: () => void;
+  markComplete: () => void;
+};
+
+function useSetupGate(): SetupGate {
+  const [setupComplete, setSetupComplete] = useState<boolean | null>(null);
+  const [lockReason, setLockReason] = useState<VaultLockReason | null>(null);
+  const [unlocking, setUnlocking] = useState(false);
+  // Single flight: one attempt — and so at most one biometric prompt — at a
+  // time, however fast Unlock is tapped (vaultLockState.ts `singleFlight`).
+  // Opening the encrypted database is what asks for the key, and so what
+  // shows the prompt (services/crypto/keyManager.ts). A failed open is never
+  // cached (db/client.ts), so each attempt is a fresh prompt.
+  const runAttempt = useRef(singleFlight(isSetupComplete)).current;
+  const mounted = useRef(true);
+
+  const unlock = useCallback(() => {
+    const attempt = runAttempt();
+    if (!attempt) {
+      return;
+    }
+    setUnlocking(true);
+    void attempt
       .then((complete) => {
-        if (!cancelled) {
-          setReady(complete);
+        if (mounted.current) {
+          setLockReason(null);
+          setSetupComplete(complete);
         }
       })
-      .catch((err) => {
-        console.error("[Setup] isSetupComplete() failed — staying on the splash screen:", err);
+      .catch((err: unknown) => {
+        const reason = vaultLockReasonFor(err);
+        if (isExpectedLockReason(reason)) {
+          // Cancel/timeout/lockout: not a fault. The vault stays closed until
+          // the user asks to try again; only the reason is logged.
+          console.warn(`[Setup] Vault still locked (${reason}).`);
+        } else {
+          console.error(`[Setup] Vault could not be opened (${reason}):`, err);
+        }
+        if (mounted.current) {
+          setLockReason(reason);
+        }
+      })
+      .finally(() => {
+        if (mounted.current) {
+          setUnlocking(false);
+        }
       });
+  }, [runAttempt]);
+
+  useEffect(() => {
+    mounted.current = true;
+    unlock();
     return () => {
-      cancelled = true;
+      mounted.current = false;
     };
-  }, []);
-  return [ready, () => setReady(true)];
+  }, [unlock]);
+
+  const markComplete = useCallback(() => setSetupComplete(true), []);
+
+  return { setupComplete, lockReason, unlocking, unlock, markComplete };
 }
 
 /**
@@ -113,10 +177,16 @@ function useReleaseNativeContextsOnBackground(): void {
 }
 
 export default function RootLayout() {
-  const [setupComplete, markSetupGateComplete] = useSetupGate();
+  const { setupComplete, lockReason, unlocking, unlock, markComplete: markSetupGateComplete } = useSetupGate();
   useReleaseNativeContextsOnBackground();
   useDiscardShortcutsDuringSetup(setupComplete);
   useShortcutLaunchTransaction();
+
+  useEffect(() => {
+    if (setupComplete !== null || lockReason !== null) {
+      releaseNativeSplash();
+    }
+  }, [setupComplete, lockReason]);
 
   return (
     // Required once anywhere above any react-native-gesture-handler consumer
@@ -140,7 +210,7 @@ export default function RootLayout() {
           <Stack.Screen name="settings" options={{ presentation: "modal" }} />
         </Stack>
       ) : (
-        <AppSplashScreen />
+        <AppSplashScreen lock={lockReason === null ? null : { reason: lockReason, unlocking, onUnlock: unlock }} />
       )}
       {/* Mounted once at the root so every screen's copy-to-clipboard
           feedback (see utils/clipboard.ts) renders on the same overlay,

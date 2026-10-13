@@ -1,7 +1,9 @@
-import { open, type DB } from "@op-engineering/op-sqlite";
+import { ANDROID_DATABASE_PATH, open, type DB } from "@op-engineering/op-sqlite";
+import * as FileSystem from "expo-file-system/legacy";
 import { drizzle, type OPSQLiteDatabase } from "drizzle-orm/op-sqlite";
 
 import { EMBEDDING_DIMENSIONS, generateEmbeddingLocal } from "../services/ai/localEmbeddings";
+import { devTiming } from "../services/ai/perf";
 import { getOrCreateDatabaseKey } from "../services/crypto/keyManager";
 import {
   NOTE_EMBEDDINGS_TABLE_SQL,
@@ -36,6 +38,23 @@ type GlobalWithDb = typeof globalThis & {
 const globalWithDb = globalThis as GlobalWithDb;
 
 /**
+ * Whether the encrypted database file already exists (op-sqlite's default
+ * Android location). Decides whether a missing key may be created: only for a
+ * brand-new vault — see keyManager.ts. If the check itself fails it throws, so
+ * an uncertain answer can never authorise minting a key.
+ */
+async function databaseFileExists(): Promise<boolean> {
+  // op-sqlite types its path constants as `any`; narrow before use.
+  const base: unknown = ANDROID_DATABASE_PATH;
+  if (typeof base !== "string" || base.length === 0) {
+    throw new Error("op-sqlite did not report its Android database directory.");
+  }
+  const directory = base.endsWith("/") ? base : `${base}/`;
+  const info = await FileSystem.getInfoAsync(`file://${directory}${DATABASE_NAME}`);
+  return info.exists;
+}
+
+/**
  * Build 41 P0-1 fix — REVERTED live on-device (2026-09-15), see
  * qa/05-consolidated-triage.md and PROJECT_STATE_HANDOFF.md for the full
  * writeup. The original attempt wrapped `db.execute`/`db.transaction` in a
@@ -58,7 +77,9 @@ const globalWithDb = globalThis as GlobalWithDb;
  * design, not attempted again in this session.
  */
 async function openDatabase(): Promise<DatabaseHandle> {
-  const encryptionKey = await getOrCreateDatabaseKey();
+  const vaultExists = await databaseFileExists();
+  devTiming("Vault", "open", { vaultExists });
+  const encryptionKey = await getOrCreateDatabaseKey({ allowCreate: !vaultExists });
 
   const db = open({
     name: DATABASE_NAME,

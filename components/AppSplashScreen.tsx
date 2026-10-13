@@ -1,97 +1,213 @@
-import { Image, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import { useCallback, useEffect, useRef } from "react";
+import { Animated, Image, Pressable, StyleSheet, Text, View, useWindowDimensions } from "react-native";
+import * as SplashScreen from "expo-splash-screen";
 
 import { colors } from "../constants/theme";
+import type { VaultLockReason } from "../services/crypto/vaultLockState";
 
 /**
- * Build 39/40: the native splash (`expo-splash-screen`, `app.json`) can only
- * ever show a small icon — confirmed by reading its actual Android
- * implementation (`SplashScreenManager.kt`): it calls Android 12+'s own
- * `installSplashScreen()` platform API, which forcibly constrains and
- * centers whatever icon it's given inside a fixed ~240dp window (the same
- * safe-zone adaptive app icons use), regardless of the source image's real
- * dimensions. There is no way to make that particular screen show a large
- * logo + wordmark — it's a hard platform limit, not a sizing choice. (This
- * is also almost certainly why LinkedIn/Amazon-style "big logo splash"
- * screens are never actually the OS-native splash on modern Android — they
- * show their own small icon there too, then hand off to a screen like this
- * one.)
+ * Cold-start splash, the React half of one continuous screen.
  *
- * This screen picks up immediately where that constrained native icon hands
- * off (rendered by app/_layout.tsx in place of the bare colored `View` that
- * used to sit there while `isSetupComplete()` is still being read), using
- * the exact same background color as the native splash so the hand-off
- * reads as one continuous reveal — small icon fading into full branding —
- * rather than two unrelated screens. Pure JS/text — pushable and editable
- * via Metro like everything else, no native asset or rebuild needed for
- * future copy tweaks.
+ * The native splash (`expo-splash-screen`, `app.json`) is held on screen by
+ * app/_layout.tsx's module-level `preventAutoHideAsync()` and released here
+ * only once this screen's logo has actually loaded, so the native icon is
+ * replaced by a pixel-identical one underneath it rather than cross-fading
+ * into a different layout. Measured on device (standalone Xayra Dev builds):
+ * the native icon renders at exactly `imageWidth` dp, uncropped, centred on
+ * the full screen (status and navigation bar areas included) — Android 11
+ * (Redmi, androidx compat splash) and Android 14 (Pixel 6 emulator, platform
+ * splash) alike. Android 12+ only masks to a 192dp circle inside the 288dp
+ * icon canvas, which a 120dp icon never reaches.
  *
- * Build 48, live user request: sizing here used to be flat hardcoded dp/sp
- * values — same absolute size on a small phone and a tablet. Now derived
- * from `useWindowDimensions()` (live, reacts to actual window size, not a
- * one-time `Dimensions.get()` snapshot) as a percentage of screen width,
- * each clamped to a sane min/max so a very narrow phone doesn't shrink the
- * wordmark into illegibility and a tablet doesn't blow the logo up huge.
- * "Compact" preset, chosen from three options presented to the user: logo
- * width 24% of screen width (100–150dp), title 7.5% (26–34sp), subtitle
- * 2.8% (10–13sp). On a ~390dp phone (Redmi Note 8 Pro / Pixel 9 range) that
- * comes out to roughly a 100dp logo, 29sp title, 11sp subtitle.
+ * Invariants for the hand-off to stay seamless:
+ *  - `SPLASH_LOGO_SIZE` equals `imageWidth` in app.json's expo-splash-screen block.
+ *  - Both sides draw the same file, `assets/splash-icon-round.png` (the
+ *    original emblem art, circular transparent framing only).
+ *  - The logo is centred in a full-screen container and the wordmark is
+ *    absolutely positioned below it, so the text never shifts the logo.
+ *  - The app draws edge-to-edge (`edgeToEdgeEnabled`, every API level), so
+ *    this container's centre is the full-screen centre the native icon uses
+ *    — no inset arithmetic.
+ *  - app.json's top-level `backgroundColor` (expo-system-ui ->
+ *    `android:windowBackground`) is the splash colour, so a frame where
+ *    neither splash is drawn shows the same colour, not the theme default.
  *
- * Round frame, live user request: matches CentralRecorderCanvas's own
- * `button`/`buttonLogo` treatment for the record button — a square,
- * `overflow: "hidden"` frame with `borderRadius` = half its side, an
- * accent-colored fill behind the image as a fallback, and `resizeMode:
- * "cover"` so the source image fills the circle edge-to-edge with no
- * letterboxing rather than `contain`'s uncropped rectangle floating inside
- * a circular frame.
+ * Released on the logo's `onLoad`, which means the image view is mounted
+ * and decoded — on the Redmi it fires ~140ms after the activity is displayed,
+ * even while the native splash is holding the draw. Releasing on `onLayout`
+ * instead was measured to uncover the window background before the React
+ * views had drawn. The wordmark fades in under the native splash's exit fade
+ * (duration set in app/_layout.tsx).
+ * `HIDE_FALLBACK_MS` only applies if the image never reports load or error;
+ * app/_layout.tsx also releases the native splash once the setup gate
+ * resolves, and expo-router hides it on any fatal JS error.
  */
+export const SPLASH_LOGO_SIZE = 120;
+
+export type SplashLock = {
+  reason: VaultLockReason;
+  /** An attempt is in flight — the button is disabled so taps can't stack prompts. */
+  unlocking: boolean;
+  onUnlock: () => void;
+};
+
+const LOCKED = {
+  title: "Xayra is locked",
+  detail: "Your notes stay encrypted until you unlock.",
+  action: "Unlock Xayra",
+};
+
+const LOCK_COPY: Record<VaultLockReason, { title: string; detail: string; action: string }> = {
+  userCancelled: LOCKED,
+  systemCancelled: LOCKED,
+  timeout: { ...LOCKED, title: "Unlock timed out" },
+  lockout: {
+    title: "Too many attempts",
+    detail: "Fingerprint is paused for a moment. Wait about 30 seconds, then unlock.",
+    action: "Unlock Xayra",
+  },
+  lockoutPermanent: {
+    title: "Fingerprint is locked",
+    detail: "Unlock your phone with your PIN, pattern or password, then unlock Xayra.",
+    action: "Unlock Xayra",
+  },
+  keyUnavailable: {
+    title: "Xayra couldn't unlock",
+    detail: "Your phone's secure storage didn't respond. Nothing was changed.",
+    action: "Try again",
+  },
+  keyMissing: {
+    title: "Xayra can't unlock your notes",
+    detail: "This phone no longer has the key to your encrypted notes, which can happen after fingerprints change. Nothing has been deleted.",
+    action: "Try again",
+  },
+  databaseError: {
+    title: "Xayra couldn't open your notes",
+    detail: "Nothing was changed. Try again, or restart the app.",
+    action: "Try again",
+  },
+};
+
+const HIDE_FALLBACK_MS = 1000;
+const WORDMARK_FADE_MS = 280;
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
-export function AppSplashScreen() {
-  const { width: screenWidth } = useWindowDimensions();
+let nativeSplashReleased = false;
 
-  const logoSize = clamp(screenWidth * 0.24, 100, 150);
+/** Idempotent — safe to call from every path that may be first to finish. */
+export function releaseNativeSplash(): void {
+  if (nativeSplashReleased) {
+    return;
+  }
+  nativeSplashReleased = true;
+  try {
+    SplashScreen.hide();
+  } catch (err) {
+    console.warn("[Splash] Failed to hide the native splash:", err);
+  }
+}
+
+export function AppSplashScreen({ lock = null }: { lock?: SplashLock | null }) {
+  const { width: screenWidth } = useWindowDimensions();
   const titleFontSize = clamp(screenWidth * 0.075, 26, 34);
   const subtitleFontSize = clamp(screenWidth * 0.028, 10, 13);
 
+  const wordmarkOpacity = useRef(new Animated.Value(0)).current;
+  const revealed = useRef(false);
+
+  const reveal = useCallback(() => {
+    if (revealed.current) {
+      return;
+    }
+    revealed.current = true;
+    releaseNativeSplash();
+    Animated.timing(wordmarkOpacity, {
+      toValue: 1,
+      duration: WORDMARK_FADE_MS,
+      useNativeDriver: true,
+    }).start();
+  }, [wordmarkOpacity]);
+
+  useEffect(() => {
+    const fallback = setTimeout(reveal, HIDE_FALLBACK_MS);
+    return () => clearTimeout(fallback);
+  }, [reveal]);
+
   return (
     <View style={styles.container}>
-      <View style={[styles.logoFrame, { width: logoSize, height: logoSize, borderRadius: logoSize / 2 }]}>
-        {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
-        <Image source={require("../assets/icon.png")} style={styles.logoImage} resizeMode="cover" />
-      </View>
-      <Text style={[styles.title, { fontSize: titleFontSize }]}>Xayra</Text>
-      <Text style={[styles.subtitle, { fontSize: subtitleFontSize }]}>Your Pocket Companion</Text>
+      <Image
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        source={require("../assets/splash-icon-round.png")}
+        style={styles.logo}
+        fadeDuration={0}
+        onLoad={reveal}
+        onError={reveal}
+        accessibilityIgnoresInvertColors
+      />
+      <Animated.View style={[styles.wordmark, { opacity: wordmarkOpacity }]} pointerEvents="box-none">
+        <Text style={[styles.title, { fontSize: titleFontSize }]}>Xayra</Text>
+        <Text style={[styles.subtitle, { fontSize: subtitleFontSize }]}>Your Pocket Companion</Text>
+        {lock ? <LockPanel lock={lock} /> : null}
+      </Animated.View>
     </View>
+  );
+}
+
+/** Flows in the wordmark's column, below it, so it follows the text at any
+ * font scale — the logo, centred independently, never moves. */
+function LockPanel({ lock }: { lock: SplashLock }) {
+  const opacity = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    Animated.timing(opacity, { toValue: 1, duration: WORDMARK_FADE_MS, useNativeDriver: true }).start();
+  }, [opacity]);
+
+  const copy = LOCK_COPY[lock.reason];
+  return (
+    <Animated.View style={[styles.lockPanel, { opacity }]}>
+      <Text style={styles.lockTitle} accessibilityRole="header">
+        {copy.title}
+      </Text>
+      <Text style={styles.lockDetail}>{copy.detail}</Text>
+      <Pressable
+        onPress={lock.onUnlock}
+        disabled={lock.unlocking}
+        accessibilityRole="button"
+        accessibilityState={{ disabled: lock.unlocking, busy: lock.unlocking }}
+        style={({ pressed }) => [
+          styles.unlockButton,
+          (pressed || lock.unlocking) && styles.unlockButtonPressed,
+        ]}
+      >
+        <Text style={styles.unlockLabel}>{lock.unlocking ? "Unlocking…" : copy.action}</Text>
+      </Pressable>
+    </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    flex: 1,
-    // Matches app.json's expo-splash-screen `backgroundColor` and the
-    // native splash icon's own background exactly — the whole point of
-    // this screen is a seamless continuation of the native splash, not a
-    // visibly different second screen.
+    ...StyleSheet.absoluteFill,
+    // Matches app.json's expo-splash-screen `backgroundColor`.
     backgroundColor: "#0E0F12",
     alignItems: "center",
     justifyContent: "center",
   },
-  logoFrame: {
-    backgroundColor: colors.accent,
-    alignItems: "center",
-    justifyContent: "center",
-    // Required to actually clip the image below into a circle — RN doesn't
-    // apply a parent's borderRadius as a clip mask to children by default.
-    overflow: "hidden",
+  logo: {
+    width: SPLASH_LOGO_SIZE,
+    height: SPLASH_LOGO_SIZE,
   },
-  logoImage: {
-    width: "100%",
-    height: "100%",
+  wordmark: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    top: "50%",
+    marginTop: SPLASH_LOGO_SIZE / 2 + 24,
+    alignItems: "center",
   },
   title: {
-    marginTop: 24,
     color: "#F8FAFC",
     fontWeight: "700",
     letterSpacing: -0.8,
@@ -100,5 +216,42 @@ const styles = StyleSheet.create({
     marginTop: 8,
     color: "#94A3B8",
     fontWeight: "500",
+  },
+  lockPanel: {
+    marginTop: 40,
+    paddingHorizontal: 24,
+    alignItems: "center",
+  },
+  lockTitle: {
+    color: "#F8FAFC",
+    fontSize: 17,
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  lockDetail: {
+    marginTop: 6,
+    maxWidth: 320,
+    color: "#94A3B8",
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: "center",
+  },
+  unlockButton: {
+    marginTop: 20,
+    minHeight: 48,
+    minWidth: 200,
+    paddingHorizontal: 28,
+    borderRadius: 24,
+    backgroundColor: colors.accent,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  unlockButtonPressed: {
+    opacity: 0.7,
+  },
+  unlockLabel: {
+    color: "#FFFFFF",
+    fontSize: 16,
+    fontWeight: "700",
   },
 });

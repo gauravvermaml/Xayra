@@ -2,14 +2,51 @@ import * as Crypto from "expo-crypto";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as SecureStore from "expo-secure-store";
 
+import { classifyUnlockFailure, type UnlockFailureReason } from "./unlockErrors";
+
 const DB_ENCRYPTION_KEY_ID = "silent-confidant.db-encryption-key";
 const KEY_BYTE_LENGTH = 32;
 
+/** The key stayed locked because biometric authentication didn't complete
+ * (see unlockErrors.ts). Nothing was created, changed or deleted. */
 export class AuthenticationFailedError extends Error {
-  constructor(message = "Biometric authentication failed.") {
+  readonly reason: UnlockFailureReason;
+
+  constructor(reason: UnlockFailureReason, message = "Biometric authentication failed.") {
     super(message);
     this.name = "AuthenticationFailedError";
+    this.reason = reason;
   }
+}
+
+/**
+ * The key couldn't be read, for a reason other than authentication. Nothing
+ * was created, changed or deleted.
+ *  - `"unavailable"`: SecureStore/Keystore failed (or reported an
+ *    authentication result unlockErrors.ts doesn't recognise). Retryable.
+ *  - `"missing"`: SecureStore returned no key, but a vault already exists —
+ *    the key was lost (e.g. Android permanently invalidated it after a new
+ *    fingerprint was enrolled). A new key would never open that vault, so
+ *    one is deliberately NOT minted.
+ */
+export class DatabaseKeyError extends Error {
+  readonly kind: "unavailable" | "missing";
+  readonly cause: unknown;
+
+  constructor(kind: "unavailable" | "missing", cause?: unknown) {
+    super(kind === "missing" ? "The database key is missing." : "The database key could not be read.");
+    this.name = "DatabaseKeyError";
+    this.kind = kind;
+    this.cause = cause;
+  }
+}
+
+function toAccessError(err: unknown): Error {
+  const reason = classifyUnlockFailure(err);
+  if (reason) {
+    return new AuthenticationFailedError(reason, err instanceof Error ? err.message : undefined);
+  }
+  return new DatabaseKeyError("unavailable", err);
 }
 
 function toHex(bytes: Uint8Array): string {
@@ -58,11 +95,11 @@ async function isBiometricAuthAvailable(): Promise<boolean> {
  * requires — the exact same security guarantee (the key is still
  * completely inaccessible without a successful biometric check), just
  * without asking twice. A cancelled/failed SecureStore auth still throws
- * from the call below, which the catch here normalizes into
- * `AuthenticationFailedError` so callers get the same distinguishable
- * error type as before.
+ * from the call below; the catch here turns a recognised authentication
+ * outcome (cancel, lockout — unlockErrors.ts) into `AuthenticationFailedError`
+ * with its reason, and rethrows anything else unchanged.
  */
-async function readOrCreateKey(biometricAvailable: boolean): Promise<string> {
+async function readOrCreateKey(biometricAvailable: boolean, allowCreate: boolean): Promise<string> {
   // Only gate the SecureStore item behind biometrics when they're actually
   // enrolled; otherwise `requireAuthentication` would throw on every call.
   const secureStoreOptions: SecureStore.SecureStoreOptions = biometricAvailable
@@ -75,31 +112,42 @@ async function readOrCreateKey(biometricAvailable: boolean): Promise<string> {
         keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
       };
 
+  // Classified whatever `biometricAvailable` said: the stored item carries
+  // its own requireAuthentication flag, so SecureStore can still prompt.
+  let existingKey: string | null;
   try {
-    const existingKey = await SecureStore.getItemAsync(DB_ENCRYPTION_KEY_ID, secureStoreOptions);
-    if (existingKey) {
-      return existingKey;
-    }
-
-    const randomBytes = await Crypto.getRandomBytesAsync(KEY_BYTE_LENGTH);
-    const newKey = toHex(randomBytes);
-
-    await SecureStore.setItemAsync(DB_ENCRYPTION_KEY_ID, newKey, secureStoreOptions);
-
-    return newKey;
+    existingKey = await SecureStore.getItemAsync(DB_ENCRYPTION_KEY_ID, secureStoreOptions);
   } catch (err) {
-    if (biometricAvailable) {
-      throw new AuthenticationFailedError(err instanceof Error ? err.message : String(err));
-    }
-    throw err;
+    throw toAccessError(err);
   }
+  if (existingKey) {
+    return existingKey;
+  }
+
+  // SecureStore also returns null when an existing key is unusable
+  // (permanently invalidated, out of sync with the Keystore). Minting a
+  // replacement then would overwrite the stored item and still never open
+  // the existing vault, so a key is only ever created when there is no vault.
+  if (!allowCreate) {
+    throw new DatabaseKeyError("missing");
+  }
+
+  const randomBytes = await Crypto.getRandomBytesAsync(KEY_BYTE_LENGTH);
+  const newKey = toHex(randomBytes);
+  try {
+    await SecureStore.setItemAsync(DB_ENCRYPTION_KEY_ID, newKey, secureStoreOptions);
+  } catch (err) {
+    throw toAccessError(err);
+  }
+  return newKey;
 }
 
 let cachedEphemeralKey: string | null = null;
 
 /**
- * Last-resort key used only when SecureStore itself is unusable (seen on
- * some emulator images with a broken Keystore). Not persisted, so notes
+ * Last-resort key used only on a first run (no vault yet) without enrolled
+ * biometrics, when SecureStore itself is unusable (seen on some emulator
+ * images with a broken Keystore). Not persisted, so notes
  * won't survive an app restart in that case — but the app keeps working
  * instead of every note insertion failing.
  */
@@ -111,8 +159,13 @@ function ephemeralFallbackKey(): string {
 }
 
 /**
- * Returns the database encryption key, generating and storing it in the
- * hardware keystore/keychain on first call.
+ * Returns the database encryption key. A new key is generated and stored
+ * only when `allowCreate` is set — which db/client.ts does only when no
+ * encrypted database file exists yet. Every other caller (and every retry)
+ * can only read. Never deletes or replaces a stored key.
+ *
+ * Throws `AuthenticationFailedError` (cancel/timeout/lockout — retry with a
+ * fresh prompt) or `DatabaseKeyError` (key unreadable or missing).
  *
  * When biometrics/a passcode are enrolled, every read/write is gated behind
  * a biometric prompt. On emulators and devices with nothing enrolled, the
@@ -120,15 +173,15 @@ function ephemeralFallbackKey(): string {
  * keystore) but without the authentication gate, so local development
  * never needs enrolled biometrics.
  */
-export async function getOrCreateDatabaseKey(): Promise<string> {
+export async function getOrCreateDatabaseKey({ allowCreate = false }: { allowCreate?: boolean } = {}): Promise<string> {
   const biometricAvailable = await isBiometricAuthAvailable();
 
   try {
-    return await readOrCreateKey(biometricAvailable);
+    return await readOrCreateKey(biometricAvailable, allowCreate);
   } catch (err) {
-    if (biometricAvailable) {
-      // Authentication was available but failed (cancelled, lockout, etc.)
-      // — that should surface to the caller, not be papered over.
+    if (biometricAvailable || !allowCreate || err instanceof AuthenticationFailedError) {
+      // Authentication failed, or a vault already exists: surface it. An
+      // ephemeral key could never open an existing vault.
       throw err;
     }
     console.warn(

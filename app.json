@@ -6,6 +6,7 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
+    "backgroundColor": "#0E0F12",
     "scheme": "xayra",
     "ios": {
       "supportsTablet": true,
@@ -72,7 +73,8 @@
       [
         "expo-splash-screen",
         {
-          "image": "./assets/splash-icon.png",
+          "image": "./assets/splash-icon-round.png",
+          "imageWidth": 120,
           "resizeMode": "contain",
           "backgroundColor": "#0E0F12"
         }
