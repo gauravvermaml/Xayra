@@ -9,7 +9,14 @@ import { NotesSheetContent, type DisplayNote } from "../components/NotesSheetCon
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { deleteNote, listNotes, retryPendingEmbeddings, type Note } from "../services/notes/noteManager";
 import { matchesKeywordSearch } from "../services/search/keywordMatch";
-import { getSyncStatus, restoreFromDrive, signInWithGoogle, type SyncStatus } from "../services/sync/driveSync";
+import {
+  BackupPausedError,
+  DRIVE_BACKUP_PAUSED,
+  getSyncStatus,
+  restoreFromDrive,
+  signInWithGoogle,
+  type SyncStatus,
+} from "../services/sync/driveSync";
 
 /**
  * Archive — the home screen's former "Recorded notes" card, demoted to its
@@ -80,6 +87,10 @@ export default function ArchiveScreen() {
       setIsRestoring(true);
       setError(null);
       try {
+        // Paused (driveErrors.ts): say so before asking anyone to sign in.
+        if (DRIVE_BACKUP_PAUSED) {
+          throw new BackupPausedError("restore");
+        }
         if (!syncStatus.isConnected) {
           await signInWithGoogle();
         }
@@ -90,7 +101,7 @@ export default function ArchiveScreen() {
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to restore from Google Drive.";
         setError(message);
-        Alert.alert("Restore Failed", message);
+        Alert.alert(err instanceof BackupPausedError ? err.title : "Restore Failed", message);
       } finally {
         isRestoringRef.current = false;
         setIsRestoring(false);

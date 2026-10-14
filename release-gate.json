@@ -1,0 +1,10 @@
+{
+  "productionBlocked": true,
+  "reason": "Encrypted Google Drive backup and restore are not finished. Local SQLCipher encryption ships only together with a working, independently tested encrypted backup-and-restore path.",
+  "blockers": [
+    "Encrypted Google Drive backup and restore implemented and tested end to end (recovery design pending product decision)",
+    "Privacy policy, Play listing, in-app wording and Data safety answers updated for the encrypted release",
+    "First launch: the notification-permission dialog cancels the first fingerprint prompt (key creation lands on 'Xayra is locked')",
+    "Recovery sign-in errors show raw developer diagnostics (package name, SHA-1, client ID) to users"
+  ]
+}

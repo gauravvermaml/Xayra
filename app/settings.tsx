@@ -16,6 +16,8 @@ import Constants from "expo-constants";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { listNotes, purgeAllNotes } from "../services/notes/noteManager";
 import {
+  BackupPausedError,
+  DRIVE_BACKUP_PAUSED,
   backupToDrive,
   getAutoSyncOnWifi,
   getSyncStatus,
@@ -120,7 +122,10 @@ export default function SettingsScreen() {
       await refreshStatus();
       Alert.alert("Backup Complete", message);
     } catch (err) {
-      Alert.alert("Backup Failed", err instanceof Error ? err.message : "Failed to back up to Google Drive.");
+      Alert.alert(
+        err instanceof BackupPausedError ? err.title : "Backup Failed",
+        err instanceof Error ? err.message : "Failed to back up to Google Drive."
+      );
     } finally {
       setBusyAction(null);
     }
@@ -139,7 +144,7 @@ export default function SettingsScreen() {
       showToast(message);
     } catch (err) {
       Alert.alert(
-        "Restore Failed",
+        err instanceof BackupPausedError ? err.title : "Restore Failed",
         err instanceof Error ? err.message : "Failed to restore notes from Google Drive."
       );
     } finally {
@@ -263,6 +268,13 @@ export default function SettingsScreen() {
                 Stores an encrypted backup in your personal Google Drive that only Xayra can read
                 — no one else, not even Google, can open it.
               </Text>
+
+              {DRIVE_BACKUP_PAUSED ? (
+                <Text style={styles.pausedNotice}>
+                  Backup and restore are paused while Xayra moves to protected backups. Your notes
+                  are encrypted on this phone, and your existing Drive backup is left as it is.
+                </Text>
+              ) : null}
 
               <View style={styles.toggleRow}>
                 <Text style={styles.toggleLabel}>Auto-sync on Wi-Fi</Text>
@@ -405,6 +417,12 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
+  pausedNotice: {
+    color: colors.warning,
+    fontSize: 13,
+    marginTop: -spacing.sm,
+    marginBottom: spacing.lg,
+  },
   safeArea: {
     flex: 1,
     backgroundColor: colors.background,

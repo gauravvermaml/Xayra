@@ -5,7 +5,8 @@ import * as FileSystem from "expo-file-system/legacy";
 /**
  * Disposable test vault — a Xayra Dev-only testing mode, fully isolated from
  * the normal vault:
- *  - Only the Xayra Dev package can ever enter it. The check reads the
+ *  - Only a development package (Xayra Dev, or the emulator-only Xayra Test)
+ *    can ever enter it. The check reads the
  *    INSTALLED package from Android at runtime (expo-app-signature), not the
  *    build config, so production can't enter it by deep link, a stray marker
  *    file or a misconfiguration.
@@ -22,6 +23,9 @@ import * as FileSystem from "expo-file-system/legacy";
 export type VaultMode = "normal" | "disposable";
 
 export const DEV_PACKAGE = "com.anonymous.silentconfidant.dev";
+/** Development packages: Xayra Dev, and the emulator-only "Xayra Test"
+ * (privately signed, for Google Drive recovery testing — see app.config.js). */
+export const DEV_PACKAGES: readonly string[] = [DEV_PACKAGE, "com.anonymous.silentconfidant.devtest"];
 export const DISPOSABLE_MARKER_URI = `${FileSystem.documentDirectory}dev-disposable-vault.json`;
 export const DISPOSABLE_VAULT_DIR_URI = `${FileSystem.documentDirectory}disposable-vault/`;
 export const DISPOSABLE_DATABASE_NAME = "xayra-disposable.sqlite";
@@ -37,11 +41,11 @@ export class DisposableModeError extends Error {
   }
 }
 
-/** True only for the Xayra Dev package as Android reports it right now. A
+/** True only for a development package as Android reports it right now. A
  * failed read counts as "not Dev" — the safe direction. */
 export function isRunningDevPackage(): boolean {
   try {
-    return getRuntimePackageName() === DEV_PACKAGE;
+    return DEV_PACKAGES.includes(getRuntimePackageName());
   } catch {
     return false;
   }
@@ -60,7 +64,8 @@ async function readMarker(): Promise<boolean> {
       version?: unknown;
       package?: unknown;
     };
-    return marker.version === MARKER_VERSION && marker.package === DEV_PACKAGE;
+    // The marker must name the package reading it.
+    return marker.version === MARKER_VERSION && marker.package === getRuntimePackageName();
   } catch {
     // Unreadable or malformed marker: stay on the normal vault.
     return false;
@@ -107,7 +112,7 @@ export async function enterDisposableModeOnNextStart(confirmation: string): Prom
   }
   await FileSystem.writeAsStringAsync(
     DISPOSABLE_MARKER_URI,
-    JSON.stringify({ version: MARKER_VERSION, package: DEV_PACKAGE, confirmedAt: new Date().toISOString() })
+    JSON.stringify({ version: MARKER_VERSION, package: getRuntimePackageName(), confirmedAt: new Date().toISOString() })
   );
 }
 

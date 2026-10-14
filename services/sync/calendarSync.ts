@@ -3,13 +3,10 @@ import { GoogleSignin, isSuccessResponse } from "@react-native-google-signin/goo
 import type { Recurrence } from "../../db/schema";
 import { assertNetworkFeatureAllowed } from "../dev/disposableVault";
 import type { ToDo } from "../todos/todoManager";
-import {
-  CALENDAR_EVENTS_SCOPE,
-  DriveSyncError,
-  ensureConfigured,
-  requireAccessToken,
-  withDeveloperErrorHandling,
-} from "./driveSync";
+// DriveSyncError comes from driveErrors, not driveSync: it's extended while
+// this module loads, and driveSync may still be mid-load (see driveErrors.ts).
+import { DriveSyncError } from "./driveErrors";
+import { CALENDAR_EVENTS_SCOPE, ensureConfigured, requireAccessToken, withDeveloperErrorHandling } from "./driveSync";
 
 /**
  * Push-to-Google-Calendar — one-way sync (Xayra pushes; an edit made

@@ -13,6 +13,7 @@ import { Platform } from "react-native";
 import { getRawDatabase } from "../../db/client";
 import { getOrCreateDatabaseKey } from "../crypto/keyManager";
 import { assertNetworkFeatureAllowed } from "../dev/disposableVault";
+import { DriveSyncError, NoBackupFoundError, NotSignedInError, BackupPausedError, DRIVE_BACKUP_PAUSED } from "./driveErrors";
 import { listNoteRevisions, listNotes, mergeMissingNotes, type CloudNoteRecord, type NoteRevision } from "../notes/noteManager";
 import { listAllToDos, mergeMissingToDos, type CloudToDoRecord } from "../todos/todoManager";
 import type { Recurrence } from "../../db/schema";
@@ -66,26 +67,8 @@ const BACKUP_KEY_FILENAME = "remi_backup.key";
 const LAST_BACKUP_STORAGE_KEY = "remi.driveSync.lastBackup";
 const AUTO_SYNC_WIFI_STORAGE_KEY = "remi.driveSync.autoSyncOnWifi";
 
-export class DriveSyncError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "DriveSyncError";
-  }
-}
-
-export class NotSignedInError extends DriveSyncError {
-  constructor() {
-    super("Not connected to Google Drive. Connect an account first.");
-    this.name = "NotSignedInError";
-  }
-}
-
-export class NoBackupFoundError extends DriveSyncError {
-  constructor() {
-    super("No backup was found in this Google account's Drive.");
-    this.name = "NoBackupFoundError";
-  }
-}
+// Defined in driveErrors.ts to break a load-order crash (see that file).
+export { BackupPausedError, DRIVE_BACKUP_PAUSED, DriveSyncError, NoBackupFoundError, NotSignedInError } from "./driveErrors";
 
 /**
  * Live data-loss incident, fixed 2026-09-16, superseded by a proper delta
@@ -318,6 +301,78 @@ export async function signInWithGoogle(): Promise<DriveUser> {
     await GoogleSignin.addScopes({ scopes: [DRIVE_APPDATA_SCOPE] });
     return toDriveUser(response.data);
   });
+}
+
+/**
+ * Original-vault recovery (services/recovery/originalVaultRecovery.ts) runs
+ * before the vault opens, so it needs its own sign-in: a silent sign-in with
+ * the account Google already remembers, then — only when `interactive` — the
+ * account picker. `null` means no remembered account and no picker requested.
+ * Uses the same Drive appData scope as backup; touches no Drive files.
+ */
+export async function signInForRecovery({ interactive }: { interactive: boolean }): Promise<DriveUser | null> {
+  await assertNetworkFeatureAllowed("Google sign-in");
+  ensureConfigured();
+  return withDeveloperErrorHandling(async () => {
+    await GoogleSignin.hasPlayServices();
+    const silent = await GoogleSignin.signInSilently();
+    if (silent.type === "success") {
+      await GoogleSignin.addScopes({ scopes: [DRIVE_APPDATA_SCOPE] });
+      return toDriveUser(silent.data);
+    }
+    if (!interactive) {
+      return null;
+    }
+    const response = await GoogleSignin.signIn();
+    if (!isSuccessResponse(response)) {
+      throw new DriveSyncError("Google sign-in was cancelled.");
+    }
+    await GoogleSignin.addScopes({ scopes: [DRIVE_APPDATA_SCOPE] });
+    return toDriveUser(response.data);
+  });
+}
+
+/** "Use a different account" during recovery: forgets the remembered account
+ * on this phone (no Drive changes, no access revoked) and opens the picker. */
+export async function switchRecoveryAccount(): Promise<DriveUser> {
+  await assertNetworkFeatureAllowed("Google sign-in");
+  ensureConfigured();
+  return withDeveloperErrorHandling(async () => {
+    await GoogleSignin.signOut();
+    const response = await GoogleSignin.signIn();
+    if (!isSuccessResponse(response)) {
+      throw new DriveSyncError("Google sign-in was cancelled.");
+    }
+    await GoogleSignin.addScopes({ scopes: [DRIVE_APPDATA_SCOPE] });
+    return toDriveUser(response.data);
+  });
+}
+
+/** Backup keys are 64 hex characters; anything far larger isn't one. */
+const MAX_BACKUP_KEY_BYTES = 1024;
+
+/**
+ * Downloads the signed-in account's backup key straight into memory — a GET,
+ * never written to any file, never logged. `null` when the account has no
+ * backup key. Whether it actually opens this phone's vault is decided only by
+ * trying it on a copy (services/recovery/originalVaultRecovery.ts).
+ */
+export async function fetchBackupKeyForRecovery(): Promise<string | null> {
+  await assertNetworkFeatureAllowed("Google Drive restore");
+  const accessToken = await requireAccessToken();
+  const keyFile = await findAppDataFile(accessToken, BACKUP_KEY_FILENAME);
+  if (!keyFile) {
+    return null;
+  }
+  if (keyFile.size !== undefined && Number(keyFile.size) > MAX_BACKUP_KEY_BYTES) {
+    throw new DriveSyncError("The backup key file isn't a valid key.");
+  }
+  const res = await driveFetch(`${DRIVE_FILES_ENDPOINT}/${keyFile.id}?alt=media`, accessToken, { method: "GET" });
+  const text = await res.text();
+  if (text.length > MAX_BACKUP_KEY_BYTES) {
+    throw new DriveSyncError("The backup key file isn't a valid key.");
+  }
+  return text.trim();
 }
 
 /** Revokes Drive access and clears the local session — deliberately does
@@ -713,6 +768,10 @@ export type BackupResult = {
 export async function backupToDrive(): Promise<BackupResult> {
   // A disposable test vault must never merge into the real Drive backup.
   await assertNetworkFeatureAllowed("Google Drive backup");
+  // Encrypted vaults never go through the legacy format (driveErrors.ts).
+  if (DRIVE_BACKUP_PAUSED) {
+    throw new BackupPausedError("backup");
+  }
   const accessToken = await requireAccessToken();
 
   const [dbFile, keyFile] = await Promise.all([
@@ -884,6 +943,9 @@ export type RestoreResult = {
  */
 export async function restoreFromDrive(): Promise<RestoreResult> {
   await assertNetworkFeatureAllowed("Google Drive restore");
+  if (DRIVE_BACKUP_PAUSED) {
+    throw new BackupPausedError("restore");
+  }
   const accessToken = await requireAccessToken();
 
   const dbFile = await findAppDataFile(accessToken, BACKUP_DB_FILENAME);

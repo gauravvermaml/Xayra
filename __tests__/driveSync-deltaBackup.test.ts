@@ -27,6 +27,12 @@ jest.mock("expo-app-signature", () => ({
 }));
 jest.mock("expo-crypto", () => ({ randomUUID: jest.fn(() => "fake-merge-id") }));
 jest.mock("../db/client", () => ({ getRawDatabase: jest.fn() }));
+// The legacy delta-backup code stays covered here for when backups resume in
+// a protected format; the live pause itself is tested in driveSync-paused.test.ts.
+jest.mock("../services/sync/driveErrors", () => ({
+  ...jest.requireActual("../services/sync/driveErrors"),
+  DRIVE_BACKUP_PAUSED: false,
+}));
 jest.mock("../services/crypto/keyManager", () => ({ getOrCreateDatabaseKey: jest.fn(() => Promise.resolve("local-fake-key")) }));
 
 const mockListNotes = jest.fn();

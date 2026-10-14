@@ -200,3 +200,66 @@ export async function setDatabaseKey(key: string): Promise<void> {
       };
   await SecureStore.setItemAsync(DB_ENCRYPTION_KEY_ID, key, secureStoreOptions);
 }
+
+/** The format every key this app creates has (see `toHex`): 32 bytes as
+ * lowercase hex. A recovered key must match it before anything else. */
+export function isWellFormedDatabaseKey(key: string): boolean {
+  return /^[0-9a-f]{64}$/.test(key);
+}
+
+/** A recovered key wasn't installed: it was malformed, or a readable key is
+ * already stored (which recovery must never overwrite). Nothing changed. */
+export class RecoveredKeyRefusedError extends Error {
+  readonly reason: "malformed" | "keyAlreadyStored";
+
+  constructor(reason: "malformed" | "keyAlreadyStored") {
+    super(reason === "malformed" ? "The recovered key isn't a valid Xayra key." : "A key is already stored on this phone.");
+    this.name = "RecoveredKeyRefusedError";
+    this.reason = reason;
+  }
+}
+
+/**
+ * Original-vault recovery (services/recovery/originalVaultRecovery.ts):
+ * stores a key that has ALREADY been proven to open a copy of this phone's
+ * vault, using the same biometric-gated SecureStore entry as normal.
+ *
+ * - Refuses a malformed key.
+ * - Refuses if SecureStore can still return a key — recovery only ever fills
+ *   a missing or permanently invalidated entry, never replaces a working one.
+ *   (In those states the read returns nothing without prompting.)
+ * - The write itself shows the fingerprint prompt. Cancel/lockout surfaces as
+ *   `AuthenticationFailedError`, other failures as `DatabaseKeyError`; there is
+ *   no retry here, and nothing is deleted or generated on any path.
+ */
+export async function installRecoveredDatabaseKey(key: string): Promise<void> {
+  if (!isWellFormedDatabaseKey(key)) {
+    throw new RecoveredKeyRefusedError("malformed");
+  }
+  const biometricAvailable = await isBiometricAuthAvailable();
+  const secureStoreOptions: SecureStore.SecureStoreOptions = biometricAvailable
+    ? {
+        requireAuthentication: true,
+        authenticationPrompt: "Unlock Xayra",
+        keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+      }
+    : {
+        keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
+      };
+
+  let existing: string | null;
+  try {
+    existing = await SecureStore.getItemAsync(DB_ENCRYPTION_KEY_ID, secureStoreOptions);
+  } catch (err) {
+    throw toAccessError(err);
+  }
+  if (existing) {
+    throw new RecoveredKeyRefusedError("keyAlreadyStored");
+  }
+
+  try {
+    await SecureStore.setItemAsync(DB_ENCRYPTION_KEY_ID, key, secureStoreOptions);
+  } catch (err) {
+    throw toAccessError(err);
+  }
+}

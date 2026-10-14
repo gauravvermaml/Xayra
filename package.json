@@ -74,7 +74,8 @@
   "private": true,
   "op-sqlite": {
     "sqliteVec": true,
-    "fts5": true
+    "fts5": true,
+    "sqlcipher": true
   },
   "overrides": {
     "decode-uri-component": "^0.5.0"
