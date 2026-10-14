@@ -6,6 +6,12 @@ import { EMBEDDING_DIMENSIONS, generateEmbeddingLocal } from "../services/ai/loc
 import { devTiming } from "../services/ai/perf";
 import { getOrCreateDatabaseKey } from "../services/crypto/keyManager";
 import {
+  DISPOSABLE_DATABASE_NAME,
+  getDisposableVaultKey,
+  prepareDisposableVaultStorage,
+  resolveVaultMode,
+} from "../services/dev/disposableVault";
+import {
   NOTE_EMBEDDINGS_TABLE_SQL,
   NOTES_FTS_TABLE_SQL,
   NOTES_FTS_TRIGGERS_SQL,
@@ -76,15 +82,25 @@ async function databaseFileExists(): Promise<boolean> {
  * `execute()`/`transaction()` calls — deferred pending a more careful
  * design, not attempted again in this session.
  */
-async function openDatabase(): Promise<DatabaseHandle> {
+/** The normal vault: persistent, biometric-gated key (keyManager.ts). */
+async function openNormalVault(): Promise<DB> {
   const vaultExists = await databaseFileExists();
   devTiming("Vault", "open", { vaultExists });
   const encryptionKey = await getOrCreateDatabaseKey({ allowCreate: !vaultExists });
+  return open({ name: DATABASE_NAME, encryptionKey });
+}
 
-  const db = open({
-    name: DATABASE_NAME,
-    encryptionKey,
-  });
+/** Xayra Dev's disposable test vault: separate folder and file, in-memory key,
+ * never keyManager or the normal vault (services/dev/disposableVault.ts). */
+async function openDisposableVault(): Promise<DB> {
+  const location = await prepareDisposableVaultStorage();
+  const encryptionKey = await getDisposableVaultKey();
+  devTiming("Vault", "open", { disposable: true });
+  return open({ name: DISPOSABLE_DATABASE_NAME, location, encryptionKey });
+}
+
+async function openDatabase(): Promise<DatabaseHandle> {
+  const db = (await resolveVaultMode()) === "disposable" ? await openDisposableVault() : await openNormalVault();
 
   await createCoreTables(db);
   const needsReembed = await dropStaleEmbeddingsTable(db);

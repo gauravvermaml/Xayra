@@ -6,6 +6,9 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import * as SplashScreen from "expo-splash-screen";
 
 import { AppSplashScreen, releaseNativeSplash } from "../components/AppSplashScreen";
+import { DisposableVaultBanner } from "../components/DisposableVaultBanner";
+import { resolveVaultMode, type VaultMode } from "../services/dev/disposableVault";
+import { cancelStaleDisposableReminders } from "../services/notifications/todoNotifications";
 import { OnboardingSetupScreen } from "../components/OnboardingSetupScreen";
 import { ToastHost } from "../components/Toast";
 import { releaseLocalLlamaOnBackground } from "../services/ai/localLlama";
@@ -176,6 +179,22 @@ function useReleaseNativeContextsOnBackground(): void {
   }, []);
 }
 
+/** This process's vault mode (services/dev/disposableVault.ts) — `"normal"`
+ * until resolved, which is immediate outside Xayra Dev. */
+function useVaultMode(): VaultMode {
+  const [mode, setMode] = useState<VaultMode>("normal");
+  useEffect(() => {
+    let cancelled = false;
+    void resolveVaultMode().then((resolved) => {
+      if (!cancelled) setMode(resolved);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return mode;
+}
+
 export default function RootLayout() {
   const { setupComplete, lockReason, unlocking, unlock, markComplete: markSetupGateComplete } = useSetupGate();
   useReleaseNativeContextsOnBackground();
@@ -187,6 +206,17 @@ export default function RootLayout() {
       releaseNativeSplash();
     }
   }, [setupComplete, lockReason]);
+
+  const vaultMode = useVaultMode();
+  // Once the vault is open (either mode, before any to-do exists in it):
+  // clear reminders a previous disposable test-vault session left behind.
+  // Touches only the disposable namespace, never normal reminders.
+  const vaultOpen = setupComplete !== null;
+  useEffect(() => {
+    if (vaultOpen) {
+      void cancelStaleDisposableReminders().catch(() => {});
+    }
+  }, [vaultOpen]);
 
   return (
     // Required once anywhere above any react-native-gesture-handler consumer
@@ -216,6 +246,7 @@ export default function RootLayout() {
           feedback (see utils/clipboard.ts) renders on the same overlay,
           above whichever screen or modal is currently on top. */}
       <ToastHost />
+      {vaultMode === "disposable" ? <DisposableVaultBanner /> : null}
     </GestureHandlerRootView>
   );
 }

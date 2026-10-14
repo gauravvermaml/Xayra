@@ -1,6 +1,7 @@
 import { GoogleSignin, isSuccessResponse } from "@react-native-google-signin/google-signin";
 
 import type { Recurrence } from "../../db/schema";
+import { assertNetworkFeatureAllowed } from "../dev/disposableVault";
 import type { ToDo } from "../todos/todoManager";
 import {
   CALENDAR_EVENTS_SCOPE,
@@ -53,6 +54,9 @@ const EVENT_DURATION_MINUTES = 30;
  * scope to the SDK upfront (declaring is not the same as requesting).
  */
 async function ensureCalendarAccess(): Promise<string> {
+  // Every Calendar operation passes through here; a disposable test vault's
+  // to-dos must never reach the user's real calendar.
+  await assertNetworkFeatureAllowed("Google Calendar");
   ensureConfigured();
   return withDeveloperErrorHandling(async () => {
     await GoogleSignin.hasPlayServices();

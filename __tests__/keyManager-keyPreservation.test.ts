@@ -146,12 +146,51 @@ describe("getOrCreateDatabaseKey preserves the stored key on every failure path"
       expectKeyUntouched();
     });
 
-    it("first run + broken SecureStore: keeps the documented ephemeral fallback", async () => {
-      const warn = jest.spyOn(console, "warn").mockImplementation(() => undefined);
+    it("first run + broken SecureStore read: keyUnavailable — never an in-memory key", async () => {
       mockGetItemAsync.mockRejectedValue(nativeError("ERR_KEY_STORE", "keystore broken"));
-      expect(await getOrCreateDatabaseKey({ allowCreate: true })).toBe("09".repeat(32));
+      const err = await rejection(getOrCreateDatabaseKey({ allowCreate: true }));
+      expect(vaultLockReasonFor(err)).toBe("keyUnavailable");
+      expectKeyUntouched();
+    });
+
+    it("first run + key can't be stored: keyUnavailable — the unstored key is never returned", async () => {
+      mockSetItemAsync.mockRejectedValue(nativeError("ERR_WRITE", "An error occurred when writing to key"));
+      const err = await rejection(getOrCreateDatabaseKey({ allowCreate: true }));
+      expect(vaultLockReasonFor(err)).toBe("keyUnavailable");
       expect(mockDeleteItemAsync).not.toHaveBeenCalled();
-      warn.mockRestore();
+    });
+  });
+
+  describe("persistent keys only — no in-memory fallback (production and normal Xayra Dev)", () => {
+    it("with biometrics, a key that can't be stored is never returned", async () => {
+      mockSetItemAsync.mockRejectedValue(nativeError("ERR_ENCRYPT", "Could not encrypt the value"));
+      const err = await rejection(getOrCreateDatabaseKey({ allowCreate: true }));
+      expect(vaultLockReasonFor(err)).toBe("keyUnavailable");
+      expect(mockDeleteItemAsync).not.toHaveBeenCalled();
+    });
+
+    it("an unexpected error while generating the key is a recoverable keyUnavailable, nothing stored", async () => {
+      const Crypto = require("expo-crypto");
+      Crypto.getRandomBytesAsync.mockRejectedValueOnce(new Error("entropy source unavailable"));
+      const err = await rejection(getOrCreateDatabaseKey({ allowCreate: true }));
+      expect(vaultLockReasonFor(err)).toBe("keyUnavailable");
+      expectKeyUntouched();
+    });
+
+    it("an unknown thrown value while storing is still keyUnavailable", async () => {
+      mockSetItemAsync.mockRejectedValue(undefined);
+      const err = await rejection(getOrCreateDatabaseKey({ allowCreate: true }));
+      expect(vaultLockReasonFor(err)).toBe("keyUnavailable");
+    });
+
+    it("keyManager has no in-memory key path and knows nothing about disposable vaults", () => {
+      const source: string = require("fs").readFileSync(
+        require("path").join(__dirname, "..", "services", "crypto", "keyManager.ts"),
+        "utf8"
+      );
+      expect(source).not.toMatch(/ephemeral/i);
+      expect(source).not.toMatch(/getRandomBytes\(/); // the old synchronous in-memory key
+      expect(source).not.toMatch(/from "\.\.\/dev\//);
     });
   });
 });

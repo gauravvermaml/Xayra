@@ -12,6 +12,7 @@ import { Platform } from "react-native";
 
 import { getRawDatabase } from "../../db/client";
 import { getOrCreateDatabaseKey } from "../crypto/keyManager";
+import { assertNetworkFeatureAllowed } from "../dev/disposableVault";
 import { listNoteRevisions, listNotes, mergeMissingNotes, type CloudNoteRecord, type NoteRevision } from "../notes/noteManager";
 import { listAllToDos, mergeMissingToDos, type CloudToDoRecord } from "../todos/todoManager";
 import type { Recurrence } from "../../db/schema";
@@ -304,6 +305,9 @@ function toDriveUser(user: User): DriveUser {
  * but rejected by the Drive API with an insufficient-scope error.
  */
 export async function signInWithGoogle(): Promise<DriveUser> {
+  // The Google session is shared with the normal vault; a disposable test
+  // vault must not change it.
+  await assertNetworkFeatureAllowed("Google sign-in");
   ensureConfigured();
   return withDeveloperErrorHandling(async () => {
     await GoogleSignin.hasPlayServices();
@@ -319,6 +323,7 @@ export async function signInWithGoogle(): Promise<DriveUser> {
 /** Revokes Drive access and clears the local session — deliberately does
  * NOT touch any local notes/database, only the sync connection itself. */
 export async function signOutFromGoogle(): Promise<void> {
+  await assertNetworkFeatureAllowed("Google sign-out");
   ensureConfigured();
   try {
     await GoogleSignin.revokeAccess();
@@ -706,6 +711,8 @@ export type BackupResult = {
  * the restored file, defeating the point of a backup.
  */
 export async function backupToDrive(): Promise<BackupResult> {
+  // A disposable test vault must never merge into the real Drive backup.
+  await assertNetworkFeatureAllowed("Google Drive backup");
   const accessToken = await requireAccessToken();
 
   const [dbFile, keyFile] = await Promise.all([
@@ -876,6 +883,7 @@ export type RestoreResult = {
  * throughout.
  */
 export async function restoreFromDrive(): Promise<RestoreResult> {
+  await assertNetworkFeatureAllowed("Google Drive restore");
   const accessToken = await requireAccessToken();
 
   const dbFile = await findAppDataFile(accessToken, BACKUP_DB_FILENAME);

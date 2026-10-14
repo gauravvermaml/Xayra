@@ -132,30 +132,19 @@ async function readOrCreateKey(biometricAvailable: boolean, allowCreate: boolean
     throw new DatabaseKeyError("missing");
   }
 
-  const randomBytes = await Crypto.getRandomBytesAsync(KEY_BYTE_LENGTH);
-  const newKey = toHex(randomBytes);
+  let newKey: string;
+  try {
+    newKey = toHex(await Crypto.getRandomBytesAsync(KEY_BYTE_LENGTH));
+  } catch (err) {
+    throw new DatabaseKeyError("unavailable", err);
+  }
+  // The key is returned — and so a vault created — only once it is stored.
   try {
     await SecureStore.setItemAsync(DB_ENCRYPTION_KEY_ID, newKey, secureStoreOptions);
   } catch (err) {
     throw toAccessError(err);
   }
   return newKey;
-}
-
-let cachedEphemeralKey: string | null = null;
-
-/**
- * Last-resort key used only on a first run (no vault yet) without enrolled
- * biometrics, when SecureStore itself is unusable (seen on some emulator
- * images with a broken Keystore). Not persisted, so notes
- * won't survive an app restart in that case — but the app keeps working
- * instead of every note insertion failing.
- */
-function ephemeralFallbackKey(): string {
-  if (!cachedEphemeralKey) {
-    cachedEphemeralKey = toHex(Crypto.getRandomBytes(KEY_BYTE_LENGTH));
-  }
-  return cachedEphemeralKey;
 }
 
 /**
@@ -165,7 +154,13 @@ function ephemeralFallbackKey(): string {
  * can only read. Never deletes or replaces a stored key.
  *
  * Throws `AuthenticationFailedError` (cancel/timeout/lockout — retry with a
- * fresh prompt) or `DatabaseKeyError` (key unreadable or missing).
+ * fresh prompt) or `DatabaseKeyError` (key unreadable, missing, or couldn't
+ * be created and stored).
+ *
+ * There is no in-memory fallback: a vault is only ever created with a key
+ * that was successfully persisted, so notes can't silently vanish on the next
+ * restart. (Disposable test vaults have their own, separate key lifecycle —
+ * services/dev/disposableVault.ts — and never come through here.)
  *
  * When biometrics/a passcode are enrolled, every read/write is gated behind
  * a biometric prompt. On emulators and devices with nothing enrolled, the
@@ -175,28 +170,13 @@ function ephemeralFallbackKey(): string {
  */
 export async function getOrCreateDatabaseKey({ allowCreate = false }: { allowCreate?: boolean } = {}): Promise<string> {
   const biometricAvailable = await isBiometricAuthAvailable();
-
-  try {
-    return await readOrCreateKey(biometricAvailable, allowCreate);
-  } catch (err) {
-    if (biometricAvailable || !allowCreate || err instanceof AuthenticationFailedError) {
-      // Authentication failed, or a vault already exists: surface it. An
-      // ephemeral key could never open an existing vault.
-      throw err;
-    }
-    console.warn(
-      "[keyManager] SecureStore unavailable, falling back to an ephemeral in-memory database key:",
-      err
-    );
-    return ephemeralFallbackKey();
-  }
+  return readOrCreateKey(biometricAvailable, allowCreate);
 }
 
 /** Destroys the stored encryption key. Irreversible: without it the
  * encrypted database can never be decrypted again. */
 export async function destroyDatabaseKey(): Promise<void> {
   await SecureStore.deleteItemAsync(DB_ENCRYPTION_KEY_ID);
-  cachedEphemeralKey = null;
 }
 
 /**
@@ -219,5 +199,4 @@ export async function setDatabaseKey(key: string): Promise<void> {
         keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
       };
   await SecureStore.setItemAsync(DB_ENCRYPTION_KEY_ID, key, secureStoreOptions);
-  cachedEphemeralKey = null;
 }

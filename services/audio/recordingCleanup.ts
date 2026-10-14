@@ -1,5 +1,6 @@
 import * as FileSystem from "expo-file-system/legacy";
 
+import { resolveVaultMode } from "../dev/disposableVault";
 import { LEGACY_RECORDINGS_DIR, RECORDINGS_DIR } from "./wav";
 
 export type RecordingCleanupResult = {
@@ -52,6 +53,12 @@ export async function cleanupOrphanRecordings(listLinkedAudioUris: () => Promise
     await FileSystem.deleteAsync(`${RECORDINGS_DIR}${name}`, { idempotent: true }).catch(() => {});
     result.deletedTemporary += 1;
   }
+
+  // The "linked" list comes from whichever vault is open. A disposable test
+  // vault (services/dev/disposableVault.ts) has none of the normal vault's
+  // notes, so trusting it here would delete audio those notes still play.
+  // Awaited, not the sync getter: this must never see "normal" by default.
+  if ((await resolveVaultMode()) === "disposable") return result;
 
   const legacy = (await listFiles(LEGACY_RECORDINGS_DIR)).filter(isWav);
   if (legacy.length === 0) return result;

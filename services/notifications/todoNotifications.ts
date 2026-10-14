@@ -1,6 +1,7 @@
 import { Platform } from "react-native";
 import * as Notifications from "expo-notifications";
 
+import { getResolvedVaultMode } from "../dev/disposableVault";
 import type { ToDo } from "../todos/todoManager";
 // Side-effect import — see notificationHandler.ts's own doc comment for why
 // the one app-wide `setNotificationHandler` call lives there, not here.
@@ -65,8 +66,21 @@ async function ensurePermission(): Promise<boolean> {
  * to-do's date/time/text and calling `scheduleToDoNotification` again just
  * naturally supersedes the old trigger with no separate cancel-then-
  * reschedule dance needed at the call site. */
-function notificationIdFor(todoId: string): string {
-  return `todo-${todoId}`;
+export function notificationIdFor(todoId: string): string {
+  return `${reminderNamespace()}${todoId}`;
+}
+
+/**
+ * Normal-vault reminders use `todo-`; a Xayra Dev disposable test vault
+ * (services/dev/disposableVault.ts) uses its own prefix, so nothing done in
+ * or to a disposable vault can touch a normal reminder. The prefixes don't
+ * overlap: a normal id never starts with the disposable prefix and vice versa.
+ */
+export const NORMAL_REMINDER_PREFIX = "todo-";
+export const DISPOSABLE_REMINDER_PREFIX = "disposable-reminder-";
+
+function reminderNamespace(): string {
+  return getResolvedVaultMode() === "disposable" ? DISPOSABLE_REMINDER_PREFIX : NORMAL_REMINDER_PREFIX;
 }
 
 /** Parses `actionDate` (YYYY-MM-DD) + `notificationTime` (HH:MM) into a
@@ -151,6 +165,33 @@ export async function scheduleToDoNotification(todo: ToDo): Promise<void> {
  * already passed at save time, etc.). */
 export async function cancelToDoNotification(todoId: string): Promise<void> {
   await Notifications.cancelScheduledNotificationAsync(notificationIdFor(todoId)).catch(() => {});
+}
+
+let staleDisposableCleanupStarted = false;
+
+/**
+ * Cancels reminders left by a previous disposable test-vault session (their
+ * to-dos died with that session's in-memory key). Run once when a vault opens,
+ * in either mode, before any to-do exists in it. Only ids carrying the
+ * disposable prefix are ever cancelled — normal reminders are never touched.
+ * Returns how many were cancelled.
+ */
+export async function cancelStaleDisposableReminders(): Promise<number> {
+  // Once per app process: the caller's effect can run again if Android
+  // recreates the activity while the process lives on, and by then this
+  // session's own disposable reminders exist and must be kept.
+  if (staleDisposableCleanupStarted || Platform.OS !== "android") {
+    return 0;
+  }
+  staleDisposableCleanupStarted = true;
+  const scheduled = await Notifications.getAllScheduledNotificationsAsync().catch(() => []);
+  const stale = scheduled
+    .map((request) => request.identifier)
+    .filter((identifier) => identifier.startsWith(DISPOSABLE_REMINDER_PREFIX));
+  for (const identifier of stale) {
+    await Notifications.cancelScheduledNotificationAsync(identifier).catch(() => {});
+  }
+  return stale.length;
 }
 
 /** Call once at app startup (see app/index.tsx's prewarm effect) to request

@@ -28,7 +28,14 @@ jest.mock("expo-file-system/legacy", () => ({
     mockDeleted.push(path);
     mockFs.delete(path);
   }),
+  readAsStringAsync: jest.fn(async (path: string) => mockFileText.get(path) ?? ""),
 }));
+
+// Vault mode (services/dev/disposableVault.ts): production package by default.
+let mockPackage = "com.anonymous.silentconfidant";
+const mockFileText = new Map<string, string>();
+jest.mock("expo-app-signature", () => ({ getRuntimePackageName: () => mockPackage }));
+jest.mock("expo-crypto", () => ({ getRandomBytesAsync: jest.fn() }));
 
 import { cleanupOrphanRecordings } from "../services/audio/recordingCleanup";
 
@@ -99,6 +106,33 @@ describe("cleanupOrphanRecordings", () => {
     const result = await cleanupOrphanRecordings(async () => []);
     expect(result).toEqual({ deletedTemporary: 0, deletedLegacyOrphans: 0, keptLinkedLegacy: 0 });
     expect(mockDeleted).toEqual([]);
+  });
+
+  it("in a Xayra Dev disposable test vault, never deletes old-folder audio (the normal vault's notes link to it)", async () => {
+    const marker = `${DOCS}dev-disposable-vault.json`;
+    seed({
+      [`${CACHE}recordings`]: "dir",
+      [`${CACHE}recordings/note-tmp.wav`]: "file",
+      [`${DOCS}recordings`]: "dir",
+      [`${DOCS}recordings/note-linked-by-normal-vault.wav`]: "file",
+      [marker]: "file",
+    });
+    mockFileText.set(marker, JSON.stringify({ version: 1, package: "com.anonymous.silentconfidant.dev" }));
+    mockPackage = "com.anonymous.silentconfidant.dev";
+    let cleanup!: typeof cleanupOrphanRecordings;
+    jest.isolateModules(() => {
+      cleanup = require("../services/audio/recordingCleanup").cleanupOrphanRecordings;
+    });
+    try {
+      // The disposable vault has no notes, so it would report nothing linked.
+      const result = await cleanup(async () => []);
+      expect(result.deletedLegacyOrphans).toBe(0);
+      expect(mockFs.has(`${DOCS}recordings/note-linked-by-normal-vault.wav`)).toBe(true);
+      expect(mockDeleted).toEqual([`${CACHE}recordings/note-tmp.wav`]);
+    } finally {
+      mockPackage = "com.anonymous.silentconfidant";
+      mockFileText.clear();
+    }
   });
 
   it("is a no-op when neither folder exists", async () => {
