@@ -51,13 +51,34 @@ async function renew(token: string): Promise<string | null> {
   return fresh;
 }
 
-/** No connection (DNS, socket, TLS): a plain message; details in dev logs. */
-async function offline<T>(run: () => Promise<T>): Promise<T> {
+/**
+ * Time limits: a dropped connection mid-transfer was seen to leave the native
+ * call pending forever (backup spinning, never finishing). A transfer that
+ * completes after its limit only leaves an unreferenced file — restores use
+ * only manifests marked verified — so giving up is always safe.
+ */
+const REQUEST_TIMEOUT_MS = 60_000;
+const TRANSFER_TIMEOUT_MS = 5 * 60_000;
+const TIMED_OUT = "Google Drive didn't respond in time. Check your internet connection and try again.";
+
+/** No connection (DNS, socket, TLS) or no response in time: a plain
+ * message; details in dev logs. */
+async function offline<T>(run: () => Promise<T>, timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new DriveSyncError(TIMED_OUT)), timeoutMs);
+  });
   try {
-    return await run();
+    return await Promise.race([run(), expired]);
   } catch (err) {
+    if (err instanceof DriveSyncError) {
+      devTiming("Drive", "request timed out", { timeoutMs });
+      throw err;
+    }
     devTiming("Drive", "request could not be sent", { detail: (err instanceof Error ? err.message : String(err)).slice(0, 300) });
     throw new DriveSyncError(NETWORK_MESSAGE);
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -131,7 +152,8 @@ export async function createFileFromDisk(
           httpMethod: "PATCH",
           uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
           headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/octet-stream" },
-        })
+        }),
+        TRANSFER_TIMEOUT_MS
       );
     let result = await upload(current(token));
     if (result.status === 401) {
@@ -171,7 +193,10 @@ export async function createJsonFile(
 
 export async function downloadToDisk(token: string, id: string, destinationUri: string): Promise<void> {
   const download = (t: string) =>
-    offline(() => FileSystem.downloadAsync(`${FILES}/${id}?alt=media`, destinationUri, { headers: { Authorization: `Bearer ${t}` } }));
+    offline(
+      () => FileSystem.downloadAsync(`${FILES}/${id}?alt=media`, destinationUri, { headers: { Authorization: `Bearer ${t}` } }),
+      TRANSFER_TIMEOUT_MS
+    );
   let result = await download(current(token));
   if (result.status === 401) {
     const fresh = await renew(token);

@@ -271,6 +271,8 @@ export async function updateToDo(id: string, fields: ToDoUpdateFields): Promise<
   }
 
   const db = await getRawDatabase();
+  setClauses.push("updated_at = ?");
+  params.push(Date.now());
   params.push(id);
   await db.execute(`UPDATE todos SET ${setClauses.join(", ")} WHERE id = ?`, params);
   notifyToDosChanged();
@@ -395,6 +397,8 @@ export type CloudToDoRecord = {
   recurrenceInterval: number;
   createdAt: string;
   noteId: string | null;
+  /** Last content change (ms); null/absent for rows from before it existed. */
+  updatedAt?: number | null;
 };
 
 /**
@@ -434,8 +438,8 @@ export async function mergeMissingToDos(cloudToDos: CloudToDoRecord[]): Promise<
       // committing.
       await tx.execute(
         `INSERT OR IGNORE INTO todos
-           (id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           todo.id,
           todo.text,
@@ -447,6 +451,7 @@ export async function mergeMissingToDos(cloudToDos: CloudToDoRecord[]): Promise<
           todo.recurrenceInterval,
           todo.createdAt,
           todo.noteId,
+          todo.updatedAt ?? null,
         ]
       );
     }
@@ -590,8 +595,8 @@ export async function completeToDo(id: string): Promise<void> {
     // completed row is done for good, so its interval no longer means
     // anything; only the freshly-spawned row below carries it forward.
     await tx.execute(
-      "UPDATE todos SET is_completed = 1, recurrence = 'none', recurrence_interval = 1 WHERE id = ?",
-      [id]
+      "UPDATE todos SET is_completed = 1, recurrence = 'none', recurrence_interval = 1, updated_at = ? WHERE id = ?",
+      [Date.now(), id]
     );
 
     if (recurrence !== "none") {

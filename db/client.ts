@@ -288,6 +288,16 @@ async function createCoreTables(db: DB): Promise<void> {
       throw err;
     }
   }
+  // Last content change (see db/schema.ts's `updatedAt` on todos) — nullable,
+  // same idempotent migration pattern.
+  try {
+    await db.execute("ALTER TABLE todos ADD COLUMN updated_at INTEGER;");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/duplicate column/i.test(message)) {
+      throw err;
+    }
+  }
 
   // Generic key/value flag store — see db/schema.ts's `appSettings` doc
   // comment. No column migrations possible/needed for a key/value table.

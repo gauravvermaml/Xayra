@@ -6,7 +6,11 @@
  * result is sealed into a new file. Ported from the legacy delta-backup tests
  * (2026-09-16 data-loss fix), which these guarantees came from.
  */
-jest.mock("../db/client", () => ({ getRawDatabase: jest.fn() }));
+// The live vault: only its to-do edit timestamps are read here.
+const mockLocalStamps: { id: string; updated_at: number | null }[] = [];
+jest.mock("../db/client", () => ({
+  getRawDatabase: async () => ({ execute: async () => ({ rows: mockLocalStamps.map((r) => ({ ...r })) }) }),
+}));
 jest.mock("../services/vault/vaultIdentity", () => ({ getSessionVaultKey: () => "a".repeat(64) }));
 jest.mock("../services/crypto/keyManager", () => ({ isWellFormedDatabaseKey: (k: string) => /^[0-9a-f]{64}$/.test(k) }));
 jest.mock("expo-crypto", () => ({ randomUUID: () => "run" }));
@@ -22,7 +26,7 @@ const mockListAllToDos = jest.fn(() => Promise.resolve([] as unknown[]));
 jest.mock("../services/todos/todoManager", () => ({ listAllToDos: () => mockListAllToDos() }));
 
 type Note = { id: string; content?: string; transcript?: string | null; created_at?: number; updated_at?: number };
-type Todo = { id: string; text?: string; action_date?: string; to_date?: string | null; notification_time?: string; is_completed?: number; recurrence?: string; recurrence_interval?: number; note_id?: string | null };
+type Todo = { id: string; text?: string; action_date?: string; to_date?: string | null; notification_time?: string; is_completed?: number; recurrence?: string; recurrence_interval?: number; note_id?: string | null; updated_at?: number | null };
 function fakeBase(seed: Note[], todoSeed: (string | Todo)[] = []) {
   const notes: Note[] = seed.map((n) => ({ ...n }));
   const todos: Todo[] = todoSeed.map((t) => (typeof t === "string" ? { id: t } : { ...t }));
@@ -40,10 +44,11 @@ function fakeBase(seed: Note[], todoSeed: (string | Todo)[] = []) {
     if (/^SELECT id FROM todos/i.test(q)) return { rows: todos.map((t) => ({ id: t.id })) };
     if (/^SELECT id, text, action_date/i.test(q)) return { rows: todos.map((t) => ({ ...t })) };
     if (/^UPDATE todos SET/i.test(q)) {
-      const [text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, note_id, id] = params as [string, string, string | null, string, number, string, number, string | null, string];
-      Object.assign(todos.find((t) => t.id === id)!, { text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, note_id });
+      const [text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, note_id, updated_at, id] = params as [string, string, string | null, string, number, string, number, string | null, number | null, string];
+      Object.assign(todos.find((t) => t.id === id)!, { text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, note_id, updated_at });
       return { rows: [] };
     }
+    if (/^PRAGMA main\.table_info\(todos\)/i.test(q)) return { rows: [{ name: "id" }, { name: "updated_at" }] };
     if (/^INSERT OR IGNORE INTO notes/i.test(q)) {
       notes.push({ id: params[0] as string });
       return { rows: [] };
@@ -78,6 +83,7 @@ const localNote = (id: string) => ({ id, content: `synthetic ${id}`, transcript:
 
 beforeEach(() => {
   jest.clearAllMocks();
+  mockLocalStamps.length = 0;
   mockListNoteRevisions.mockResolvedValue([]);
   mockListAllToDos.mockResolvedValue([]);
 });
@@ -145,6 +151,31 @@ it("a to-do completed on this phone is carried into the backup; a deleted one is
   expect(counts.updatedTodos).toBe(1);
   expect(base.todo("t1")).toMatchObject({ is_completed: 1 });
   expect(base.todoIds()).toEqual(["t1", "t2"]);
+});
+
+describe("to-dos changed on more than one phone", () => {
+  const backed = { id: "t1", text: "Synthetic task", action_date: "2026-10-15", to_date: null, notification_time: "09:00", is_completed: 1, recurrence: "none", recurrence_interval: 1, note_id: null };
+  const local = { id: "t1", text: "Synthetic task", actionDate: "2026-10-15", toDate: null, notificationTime: "09:00", isCompleted: false, recurrence: "none", recurrenceInterval: 1, createdAt: "x", noteId: null };
+  beforeEach(() => {
+    mockListNotes.mockResolvedValue([]);
+    mockListAllToDos.mockResolvedValue([local]);
+  });
+
+  it("a phone holding an OLDER copy never overwrites another phone's later change", async () => {
+    const base = fakeBase([], [{ ...backed, updated_at: 9_000 }]); // completed elsewhere at 9000
+    mockOpen.mockReturnValue(base);
+    mockLocalStamps.push({ id: "t1", updated_at: null }); // never changed on this phone
+    expect((await mergeLocalIntoBase("/stage", "base.db", KEY, "gen.db", KEY)).updatedTodos).toBe(0);
+    expect(base.todo("t1")).toMatchObject({ is_completed: 1, updated_at: 9_000 });
+  });
+
+  it("a NEWER change on this phone replaces the backed-up copy, with its timestamp", async () => {
+    const base = fakeBase([], [{ ...backed, updated_at: 9_000 }]);
+    mockOpen.mockReturnValue(base);
+    mockLocalStamps.push({ id: "t1", updated_at: 12_000 }); // re-opened here later
+    expect((await mergeLocalIntoBase("/stage", "base.db", KEY, "gen.db", KEY)).updatedTodos).toBe(1);
+    expect(base.todo("t1")).toMatchObject({ is_completed: 0, updated_at: 12_000 });
+  });
 });
 
 it("seals with VACUUM INTO under the same key, or sqlcipher_export into the account's key", async () => {

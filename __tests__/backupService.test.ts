@@ -363,6 +363,25 @@ describe("multiple devices", () => {
     expect(baseManifest).toBeDefined();
   });
 
+  it("a restore while two concurrent heads exist brings back BOTH phones' notes", async () => {
+    const base = await runEncryptedBackup(CTX);
+    mockState.localNotes = ["n1", "n2", "b1"];
+    const fromB = await runEncryptedBackup(CTX);
+    mockState.localNotes = ["n1", "n2", "a1"];
+    const bManifestFile = files("xayra2-gen-").find((f) => f.name.includes(fromB.genId) && f.name.endsWith(".json"))!;
+    const savedVerified = bManifestFile.appProperties.verifiedAt;
+    delete bManifestFile.appProperties.verifiedAt;
+    const fromA = await runEncryptedBackup(CTX);
+    bManifestFile.appProperties.verifiedAt = savedVerified;
+    expect(manifests().find((m) => m.genId === fromA.genId).parents).toEqual([base.genId]);
+    // A new phone restores before either phone merges the two heads.
+    mockState.localNotes = [];
+    mockState.localTodos = [];
+    const restored = await restoreLatestBackup(CTX);
+    expect(mockState.localNotes.sort()).toEqual(["a1", "b1", "n1", "n2"]);
+    expect(restored.restoredNotes).toBe(4);
+  });
+
   it("keyring race: two phones create keyrings at once → both use the oldest; the loser's own file is removed", async () => {
     const drive = require("../services/backup/driveAppData");
     const original = drive.createJsonFile.getMockImplementation();

@@ -138,11 +138,13 @@ export async function mergeLocalIntoBase(
 ): Promise<MergeCounts> {
   const base = openFile(dir, baseName, baseKey, false);
   try {
-    const [localNotes, localToDos, revisions] = await Promise.all([listNotes(), listAllToDos(), listNoteRevisions()]);
+    const [localNotes, localToDos, revisions, stamps] = await Promise.all([listNotes(), listAllToDos(), listNoteRevisions(), readLocalToDoStamps()]);
+    await ensureToDoUpdatedAt(base, "main");
+    const records = localToDos.map((todo) => ({ ...toCloudToDoRecord(todo), updatedAt: stamps.get(todo.id) ?? null }));
     const addedNotes = await insertMissingNoteRows(base, localNotes.map(toCloudNoteRecord));
     const updatedNotes = await updateEditedNoteRows(base, revisions);
-    const addedTodos = await insertMissingToDoRows(base, localToDos.map(toCloudToDoRecord));
-    const updatedTodos = await updateChangedToDoRows(base, localToDos.map(toCloudToDoRecord));
+    const addedTodos = await insertMissingToDoRows(base, records);
+    const updatedTodos = await updateChangedToDoRows(base, records);
     if (outKey === baseKey) {
       await base.execute("VACUUM INTO ?", [`${dir}/${outName}`]);
     } else {
@@ -176,15 +178,17 @@ export async function contentDigest(dir: string, name: string, key: string): Pro
 
 /**
  * Another device's newest backup (a concurrent "head") merged into the base:
- * rows missing from the base are inserted, and a strictly newer note edit
- * replaces the base's text. Nothing is removed.
+ * rows missing from the base are inserted, and a strictly newer note edit or
+ * to-do change replaces the base's copy. Nothing is removed.
  */
 export async function mergeOtherHeadInto(dir: string, baseName: string, baseKey: string, otherName: string, otherKey: string): Promise<void> {
   const base = openFile(dir, baseName, baseKey, false);
   try {
     await base.execute("ATTACH DATABASE ? AS other KEY ?", [`${dir}/${otherName}`, otherKey]);
     const noteCols = "id, content, audio_uri, transcript, status, transcription_model, created_at, updated_at";
-    const todoCols = "id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id";
+    await ensureToDoUpdatedAt(base, "main");
+    await ensureToDoUpdatedAt(base, "other");
+    const todoCols = "id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id, updated_at";
     await base.execute(`INSERT OR IGNORE INTO main.notes (${noteCols}) SELECT ${noteCols} FROM other.notes`);
     await base.execute(
       `UPDATE main.notes SET
@@ -194,6 +198,16 @@ export async function mergeOtherHeadInto(dir: string, baseName: string, baseKey:
        WHERE id IN (SELECT o.id FROM other.notes o JOIN main.notes m ON m.id = o.id WHERE o.updated_at > m.updated_at)`
     );
     await base.execute(`INSERT OR IGNORE INTO main.todos (${todoCols}) SELECT ${todoCols} FROM other.todos`);
+    // A strictly newer to-do change in the other head replaces the base's
+    // copy (same rule as notes); rows without a timestamp keep the base's.
+    await base.execute(
+      `UPDATE main.todos SET
+         (text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, note_id, updated_at) =
+         (SELECT o.text, o.action_date, o.to_date, o.notification_time, o.is_completed, o.recurrence, o.recurrence_interval, o.note_id, o.updated_at
+            FROM other.todos o WHERE o.id = main.todos.id)
+       WHERE id IN (SELECT o.id FROM other.todos o JOIN main.todos m ON m.id = o.id
+                    WHERE o.updated_at IS NOT NULL AND o.updated_at > COALESCE(m.updated_at, 0))`
+    );
     await base.execute("DETACH DATABASE other");
   } finally {
     safeClose(base);
@@ -212,7 +226,8 @@ export async function readBackupRecords(
     const todoRows =
       (
         await db.execute(
-          "SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id FROM todos"
+          `SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id,
+                  ${(await hasColumn(db, "main", "todos", "updated_at")) ? "updated_at" : "NULL AS updated_at"} FROM todos`
         )
       ).rows ?? [];
     return {
@@ -234,6 +249,7 @@ export async function readBackupRecords(
         recurrenceInterval: Number(row.recurrence_interval) || 1,
         createdAt: String(row.created_at),
         noteId: (row.note_id as string | null) ?? null,
+        updatedAt: row.updated_at == null ? null : Number(row.updated_at),
       })),
     };
   } finally {
@@ -374,21 +390,27 @@ async function updateEditedNoteRows(targetDb: DB, local: NoteRevision[]): Promis
 }
 
 /**
- * Carries to-do changes (completed, rescheduled, edited) into a backup copy.
- * To-dos have no edit timestamp, so the backing-up phone's current version
- * replaces the backed-up copy of the same to-do. Deleted to-dos are never
- * removed from a backup (same rule as notes).
+ * Carries to-do changes (completed, rescheduled, edited) into a backup copy:
+ * the phone's version replaces the backed-up copy only when it is newer
+ * (`updated_at`). A phone holding an older copy — another phone changed the
+ * to-do since — no longer overwrites that change. Rows from before the
+ * timestamp existed (null on both sides) keep the earlier rule: the phone's
+ * version. Deleted to-dos are never removed from a backup (same as notes).
  */
 async function updateChangedToDoRows(targetDb: DB, todos: CloudToDoRecord[]): Promise<number> {
   const rows = (
     await targetDb.execute(
-      "SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, note_id FROM todos"
+      "SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, note_id, updated_at FROM todos"
     )
   ).rows ?? [];
   const backedUp = new Map(rows.map((row) => [String(row.id), row]));
   const changed = todos.filter((todo) => {
     const row = backedUp.get(todo.id);
     if (!row) return false;
+    const backedUpAt = row.updated_at == null ? null : Number(row.updated_at);
+    const localAt = todo.updatedAt ?? null;
+    const newer = localAt === null && backedUpAt === null ? true : (localAt ?? 0) > (backedUpAt ?? 0);
+    if (!newer) return false;
     return (
       row.text !== todo.text ||
       row.action_date !== todo.actionDate ||
@@ -404,13 +426,32 @@ async function updateChangedToDoRows(targetDb: DB, todos: CloudToDoRecord[]): Pr
   await targetDb.transaction(async (tx) => {
     for (const todo of changed) {
       await tx.execute(
-        `UPDATE todos SET text = ?, action_date = ?, to_date = ?, notification_time = ?, is_completed = ?, recurrence = ?, recurrence_interval = ?, note_id = ?
+        `UPDATE todos SET text = ?, action_date = ?, to_date = ?, notification_time = ?, is_completed = ?, recurrence = ?, recurrence_interval = ?, note_id = ?, updated_at = ?
          WHERE id = ?`,
-        [todo.text, todo.actionDate, todo.toDate, todo.notificationTime, todo.isCompleted ? 1 : 0, todo.recurrence, todo.recurrenceInterval, todo.noteId, todo.id]
+        [todo.text, todo.actionDate, todo.toDate, todo.notificationTime, todo.isCompleted ? 1 : 0, todo.recurrence, todo.recurrenceInterval, todo.noteId, todo.updatedAt ?? null, todo.id]
       );
     }
   });
   return changed.length;
+}
+
+/** Each local to-do's last content change (null for rows from before it). */
+async function readLocalToDoStamps(): Promise<Map<string, number | null>> {
+  const rows = (await (await getRawDatabase()).execute("SELECT id, updated_at FROM todos")).rows ?? [];
+  return new Map(rows.map((row) => [String(row.id), row.updated_at == null ? null : Number(row.updated_at)]));
+}
+
+async function hasColumn(db: DB, schema: string, table: string, column: string): Promise<boolean> {
+  const rows = (await db.execute(`PRAGMA ${schema}.table_info(${table})`)).rows ?? [];
+  return rows.some((row) => row.name === column);
+}
+
+/** Generations made before to-dos had `updated_at` gain the column (null)
+ * before a merge, so every copy compares the same way. */
+async function ensureToDoUpdatedAt(db: DB, schema: "main" | "other"): Promise<void> {
+  if (!(await hasColumn(db, schema, "todos", "updated_at"))) {
+    await db.execute(`ALTER TABLE ${schema}.todos ADD COLUMN updated_at INTEGER`);
+  }
 }
 
 async function insertMissingToDoRows(targetDb: DB, todos: CloudToDoRecord[]): Promise<number> {
@@ -421,8 +462,8 @@ async function insertMissingToDoRows(targetDb: DB, todos: CloudToDoRecord[]): Pr
     for (const todo of missing) {
       await tx.execute(
         `INSERT OR IGNORE INTO todos
-           (id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, created_at, note_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           todo.id,
           todo.text,
@@ -434,6 +475,7 @@ async function insertMissingToDoRows(targetDb: DB, todos: CloudToDoRecord[]): Pr
           todo.recurrenceInterval,
           todo.createdAt,
           todo.noteId,
+          todo.updatedAt ?? null,
         ]
       );
     }

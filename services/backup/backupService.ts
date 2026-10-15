@@ -1,8 +1,8 @@
 import * as Crypto from "expo-crypto";
 import * as FileSystem from "expo-file-system/legacy";
 
-import { mergeMissingNotes } from "../notes/noteManager";
-import { mergeMissingToDos } from "../todos/todoManager";
+import { mergeMissingNotes, type CloudNoteRecord } from "../notes/noteManager";
+import { mergeMissingToDos, type CloudToDoRecord } from "../todos/todoManager";
 import { DriveSyncError, NoBackupFoundError } from "../sync/driveErrors";
 import { devTiming } from "../ai/perf";
 import { devFailAt, devPauseAfter, devWrongKeyAt } from "../dev/devFaults";
@@ -813,8 +813,8 @@ async function restoreRecords(dir: string, name: string, key: string | null): Pr
 }
 
 /**
- * Restores the newest verified generation (merge: adds what's missing, never
- * removes or overwrites). Standard generations need only the account; Extra
+ * Restores every verified head (normally one; several after concurrent
+ * backups) — merge: adds what's missing, never removes or overwrites. Standard generations need only the account; Extra
  * Privacy generations need this phone's key (fingerprint) or the recovery
  * code — Google access alone is refused. Legacy plaintext backups are read
  * only when the account has no encrypted one. Success only after every
@@ -824,28 +824,51 @@ export async function restoreLatestBackup(ctx: BackupContext, options: { recover
   await assertAccountAllowed(ctx.accountId);
   const { token } = ctx;
   const outcome = await withStaging(async (dir): Promise<RestoreOutcome> => {
-    const [newest] = heads(await listVerifiedGenerations(token));
+    // Every head, not just the newest: after two phones backed up at the
+    // same time, each head holds notes the other doesn't (until a later
+    // backup merges them), and restoring only one would miss the other's.
+    const headGens = heads(await listVerifiedGenerations(token)).slice(0, 4);
+    const [newest] = headGens;
     if (!newest) return restoreLegacy(token, dir);
     const src: KeySource = { token, extra: null, unlocked: [] };
     let joined: BackupKey | null = null;
-    const isStandard = (await loadStandardKeyrings(token)).some((r) => r.keyring.keyId === newest.manifest.keyId);
-    if (!isStandard) {
+    const standardIds = new Set((await loadStandardKeyrings(token)).map((r) => r.keyring.keyId));
+    const isStandard = standardIds.has(newest.manifest.keyId);
+    for (const keyId of new Set(headGens.map((g) => g.manifest.keyId).filter((id) => !standardIds.has(id)))) {
       const local = await readExtraKey().catch(() => null);
-      if (local?.keyId === newest.manifest.keyId) {
+      if (local?.keyId === keyId) {
         src.extra = local;
       } else if (options.recoveryCode) {
-        const key = (await unwrapWithCode(token, options.recoveryCode, dir, newest.manifest.keyId)).find((k) => k.keyId === newest.manifest.keyId);
+        const key = (await unwrapWithCode(token, options.recoveryCode, dir, keyId)).find((k) => k.keyId === keyId);
         if (!key) throw new RecoveryCodeIncorrectError();
         src.unlocked.push(key);
-        joined = key;
+        if (keyId === newest.manifest.keyId) joined = key;
       } else {
         throw new RecoveryCodeRequiredError();
       }
     }
-    const manifest = await step("restoreVerify", () => verifyGenerationOnDrive(src, newest.manifestFileId, dir));
-    const key = toRawSqlcipherKey((await keyById(src, manifest.keyId)).key);
-    const result = await step("restoreMerge", () => restoreRecords(dir, "verify.db", key));
-    if (!isSuperset((await db.readLocalIds()).noteIds, result.noteIds)) {
+    // Each head verified on its own; their records combined like a backup
+    // merge would (a note from the newest head first; a to-do's newest change).
+    const notes = new Map<string, CloudNoteRecord>();
+    const todos = new Map<string, CloudToDoRecord>();
+    let backupDate = "";
+    for (const head of headGens) {
+      const manifest = await step("restoreVerify", () => verifyGenerationOnDrive(src, head.manifestFileId, dir));
+      const key = toRawSqlcipherKey((await keyById(src, manifest.keyId)).key);
+      const records = await db.readBackupRecords(dir, "verify.db", key);
+      for (const note of records.notes) if (!notes.has(note.id)) notes.set(note.id, note);
+      for (const todo of records.todos) {
+        const held = todos.get(todo.id);
+        if (!held || (todo.updatedAt ?? 0) > (held.updatedAt ?? 0)) todos.set(todo.id, todo);
+      }
+      if (manifest.createdAt > backupDate) backupDate = manifest.createdAt;
+    }
+    const { restoredNotes, restoredTodos } = await step("restoreMerge", async () => ({
+      restoredNotes: await mergeMissingNotes([...notes.values()]),
+      restoredTodos: await mergeMissingToDos([...todos.values()]),
+    }));
+    const backedUpNoteIds = [...notes.keys()];
+    if (!isSuperset((await db.readLocalIds()).noteIds, backedUpNoteIds)) {
       throw new DriveSyncError("Some notes from the backup couldn't be restored. Nothing else was changed.");
     }
     if (joined && options.recoveryCode) {
@@ -853,9 +876,9 @@ export async function restoreLatestBackup(ctx: BackupContext, options: { recover
     }
     return {
       source: "encrypted",
-      backupDate: manifest.createdAt,
-      restoredNotes: result.restoredNotes,
-      restoredTodos: result.restoredTodos,
+      backupDate,
+      restoredNotes,
+      restoredTodos,
       mode: isStandard ? "standard" : "extra",
     };
   });

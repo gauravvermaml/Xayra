@@ -103,6 +103,12 @@ Reported: light vertical drags in the Record/Ask tray at 50% sometimes moved the
 ### Restore doesn't update an older local copy of an edited note
 Backup now carries edits (newer-edit-wins), but `restoreFromDrive` only INSERTs missing notes — a device that already holds an older copy keeps it. Would need a restore-side newer-wins update plus re-embedding.
 
+### Post-release: safe backup housekeeping (Drive leftovers)
+Failed or interrupted backups and Extra Privacy activations leave unreferenced files in the hidden Drive folder: unverified generations, a generation database with no manifest, unused `xayra2-xkeyring-*` files (four on the test account) and device entries under abandoned keys. They are small, never used for a restore (only manifests marked verified are), and never counted. Reclassified as post-release on 2026-10-16. A cleanup must never touch a verified generation, the active key wrapper, a device entry in use, or anything another phone might be uploading right now (only remove leftovers older than a safe age), and must be explicit or very conservative.
+
+### To-dos changed before edit timestamps existed (known limitation)
+To-dos gained `updated_at` (release stabilisation, 2026-10-16); backup merges use it so the newer change wins. Rows changed before that update have no timestamp: when two phones' copies of such a to-do differ, the merge can't tell which is newer — a backup keeps the backing-up phone's copy, and merging or restoring concurrent backups keeps the newest backup's copy. Any change made after the update stamps the row and resolves it. Restore still only inserts missing to-dos (an older local copy isn't updated), the same as notes above.
+
 ### Explicit storage cleanup for legacy linked audio
 Historical notes saved before text-only storage may still link to WAVs in `documentDirectory/recordings/` (kept on purpose). Offer an explicit, user-confirmed "remove old recordings" option later.
 
