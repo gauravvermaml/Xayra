@@ -35,7 +35,9 @@ import {
   type SyncStatus,
 } from "../services/sync/driveSync";
 import { showToast } from "../components/Toast";
-import { ExtraPrivacySetup, RecoveryCodePrompt } from "../components/ExtraPrivacyFlows";
+import { ExtraPrivacySetup, RecoveryCodePrompt, showRestoreResult } from "../components/ExtraPrivacyFlows";
+import { restoreWithRecoveryCode } from "../services/sync/codeRestore";
+import { userFacingMessage } from "../services/errors/userMessage";
 
 /**
  * Speech-to-text engine and AI chat model management used to live here too
@@ -74,7 +76,7 @@ export default function SettingsScreen() {
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [notesStoredLocally, setNotesStoredLocally] = useState<number | null>(null);
-  const [protection, setProtection] = useState<BackupProtectionStatus>({ account: null, local: { mode: "standard" } });
+  const [protection, setProtection] = useState<BackupProtectionStatus>({ account: null, local: { mode: "standard" }, googleOnlyBackups: null });
   const [setupMode, setSetupMode] = useState<"activate" | "replace" | null>(null);
   const [codePrompt, setCodePrompt] = useState<CodePrompt>(null);
 
@@ -106,7 +108,7 @@ export default function SettingsScreen() {
       await signInWithGoogle();
       await refreshStatus();
     } catch (err) {
-      Alert.alert("Connection Failed", err instanceof Error ? err.message : "Failed to connect to Google Drive.");
+      Alert.alert("Connection Failed", userFacingMessage(err, "Failed to connect to Google Drive."));
     } finally {
       setBusyAction(null);
     }
@@ -125,7 +127,7 @@ export default function SettingsScreen() {
           onPress: () => {
             void switchBackupsToSignedInAccount()
               .then(retry)
-              .catch((err: unknown) => Alert.alert("Couldn't switch accounts", err instanceof Error ? err.message : "Nothing was changed."));
+              .catch((err: unknown) => Alert.alert("Couldn't switch accounts", userFacingMessage(err, "Nothing was changed.")));
           },
         },
       ]
@@ -152,7 +154,7 @@ export default function SettingsScreen() {
       }
       Alert.alert(
         "Backup didn't finish",
-        `${err instanceof Error ? err.message : "Couldn't back up to Google Drive."} Your previous backup is unchanged.`
+        `${userFacingMessage(err, "Couldn't back up to Google Drive.")} Your previous backup is unchanged.`
       );
     } finally {
       setBusyAction(null);
@@ -166,9 +168,9 @@ export default function SettingsScreen() {
   const handleRestoreNotes = useCallback(async () => {
     setBusyAction("restore");
     try {
-      const { message } = await restoreFromDrive();
+      const result = await restoreFromDrive();
       await refreshStatus();
-      showToast(message);
+      showRestoreResult(result);
     } catch (err) {
       if (err instanceof BackupAccountMismatchError) {
         offerAccountSwitch(() => void handleRestoreNotesRef.current?.());
@@ -178,7 +180,7 @@ export default function SettingsScreen() {
         setCodePrompt({ purpose: "restore", busy: false, error: null });
         return;
       }
-      Alert.alert("Restore didn't finish", err instanceof Error ? err.message : "Couldn't restore notes from Google Drive.");
+      Alert.alert("Restore didn't finish", userFacingMessage(err, "Couldn't restore notes from Google Drive."));
     } finally {
       setBusyAction(null);
     }
@@ -194,19 +196,24 @@ export default function SettingsScreen() {
       setCodePrompt((p) => (p ? { ...p, busy: true, error: null } : p));
       try {
         if (purpose === "restore") {
-          const { message } = await restoreFromDrive({ recoveryCode: code });
-          showToast(message);
+          const outcome = await restoreWithRecoveryCode(code);
+          if (outcome.kind !== "restored") {
+            setCodePrompt((p) => (p ? { ...p, busy: false, error: outcome.message } : p));
+            return;
+          }
+          setCodePrompt(null);
+          showRestoreResult(outcome.result);
         } else {
           await enterExtraPrivacyCode(code);
-          showToast("This phone can back up with Extra Privacy now.");
+          setCodePrompt(null);
+          Alert.alert("Extra Privacy is on for this phone", "This phone can back up with Extra Privacy now. Your fingerprint is all it needs from here on.");
         }
-        setCodePrompt(null);
         await refreshStatus();
       } catch (err) {
         const message =
           err instanceof RecoveryCodeIncorrectError
             ? err.message
-            : `${err instanceof Error ? err.message : "Something went wrong."} Nothing was changed.`;
+            : `${userFacingMessage(err, "Something went wrong.")} Nothing was changed.`;
         setCodePrompt((p) => (p ? { ...p, busy: false, error: message } : p));
       }
     },
@@ -232,7 +239,7 @@ export default function SettingsScreen() {
                 )
               )
               .catch((err: unknown) =>
-                Alert.alert("Nothing was removed", err instanceof Error ? err.message : "Couldn't remove older backups.")
+                Alert.alert("Nothing was removed", userFacingMessage(err, "Couldn't remove older backups."))
               )
               .finally(() => {
                 setBusyAction(null);
@@ -259,7 +266,7 @@ export default function SettingsScreen() {
               .catch((err: unknown) =>
                 err instanceof ProtectionChangeUnfinishedError
                   ? Alert.alert("Standard Protection is on", err.message)
-                  : Alert.alert("Nothing was switched", `${err instanceof Error ? err.message : "Couldn't switch."} Extra Privacy is still on.`)
+                  : Alert.alert("Nothing was switched", `${userFacingMessage(err, "Couldn't switch.")} Extra Privacy is still on.`)
               )
               .finally(() => {
                 setBusyAction(null);
@@ -285,7 +292,7 @@ export default function SettingsScreen() {
             void signOutFromGoogle()
               .then(refreshStatus)
               .catch((err) => {
-                Alert.alert("Error", err instanceof Error ? err.message : "Failed to disconnect.");
+                Alert.alert("Error", userFacingMessage(err, "Failed to disconnect."));
               })
               .finally(() => setBusyAction(null));
           },
@@ -319,7 +326,7 @@ export default function SettingsScreen() {
                 showToast("All local notes deleted.");
               })
               .catch((err) => {
-                Alert.alert("Error", err instanceof Error ? err.message : "Failed to delete local notes.");
+                Alert.alert("Error", userFacingMessage(err, "Failed to delete local notes."));
               })
               .finally(() => setBusyAction(null));
           },
@@ -499,13 +506,15 @@ export default function SettingsScreen() {
                     >
                       <Text style={styles.secondaryButtonText}>Replace recovery code</Text>
                     </Pressable>
-                    <Pressable
-                      onPress={handleRemoveOlderBackups}
-                      disabled={busyAction !== null}
-                      style={({ pressed }) => [styles.secondaryButton, styles.privacyButtonGap, pressed && styles.buttonPressed]}
-                    >
-                      <Text style={styles.secondaryButtonText}>Remove older Google-only backups</Text>
-                    </Pressable>
+                    {protection.googleOnlyBackups !== false ? (
+                      <Pressable
+                        onPress={handleRemoveOlderBackups}
+                        disabled={busyAction !== null}
+                        style={({ pressed }) => [styles.secondaryButton, styles.privacyButtonGap, pressed && styles.buttonPressed]}
+                      >
+                        <Text style={styles.secondaryButtonText}>Remove older Google-only backups</Text>
+                      </Pressable>
+                    ) : null}
                     <Pressable
                       onPress={handleSwitchToStandard}
                       disabled={busyAction !== null}

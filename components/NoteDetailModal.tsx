@@ -8,6 +8,7 @@ import { useKeyboardOverlap } from "../hooks/useKeyboardOverlap";
 import { useAudioPlayerControls } from "../services/audio/player";
 import { deleteNote, getNoteById, updateNoteText, type Note } from "../services/notes/noteManager";
 import { copyTextWithFeedback } from "../utils/clipboard";
+import { userFacingMessage } from "../services/errors/userMessage";
 
 /** Not in the shared theme: a backdrop scrim is a one-off for modals, not a
  * reusable design-system token. */
@@ -70,7 +71,7 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted, onUpdated
       })
       .catch((err) => {
         if (cancelled) return;
-        setLoadError(err instanceof Error ? err.message : "Failed to load note.");
+        setLoadError(userFacingMessage(err, "Failed to load note."));
       })
       .finally(() => {
         if (!cancelled) setIsLoading(false);
@@ -99,7 +100,7 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted, onUpdated
         onUpdated?.(targetId);
       })
       .catch((err) => {
-        Alert.alert("Couldn't save", err instanceof Error ? err.message : "Failed to save the note.");
+        Alert.alert("Couldn't save", userFacingMessage(err, "Failed to save the note."));
       })
       .finally(() => setIsSaving(false));
   };
@@ -126,7 +127,7 @@ export function NoteDetailModal({ noteId, visible, onClose, onDeleted, onUpdated
               .catch((err) => {
                 Alert.alert(
                   "Delete Error",
-                  err instanceof Error ? err.message : "Failed to delete note."
+                  userFacingMessage(err, "Failed to delete note.")
                 );
               });
           },

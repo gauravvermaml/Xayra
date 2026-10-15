@@ -2,14 +2,10 @@
   "productionBlocked": true,
   "reason": "Encrypted Google Drive backup (Standard Protection and optional Extra Privacy) is implemented and emulator-tested; the remaining release work below must be finished first. Local SQLCipher encryption ships only together with a working, independently tested encrypted backup-and-restore path.",
   "blockers": [
-    "First launch: the notification-permission dialog cancels the first fingerprint prompt (key creation lands on 'Xayra is locked')",
-    "Raw errors on user-facing screens: recovery sign-in shows developer diagnostics (package name, SHA-1, client ID), and network failures show raw text (e.g. 'fetch failed: java.net.UnknownHostException…'); both must become clear, user-friendly messages",
-    "Google Calendar consent loop fixed: Drive permission must be requested independently of Calendar permission",
+    "Confirm on a physical device the release-batch-1 fixes verified on the emulator: first-launch notification prompt no longer cancels the fingerprint, plain error messages, Drive/Calendar consent requested separately (no loop), 'Recover my notes' reachable in the production package for a missing key",
     "Real concurrent multi-device backup safety verified (two devices backing up at the same time)",
-    "Keyboard/input sheet hidden behind the keyboard after a send: checked on a physical device",
+    "Keyboard/input: input tray hidden behind the keyboard after a send (fixed on the emulator) and consecutive typed notes — checked on a physical device",
     "Privacy policy, Play listing, in-app wording and Data safety answers corrected for the encrypted release",
-    "Safe backup housekeeping: leftover Drive files from failed Extra Privacy activations (unused xkeyrings — currently three on the test account — device entries, unverified generations) removed by a cleanup that can never touch a verified backup, the active key wrapper or a device entry in use",
-    "UX: after a recovery code is replaced, make clear that the old code no longer opens the Google Drive backups but may still open local recovery copies on other phones until each enters the new code",
-    "UX: after older backups are removed, hide or disable 'Remove older Google-only backups' when nothing remains to remove"
+    "Safe backup housekeeping: leftover Drive files from failed Extra Privacy activations (unused xkeyrings — currently three on the test account — device entries, unverified generations) removed by a cleanup that can never touch a verified backup, the active key wrapper or a device entry in use"
   ]
 }

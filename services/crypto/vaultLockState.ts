@@ -38,6 +38,18 @@ export function vaultLockReasonFor(err: unknown): VaultLockReason {
   return "databaseError";
 }
 
+/**
+ * Whether "Recover my notes" is offered: only when a vault exists and its key
+ * is genuinely gone (missing, or permanently invalidated by a fingerprint
+ * change — SecureStore reports both as no key). Never for a cancelled or
+ * locked-out prompt or a storage error: those keep the ordinary Unlock retry,
+ * so recovery can't stand in for normal authentication. Recovery itself only
+ * installs a key that has opened a copy of this vault; it never mints one.
+ */
+export function canRecoverOriginalVault(reason: VaultLockReason | null): boolean {
+  return reason === "keyMissing";
+}
+
 /** Outcomes the user caused or can wait out — not faults worth an error log. */
 export function isExpectedLockReason(reason: VaultLockReason): boolean {
   return (

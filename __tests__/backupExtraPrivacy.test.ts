@@ -208,6 +208,7 @@ jest.mock("expo-file-system/legacy", () => ({
 import {
   activateExtraPrivacy,
   collectRecoveryKeyCandidates,
+  hasGoogleOnlyBackups,
   joinWithRecoveryCode,
   replaceRecoveryCode,
   restoreExtraKeyFromEscrow,
@@ -352,6 +353,18 @@ describe("restoring Extra Privacy backups", () => {
     expect(mockProtection.local).toMatchObject({ mode: "extra", state: "active" });
   });
 
+  it("a phone with its own notes: a wrong code or a refused restore leaves them exactly as they were; the right code only adds", async () => {
+    await standardThenExtra();
+    newPhone("44444444-4444-4444-4444-444444444444", "d".repeat(64));
+    mockState.localNotes = ["mine-1", "mine-2"];
+    await expect(restoreLatestBackup(CTX)).rejects.toMatchObject({ name: "RecoveryCodeRequiredError" });
+    await expect(restoreLatestBackup(CTX, { recoveryCode: NEW_CODE })).rejects.toMatchObject({ name: "RecoveryCodeIncorrectError" });
+    expect(mockState.localNotes).toEqual(["mine-1", "mine-2"]);
+    await restoreLatestBackup(CTX, { recoveryCode: CODE });
+    expect(mockState.localNotes).toEqual(expect.arrayContaining(["mine-1", "mine-2"]));
+    expect(mockState.localNotes.length).toBeGreaterThan(2);
+  });
+
   it("a trusted phone (holding the key behind its fingerprint) restores without the code", async () => {
     await standardThenExtra();
     mockState.localNotes = [];
@@ -433,8 +446,10 @@ describe("retiring older Google-only backups", () => {
     mockDrive.set("legacyDb", { id: "legacyDb", name: "remi_backup.db", content: JSON.stringify({ kind: "db", key: null, notes: ["old"], todos: [] }), createdTime: "2000", appProperties: {} });
     mockDrive.set("legacyKey", { id: "legacyKey", name: "remi_backup.key", content: "e".repeat(64), createdTime: "2000", appProperties: {} });
     await standardThenExtra();
+    expect(await hasGoogleOnlyBackups(CTX.token)).toBe(true);
     const result = await retireStandardBackups(CTX, { includeLegacy: true });
     expect(result).toMatchObject({ generations: 1, keyrings: 1, legacyFiles: 2 });
+    expect(await hasGoogleOnlyBackups(CTX.token)).toBe(false); // nothing left: the option is hidden
     expect(files("xayra2-keyring-")).toHaveLength(0);
     expect(files("remi_backup")).toHaveLength(0);
     expect(verified().map((m) => m.keyId)).toEqual([extraKeyId()]);

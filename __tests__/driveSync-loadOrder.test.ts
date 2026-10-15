@@ -46,7 +46,7 @@ describe("driveSync load order", () => {
 
   it("calendarSync takes DriveSyncError from driveErrors, not from the cycle", () => {
     const source = fs.readFileSync(path.join(__dirname, "..", "services", "sync", "calendarSync.ts"), "utf8");
-    expect(source).toMatch(/import \{ DriveSyncError \} from "\.\/driveErrors";/);
+    expect(source).toMatch(/import \{[^}]*DriveSyncError[^}]*\} from "\.\/driveErrors";/);
     expect(source).not.toMatch(/DriveSyncError[^;]*from "\.\/driveSync"/);
   });
 });

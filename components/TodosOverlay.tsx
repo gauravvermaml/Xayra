@@ -17,6 +17,7 @@ import { useCalendarViewStore } from "../hooks/useCalendarViewStore";
 import { useToDos } from "../hooks/useToDos";
 import { matchesKeywordSearch } from "../services/search/keywordMatch";
 import type { ToDo } from "../services/todos/todoManager";
+import { userFacingMessage } from "../services/errors/userMessage";
 
 /** How long the checked-off row stays gone-but-not-yet-really-completed
  * before its "Undo" window expires and the DB write actually happens. */
@@ -200,7 +201,7 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
           .catch((err) => {
             Alert.alert(
               wasLinked ? "Couldn't remove from Calendar" : "Couldn't send to Calendar",
-              err instanceof Error ? err.message : String(err)
+              userFacingMessage(err, "Something went wrong. Try again.")
             );
           });
       };

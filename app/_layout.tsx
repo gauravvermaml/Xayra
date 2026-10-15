@@ -8,7 +8,7 @@ import * as SplashScreen from "expo-splash-screen";
 import { AppSplashScreen, releaseNativeSplash } from "../components/AppSplashScreen";
 import { DisposableVaultBanner } from "../components/DisposableVaultBanner";
 import { RecoverNotesFlow } from "../components/RecoverNotesFlow";
-import { isRunningDevPackage, resolveVaultMode, type VaultMode } from "../services/dev/disposableVault";
+import { resolveVaultMode, type VaultMode } from "../services/dev/disposableVault";
 import { clearRecoveryRecord, readRecoveryPhase } from "../services/recovery/originalVaultRecovery";
 import { cancelStaleDisposableReminders } from "../services/notifications/todoNotifications";
 import { OnboardingSetupScreen } from "../components/OnboardingSetupScreen";
@@ -16,7 +16,9 @@ import { showToast, ToastHost } from "../components/Toast";
 import { releaseLocalLlamaOnBackground } from "../services/ai/localLlama";
 import { releaseWhisperContext } from "../services/ai/localWhisper";
 import { initModelDownloads } from "../services/ai/modelDownloadManager";
+import { allowDownloadNotificationPermissionPrompt } from "../services/notifications/downloadNotification";
 import {
+  canRecoverOriginalVault,
   isExpectedLockReason,
   singleFlight,
   vaultLockReasonFor,
@@ -209,10 +211,10 @@ export default function RootLayout() {
     }
   }, [setupComplete, lockReason]);
 
-  // Original-vault recovery (Xayra Dev only, key-missing only). It ends by
+  // Original-vault recovery (key-missing only, every build). It ends by
   // handing back to the normal unlock — the only thing that proves recovery.
   const [recovering, setRecovering] = useState(false);
-  const recoveryAvailable = lockReason === "keyMissing" && isRunningDevPackage();
+  const recoveryAvailable = canRecoverOriginalVault(lockReason);
   useEffect(() => {
     if (!recoveryAvailable) setRecovering(false);
   }, [recoveryAvailable]);
@@ -239,6 +241,9 @@ export default function RootLayout() {
   useEffect(() => {
     if (vaultOpen) {
       void cancelStaleDisposableReminders().catch(() => {});
+      // Only now may the download notification ask for permission: earlier,
+      // its dialog would cancel the vault's fingerprint prompt.
+      allowDownloadNotificationPermissionPrompt();
     }
   }, [vaultOpen]);
 

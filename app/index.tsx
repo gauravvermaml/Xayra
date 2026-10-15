@@ -92,6 +92,7 @@ import {
 import { wordCount } from "../services/logging/redact";
 import { getGreetingFirstName } from "../services/sync/driveSync";
 import { getTimeBasedGreeting } from "../utils/greeting";
+import { userFacingMessage } from "../services/errors/userMessage";
 
 /** Screen goes idle-with-mic-open for this long with zero detected speech
  * before Handsfree auto-disengages — a safety/battery guard, not a UX
@@ -533,7 +534,10 @@ export default function HomeScreen() {
           ? await createVoiceNote(audioUri, text, whisperModelId)
           : await createTextNote(text);
         showToast("Saved thought to memory");
-        sheetRef.current?.snapToIndex(0);
+        // Back to the resting peek — unless the keyboard is open (typed notes
+        // keep it up for the next one): the peek sits behind the keyboard, so
+        // snapping there hid the input and its Send button.
+        if (!Keyboard.isVisible()) sheetRef.current?.snapToIndex(0);
         savedNote = true;
         // So the Record-mode drawer list shows the new note immediately,
         // not just after the next screen-focus refresh.
@@ -1013,13 +1017,13 @@ export default function HomeScreen() {
         try {
           await finishUtteranceRef.current(audioUri, mode, undefined, { onRouted: release, voiceAsk });
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
+          const message = userFacingMessage(err, "Something went wrong. Try again.");
           setError(message);
           Alert.alert("Recording Error", message);
         }
       },
       onChange: setManualUtterance,
-      onError: (err) => setError(err instanceof Error ? err.message : "Recording failed."),
+      onError: (err) => setError(userFacingMessage(err, "Recording failed.")),
       // VOICE ASK: the moment the recording ends, the tray rises (once) and
       // its answer bubble appears with "Got it…" — the single surface for
       // this Ask's whole wait, transcription included. Record is untouched.
@@ -1099,7 +1103,7 @@ export default function HomeScreen() {
         await manualController.start(mode);
         asrRouter.startListening();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Recording failed.");
+        setError(userFacingMessage(err, "Recording failed."));
       }
     },
     [manualController]
@@ -1263,7 +1267,7 @@ export default function HomeScreen() {
       return;
     }
     void activeMode.toggle().catch((err) => {
-      Alert.alert("Handsfree Error", err instanceof Error ? err.message : String(err));
+      Alert.alert("Handsfree Error", userFacingMessage(err, "Something went wrong. Try again."));
     });
   }, [activeMode, recorder.isRecording, recorder.isTransitioning]);
 
@@ -1332,7 +1336,7 @@ export default function HomeScreen() {
           void deleteNote(noteId)
             .then(() => setNotes((prev) => prev.filter((note) => note.id !== noteId)))
             .catch((err) => {
-              const message = err instanceof Error ? err.message : "Failed to delete note.";
+              const message = userFacingMessage(err, "Failed to delete note.");
               Alert.alert("Delete Error", message);
             });
         },
@@ -1380,7 +1384,7 @@ export default function HomeScreen() {
       void routeFreeformInput(text, null, null, inputMode, job)
         .catch((err) => {
           if (job.cancelled) return;
-          const message = err instanceof Error ? err.message : "Something went wrong.";
+          const message = userFacingMessage(err, "Something went wrong.");
           setError(message);
           Alert.alert("Failed", message);
         })

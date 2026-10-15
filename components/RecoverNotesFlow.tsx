@@ -11,10 +11,14 @@ import {
 } from "../services/recovery/originalVaultRecovery";
 import { RecoveryCodePrompt } from "./ExtraPrivacyFlows";
 import { fetchRecoveryKeyCandidates, restoreExtraPrivacyKeyAfterRecovery, signInForRecovery, switchRecoveryAccount, type DriveUser } from "../services/sync/driveSync";
+import { userFacingMessage } from "../services/errors/userMessage";
 
 /**
- * "Recover my notes" (Xayra Dev, Phase 2) — shown from the key-missing
- * screen. Signs in to Google, fetches the backup key into memory, proves it
+ * "Recover my notes" — shown from the key-missing screen (every build; see
+ * `canRecoverOriginalVault`). With Standard Protection it signs in to Google
+ * and reads this phone's recovery entry; with Extra Privacy the recovery code
+ * opens this phone's local escrow (offline) or its protected entry in Drive.
+ * Either way it fetches the candidate key into memory, proves it
  * opens a COPY of this phone's vault (services/recovery/originalVaultRecovery.ts),
  * and only after the user confirms, saves it behind the fingerprint. It then
  * hands back to the normal unlock path (`onKeyInstalled`), which is what
@@ -64,7 +68,7 @@ export function outcomeForProbe(result: ProbeResult): { title: string; detail: s
 }
 
 function messageOf(err: unknown): string {
-  return err instanceof Error ? err.message : "Something went wrong.";
+  return userFacingMessage(err, "Something went wrong.");
 }
 
 export function RecoverNotesFlow({ onClose, onKeyInstalled }: { onClose: () => void; onKeyInstalled: () => void }) {

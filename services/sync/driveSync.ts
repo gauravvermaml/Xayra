@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   GoogleSignin,
   isSuccessResponse,
+  statusCodes,
   type User,
 } from "@react-native-google-signin/google-signin";
 import { getRuntimePackageName, getSigningSha1Fingerprint } from "expo-app-signature";
@@ -9,11 +10,13 @@ import { Platform } from "react-native";
 
 import { assertNetworkFeatureAllowed } from "../dev/disposableVault";
 import { DriveSyncError, NotSignedInError } from "./driveErrors";
+import { NETWORK_MESSAGE } from "../errors/userMessage";
 import { rebindBackupAccount } from "../backup/backupAccount";
 import {
   activateExtraPrivacy,
   collectRecoveryKeyCandidates,
   getAccountProtection,
+  hasGoogleOnlyBackups,
   joinWithRecoveryCode,
   replaceRecoveryCode,
   restoreExtraKeyFromEscrow,
@@ -51,12 +54,10 @@ const DRIVE_APPDATA_SCOPE = "https://www.googleapis.com/auth/drive.appdata";
  * already the de facto shared Google Sign-In owner — see `getGreetingFirstName`
  * for an existing example of another feature piggybacking on this same
  * signed-in session) even though it's consumed by services/sync/calendarSync.ts,
- * not this file's own Drive logic — a real, actionable interactive consent
- * prompt for this scope is never triggered just by including it here (that
- * needs an explicit `GoogleSignin.addScopes` call, which calendarSync.ts
- * makes lazily, only the first time a user actually taps "Send to
- * Calendar") — see the exported `ensureConfigured`/`requireAccessToken`
- * below.
+ * not this file's own Drive logic. It is NOT listed in `configure()`'s scopes
+ * (those are requested at sign-in): calendarSync.ts requests it with
+ * `GoogleSignin.addScopes`, only the first time a user taps "Send to
+ * Calendar".
  */
 export const CALENDAR_EVENTS_SCOPE = "https://www.googleapis.com/auth/calendar.events";
 
@@ -137,14 +138,13 @@ export function ensureConfigured(): void {
     );
   }
   GoogleSignin.configure({
-    // Both scopes declared upfront — this alone triggers no interactive UI
-    // (only `signIn()`/`addScopes()` do that); it just tells the SDK what's
-    // available to request later. Drive's own `signInWithGoogle()` below
-    // still only ever calls `addScopes` with `DRIVE_APPDATA_SCOPE`, and
-    // calendarSync.ts's own equivalent only ever calls it with
-    // `CALENDAR_EVENTS_SCOPE` — a user who never touches "Send to Calendar"
-    // is never prompted for it.
-    scopes: [DRIVE_APPDATA_SCOPE, CALENDAR_EVENTS_SCOPE],
+    // No API scopes at sign-in (identity only). Scopes listed here ARE
+    // requested by `signIn()`: listing Calendar put a Calendar checkbox on the
+    // Drive consent screen, and unticking it looped sign-in. Each feature
+    // instead asks for its own scope once, with `requestScope` — Drive when
+    // backup is connected, Calendar on the first "Send to Calendar" — and a
+    // scope left unticked is reported, never asked for again in a loop.
+    scopes: [],
     webClientId: WEB_CLIENT_ID,
     // Requests a server auth code alongside the normal sign-in so a refresh
     // token is available — without this, some Play Services versions only
@@ -239,16 +239,14 @@ function isDeveloperError(err: unknown): boolean {
 }
 
 /**
- * Wraps a Google Sign-In call so a failure surfaces with everything needed
- * to actually diagnose it — the raw native code/message/toString() and the
- * configured `webClientId` prefix — appended to whichever message reaches
- * the UI's `Alert.alert` (see app/settings.tsx's `handleConnect`), rather
- * than the SDK's bare, unhelpful native error. An expected, already-clear
- * `DriveSyncError` (e.g. "sign-in was cancelled") passes through untouched;
- * diagnostics are only appended to genuine unexpected native failures.
+ * Wraps a Google Sign-In call so a failure is diagnosable from the log — the
+ * raw native code/message/toString(), package name, runtime SHA-1 and the
+ * configured `webClientId` prefix — while the user sees only a plain message
+ * (`signInFailureMessage`). An expected, already-clear `DriveSyncError`
+ * (e.g. "sign-in was cancelled") passes through untouched.
  *
  * Exported so services/sync/calendarSync.ts's own scope-request call gets
- * the same `DEVELOPER_ERROR` diagnostics instead of a bare native error —
+ * the same `DEVELOPER_ERROR` handling instead of a bare native error —
  * it's the identical failure mode (a SHA-1/OAuth-client mismatch), just
  * possibly hit for the first time by a user who already had Drive working.
  */
@@ -260,20 +258,59 @@ export async function withDeveloperErrorHandling<T>(action: () => Promise<T>): P
       throw err;
     }
 
+    // The diagnostics (package name, runtime SHA-1, client-id prefix, native
+    // code) go to the log only, never to the screen. A DEVELOPER_ERROR there
+    // means this build's SHA-1 isn't registered on the Android OAuth client.
     const diagnostics = formatSignInDiagnostics(err);
     console.error("[DriveSync] Google Sign-In failed —", diagnostics);
-
-    if (isDeveloperError(err)) {
-      throw new DriveSyncError(
-        "Google Sign-In configuration error (DEVELOPER_ERROR). This almost always means the SHA-1 " +
-          "certificate fingerprint of this build doesn't match what's registered for this app's " +
-          "Android OAuth client in Google Cloud Console. The \"Runtime SHA-1\" below was read directly " +
-          "off the installed APK, not guessed from a keystore file — add it (and \"Package Name\") to " +
-          `an Android OAuth client in the same Google Cloud project as the Web Client ID below.\n\n${diagnostics}`
-      );
-    }
-    throw new DriveSyncError(`Google Sign-In failed.\n\n${diagnostics}`);
+    throw new DriveSyncError(signInFailureMessage(err));
   }
+}
+
+/** What the user sees when Google sign-in fails. */
+function signInFailureMessage(err: unknown): string {
+  const code = String((err as { code?: string | number } | null)?.code ?? "");
+  if (code === statusCodes.SIGN_IN_CANCELLED || code === "12501") return "Google sign-in was cancelled.";
+  if (code === statusCodes.IN_PROGRESS) return "Google sign-in is already open. Finish it, then try again.";
+  if (code === statusCodes.PLAY_SERVICES_NOT_AVAILABLE) {
+    return "Google sign-in needs Google Play services. Update Google Play services, then try again.";
+  }
+  if (code === "7" || /network/i.test(err instanceof Error ? err.message : "")) {
+    return NETWORK_MESSAGE;
+  }
+  if (isDeveloperError(err)) {
+    return "Google sign-in isn't working in this version of Xayra. Please update Xayra from Google Play, then try again.";
+  }
+  return "Google sign-in didn't finish. Check your internet connection and try again.";
+}
+
+/**
+ * Asks for `scope` (Google's incremental consent) and confirms it was granted:
+ * Google's consent screen lets the user untick each permission, and a
+ * sign-in that "succeeds" without it would only fail later with a 403.
+ */
+export async function requestScope(scope: string): Promise<boolean> {
+  let response: Awaited<ReturnType<typeof GoogleSignin.addScopes>>;
+  try {
+    response = await GoogleSignin.addScopes({ scopes: [scope] });
+  } catch (err) {
+    // Declining on the consent screen rejects with code "addScopes" ("Failed
+    // to add scopes.") on Android, rather than returning "cancelled".
+    if (String((err as { code?: unknown } | null)?.code) === "addScopes") return false;
+    throw err;
+  }
+  if (response?.type === "success") return response.data.scopes.includes(scope);
+  return GoogleSignin.getCurrentUser()?.scopes.includes(scope) ?? false;
+}
+
+/** Drive backup can't work without its folder permission: when it was left
+ * unticked, this phone stays disconnected and says why. */
+async function requireDriveScope(): Promise<void> {
+  if (await requestScope(DRIVE_APPDATA_SCOPE)) return;
+  await GoogleSignin.signOut().catch(() => undefined);
+  throw new DriveSyncError(
+    "Xayra needs permission to use its own hidden folder in your Google Drive. Connect again and allow Google Drive access to back up."
+  );
 }
 
 export type DriveUser = {
@@ -286,12 +323,10 @@ function toDriveUser(user: User): DriveUser {
 }
 
 /**
- * Opens the native Google account picker and requests the `drive.appdata`
- * scope. `addScopes` after `signIn` is deliberate belt-and-suspenders: on
- * some Play-Services versions, sign-in (identity) and API-scope
- * authorization are handled as separate steps under the hood, and skipping
- * this can leave `getTokens()` returning a token that's valid for identity
- * but rejected by the Drive API with an insufficient-scope error.
+ * Opens the native Google account picker (identity only), then asks for the
+ * `drive.appdata` scope and confirms it was granted (`requireDriveScope`).
+ * Without that scope `getTokens()` returns a token the Drive API rejects, so
+ * a declined scope leaves this phone disconnected with a plain message.
  */
 export async function signInWithGoogle(): Promise<DriveUser> {
   // The Google session is shared with the normal vault; a disposable test
@@ -304,7 +339,7 @@ export async function signInWithGoogle(): Promise<DriveUser> {
     if (!isSuccessResponse(response)) {
       throw new DriveSyncError("Google sign-in was cancelled.");
     }
-    await GoogleSignin.addScopes({ scopes: [DRIVE_APPDATA_SCOPE] });
+    await requireDriveScope();
     return toDriveUser(response.data);
   });
 }
@@ -323,7 +358,7 @@ export async function signInForRecovery({ interactive }: { interactive: boolean 
     await GoogleSignin.hasPlayServices();
     const silent = await GoogleSignin.signInSilently();
     if (silent.type === "success") {
-      await GoogleSignin.addScopes({ scopes: [DRIVE_APPDATA_SCOPE] });
+      await requireDriveScope();
       return toDriveUser(silent.data);
     }
     if (!interactive) {
@@ -333,7 +368,7 @@ export async function signInForRecovery({ interactive }: { interactive: boolean 
     if (!isSuccessResponse(response)) {
       throw new DriveSyncError("Google sign-in was cancelled.");
     }
-    await GoogleSignin.addScopes({ scopes: [DRIVE_APPDATA_SCOPE] });
+    await requireDriveScope();
     return toDriveUser(response.data);
   });
 }
@@ -349,7 +384,7 @@ export async function switchRecoveryAccount(): Promise<DriveUser> {
     if (!isSuccessResponse(response)) {
       throw new DriveSyncError("Google sign-in was cancelled.");
     }
-    await GoogleSignin.addScopes({ scopes: [DRIVE_APPDATA_SCOPE] });
+    await requireDriveScope();
     return toDriveUser(response.data);
   });
 }
@@ -583,15 +618,21 @@ export type BackupProtectionStatus = {
   account: "standard" | "extra" | null;
   /** This phone's last established state. */
   local: ProtectionState;
+  /** Extra Privacy only: whether older Google-only backups remain to remove
+   * (null when unknown — the option stays available then). */
+  googleOnlyBackups: boolean | null;
 };
 
 export async function getBackupProtectionStatus(): Promise<BackupProtectionStatus> {
   const local = await readLocalProtection();
-  if (!GoogleSignin.getCurrentUser()) return { account: null, local };
+  if (!GoogleSignin.getCurrentUser()) return { account: null, local, googleOnlyBackups: null };
   try {
-    return { account: (await getAccountProtection(await requireAccessToken())).mode, local };
+    const token = await requireAccessToken();
+    const account = (await getAccountProtection(token)).mode;
+    const googleOnlyBackups = account === "extra" ? await hasGoogleOnlyBackups(token).catch(() => null) : null;
+    return { account, local, googleOnlyBackups };
   } catch {
-    return { account: null, local };
+    return { account: null, local, googleOnlyBackups: null };
   }
 }
 

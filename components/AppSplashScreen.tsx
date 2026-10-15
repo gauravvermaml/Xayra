@@ -49,7 +49,7 @@ export type SplashLock = {
   /** An attempt is in flight — the button is disabled so taps can't stack prompts. */
   unlocking: boolean;
   onUnlock: () => void;
-  /** Key-missing only, Xayra Dev only: opens original-vault recovery. */
+  /** Key-missing only (canRecoverOriginalVault): opens original-vault recovery. */
   onRecover?: () => void;
 };
 

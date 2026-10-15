@@ -30,3 +30,24 @@ export class NoBackupFoundError extends DriveSyncError {
   }
 }
 
+
+/** A plain message for a failed Google API response (the raw status and body
+ * go to development logs at the call site, never to the screen). */
+export function googleStatusMessage(service: "Google Drive" | "Google Calendar", status: number, body = ""): string {
+  if (status === 401) {
+    return `${service} didn't accept this phone's sign-in. Disconnect and reconnect your Google account in Settings, then try again.`;
+  }
+  if (status === 403 && /storageQuotaExceeded/i.test(body)) {
+    return "Your Google Drive storage is full. Free up space in Google Drive, then try again.";
+  }
+  if (status === 429 || (status === 403 && /rateLimit/i.test(body)) || status >= 500) {
+    return `${service} is busy right now. Try again in a few minutes.`;
+  }
+  if (status === 403) {
+    return `${service} refused access for Xayra. Disconnect and reconnect your Google account in Settings, then try again.`;
+  }
+  if (status === 404) {
+    return `Something Xayra expected in ${service} wasn't found. Try again in a moment.`;
+  }
+  return `${service} didn't accept the request. Try again in a few minutes.`;
+}

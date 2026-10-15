@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Modal, Pressable, ScrollView, Share, StyleSheet, Text, TextInput, View } from "react-native";
+import { ActivityIndicator, Alert, Modal, Pressable, ScrollView, Share, StyleSheet, Text, TextInput, View } from "react-native";
 import * as Clipboard from "expo-clipboard";
 
 import { colors } from "../constants/theme";
@@ -11,6 +11,7 @@ import {
   recoveryCodeGroups,
 } from "../services/backup/recoveryCode";
 import { ProtectionChangeUnfinishedError, replaceExtraPrivacyCode, turnOnExtraPrivacy } from "../services/sync/driveSync";
+import { userFacingMessage } from "../services/errors/userMessage";
 
 /**
  * Extra Privacy — "Quiet Intelligence" flows.
@@ -83,7 +84,7 @@ export function ExtraPrivacySetup({ visible, mode, onClose }: { visible: boolean
         setStep({ name: "unfinished", message: err.message });
         return;
       }
-      setStep({ name: "failed", message: err instanceof Error ? err.message : "Something went wrong." });
+      setStep({ name: "failed", message: userFacingMessage(err, "Something went wrong.") });
     }
   }, [code, mode]);
 
@@ -213,11 +214,17 @@ export function ExtraPrivacySetup({ visible, mode, onClose }: { visible: boolean
                 </Text>
               </>
             ) : (
-              <Text style={styles.body}>
-                {oldCodeRemoved
-                  ? "Your backup now opens with the new code. The old code no longer works."
-                  : "Your backup now opens with the new code. The old code stops working after your next backup."}
-              </Text>
+              <>
+                <Text style={styles.body}>
+                  {oldCodeRemoved
+                    ? "Your Google Drive backup now opens only with the new code."
+                    : "Your Google Drive backup now opens with the new code. The old code stops opening it after your next backup."}
+                </Text>
+                <Text style={styles.body}>
+                  If Xayra is set up on another phone, that phone keeps its own protected recovery copy, which the old code can
+                  still open until that phone is given the new code. Keep the old code private.
+                </Text>
+              </>
             )}
             <Button label="Done" onPress={close} />
           </>
@@ -251,6 +258,12 @@ export function ExtraPrivacySetup({ visible, mode, onClose }: { visible: boolean
 
 /** Asks for a recovery code; resolves via `onSubmit` with the normalised code
  * only after the typo check passes. */
+/** A restore's outcome stays on screen until dismissed (a toast was easy to
+ * miss for a result this important). Settings and Archive both use it. */
+export function showRestoreResult(result: { restoredCount: number; restoredToDoCount: number; message: string }): void {
+  Alert.alert(result.restoredCount || result.restoredToDoCount ? "Notes restored" : "Already up to date", result.message);
+}
+
 export function RecoveryCodePrompt({
   visible,
   title,

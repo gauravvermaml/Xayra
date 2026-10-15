@@ -43,6 +43,18 @@ let lastShownPercent = -1;
 let lastShownAtMs = 0;
 let channelReady = false;
 let permissionRequested = false;
+let permissionPromptAllowed = false;
+
+/**
+ * Downloads start at launch (initModelDownloads), before the vault is open.
+ * Android's notification-permission dialog shown then replaces the vault's
+ * fingerprint prompt and cancels it, so first launch landed on "Xayra is
+ * locked". Until app/_layout.tsx calls this once the vault is open, progress
+ * is only mirrored when permission was already granted — nothing asks.
+ */
+export function allowDownloadNotificationPermissionPrompt(): void {
+  permissionPromptAllowed = true;
+}
 
 /**
  * Build 26 SILENT DOWNLOAD NOTIFICATION: no heads-up popover, no vibration,
@@ -82,11 +94,14 @@ async function ensurePermission(): Promise<boolean> {
     const existing = await Notifications.getPermissionsAsync().catch(() => null);
     return existing?.granted ?? false;
   }
-  permissionRequested = true;
   const existing = await Notifications.getPermissionsAsync().catch(() => null);
   if (existing?.granted) {
     return true;
   }
+  if (!permissionPromptAllowed) {
+    return false;
+  }
+  permissionRequested = true;
   const requested = await Notifications.requestPermissionsAsync().catch(() => null);
   return requested?.granted ?? false;
 }

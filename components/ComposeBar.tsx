@@ -128,14 +128,14 @@ export const ComposeBar = memo(function ComposeBar({
       return;
     }
     hasPendingSubmitRef.current = true;
-    // Dismiss on every submit, Record or Ask alike — `blurOnSubmit={false}`
-    // below only stops the TextInput's own AUTOMATIC blur-on-submit; it was
-    // never a statement that the keyboard should stay up after a real send.
-    // A submitted note/question is done — same "get out of the way" instinct
-    // as this pass's other fixes (the history list hiding while composing,
-    // the mis-tap-prone settings gear moving out of this row): once you've
-    // sent it, the keyboard has nothing left to do.
-    Keyboard.dismiss();
+    // Ask: the keyboard closes so the answer has room. Record: it stays up
+    // with the input focused (`blurOnSubmit={false}`), so the next note can
+    // be typed straight away — closing it after every note broke consecutive
+    // entry, and the layout jump it caused (the Record/Ask pill moving
+    // ~600px down) made a tap aimed at Ask right after a note land elsewhere.
+    if (mode === "ask") {
+      Keyboard.dismiss();
+    }
     onSubmit(inputText.trim());
   };
 

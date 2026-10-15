@@ -7,7 +7,8 @@ import { isWellFormedDatabaseKey } from "../crypto/keyManager";
 import { toRawSqlcipherKey } from "../vault/vaultKey";
 
 /**
- * Non-destructive original-vault recovery (Xayra Dev, Phase 2).
+ * Non-destructive original-vault recovery (every build; offered only for a
+ * genuinely missing key — see vaultLockState.ts `canRecoverOriginalVault`).
  *
  * When this phone's vault exists but its key is gone (keyMissing), a key from
  * the user's Google Drive backup may still open it — a first backup uploads

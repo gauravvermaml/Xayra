@@ -254,6 +254,14 @@ async function commitMode(token: string, mode: "standard" | "extra", keyId: stri
   }
 }
 
+/** Whether anything Google account access alone can open is still in Drive:
+ * a Standard keyring (every Standard backup needs one) or the legacy files.
+ * What retireStandardBackups removes; false once it has run. */
+export async function hasGoogleOnlyBackups(token: string): Promise<boolean> {
+  if ((await drive.listAppDataFiles(token, KEYRING_PREFIX)).length > 0) return true;
+  return (await drive.listAppDataFiles(token, "remi_backup.")).some((f) => f.name === LEGACY_DB_NAME || f.name === LEGACY_KEY_NAME);
+}
+
 export async function getAccountProtection(token: string): Promise<AccountProtection> {
   const record = await resolveAccountMode(token);
   return record ? { mode: record.mode, keyId: record.keyId } : { mode: "standard", keyId: null };

@@ -1,6 +1,8 @@
 import * as FileSystem from "expo-file-system/legacy";
 
-import { DriveSyncError } from "../sync/driveErrors";
+import { devTiming } from "../ai/perf";
+import { NETWORK_MESSAGE } from "../errors/userMessage";
+import { DriveSyncError, googleStatusMessage } from "../sync/driveErrors";
 
 /**
  * Minimal Google Drive v3 helpers for the hidden app-data folder, used by the
@@ -49,16 +51,31 @@ async function renew(token: string): Promise<string | null> {
   return fresh;
 }
 
+/** No connection (DNS, socket, TLS): a plain message; details in dev logs. */
+async function offline<T>(run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (err) {
+    devTiming("Drive", "request could not be sent", { detail: (err instanceof Error ? err.message : String(err)).slice(0, 300) });
+    throw new DriveSyncError(NETWORK_MESSAGE);
+  }
+}
+
+/** A failed response: a plain message; the status and body in dev logs. */
+function failed(status: number, body: string): DriveSyncError {
+  devTiming("Drive", "request failed", { status, detail: body.slice(0, 300) });
+  return new DriveSyncError(googleStatusMessage("Google Drive", status, body));
+}
+
 async function call(url: string, token: string, init?: RequestInit): Promise<Response> {
-  const send = (t: string) => fetch(url, { ...init, headers: { ...init?.headers, Authorization: `Bearer ${t}` } });
+  const send = (t: string) => offline(() => fetch(url, { ...init, headers: { ...init?.headers, Authorization: `Bearer ${t}` } }));
   let res = await send(current(token));
   if (res.status === 401) {
     const fresh = await renew(token);
     if (fresh) res = await send(fresh);
   }
   if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new DriveSyncError(`Google Drive request failed (${res.status}): ${body.slice(0, 300) || res.statusText}`);
+    throw failed(res.status, await res.text().catch(() => ""));
   }
   return res;
 }
@@ -109,18 +126,20 @@ export async function createFileFromDisk(
   const id = await createRecord(token, name, appProperties);
   try {
     const upload = (t: string) =>
-      FileSystem.uploadAsync(`${UPLOAD}/${id}?uploadType=media`, localUri, {
-        httpMethod: "PATCH",
-        uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-        headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/octet-stream" },
-      });
+      offline(() =>
+        FileSystem.uploadAsync(`${UPLOAD}/${id}?uploadType=media`, localUri, {
+          httpMethod: "PATCH",
+          uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+          headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/octet-stream" },
+        })
+      );
     let result = await upload(current(token));
     if (result.status === 401) {
       const fresh = await renew(token);
       if (fresh) result = await upload(fresh);
     }
     if (result.status < 200 || result.status >= 300) {
-      throw new DriveSyncError(`Google Drive upload failed (${result.status}).`);
+      throw failed(result.status, result.body ?? "");
     }
   } catch (err) {
     await deleteOwnUnreferencedFile(token, id);
@@ -152,14 +171,14 @@ export async function createJsonFile(
 
 export async function downloadToDisk(token: string, id: string, destinationUri: string): Promise<void> {
   const download = (t: string) =>
-    FileSystem.downloadAsync(`${FILES}/${id}?alt=media`, destinationUri, { headers: { Authorization: `Bearer ${t}` } });
+    offline(() => FileSystem.downloadAsync(`${FILES}/${id}?alt=media`, destinationUri, { headers: { Authorization: `Bearer ${t}` } }));
   let result = await download(current(token));
   if (result.status === 401) {
     const fresh = await renew(token);
     if (fresh) result = await download(fresh);
   }
   if (result.status < 200 || result.status >= 300) {
-    throw new DriveSyncError(`Google Drive download failed (${result.status}).`);
+    throw failed(result.status, "");
   }
 }
 

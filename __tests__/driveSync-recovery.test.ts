@@ -38,7 +38,7 @@ const mockGoogle = {
   signIn: jest.fn(async () => ({ type: "success", data: user })),
   signOut: jest.fn(async () => undefined),
   revokeAccess: jest.fn(async () => undefined),
-  addScopes: jest.fn(async () => undefined),
+  addScopes: jest.fn(async () => ({ type: "success", data: { scopes: ["https://www.googleapis.com/auth/drive.appdata"] } })),
   getCurrentUser: jest.fn(() => user),
   getTokens: jest.fn(async () => ({ accessToken: "token" })),
 };
@@ -65,7 +65,7 @@ jest.mock("../services/backup/backupService", () => ({
   runEncryptedBackup: jest.fn(),
 }));
 jest.mock("../services/backup/backupAccount", () => ({ rebindBackupAccount: jest.fn(), BackupAccountMismatchError: class extends Error {} }));
-const { signInForRecovery, switchRecoveryAccount, fetchRecoveryKeyCandidates } = require("../services/sync/driveSync");
+const { signInForRecovery, switchRecoveryAccount, fetchRecoveryKeyCandidates, signInWithGoogle } = require("../services/sync/driveSync");
 
 const KEY = "b".repeat(64);
 let mockKeyFile: { id: string; name: string; size?: string } | null = { id: "key-file", name: "remi_backup.key", size: "64" };
@@ -108,6 +108,16 @@ describe("recovery sign-in", () => {
     expect(mockGoogle.signOut).toHaveBeenCalledTimes(1);
     expect(mockGoogle.signIn).toHaveBeenCalledTimes(1);
     expect(mockGoogle.revokeAccess).not.toHaveBeenCalled();
+  });
+
+  it("a Drive permission left unticked is reported once, never re-asked in a loop", async () => {
+    mockGoogle.addScopes.mockResolvedValueOnce({ type: "success", data: { scopes: [] } } as never);
+    await expect(signInWithGoogle()).rejects.toThrow(/allow Google Drive access/);
+    expect(mockGoogle.addScopes).toHaveBeenCalledTimes(1);
+    expect(mockGoogle.signOut).toHaveBeenCalledTimes(1);
+    // Android rejects (rather than returning "cancelled") when it's declined.
+    mockGoogle.addScopes.mockRejectedValueOnce(Object.assign(new Error("Failed to add scopes."), { code: "addScopes" }) as never);
+    await expect(signInWithGoogle()).rejects.toThrow(/allow Google Drive access/);
   });
 
   it("is refused in a disposable test vault", async () => {

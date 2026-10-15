@@ -4,17 +4,21 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { useFocusEffect, useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 
+import { RecoveryCodePrompt, showRestoreResult } from "../components/ExtraPrivacyFlows";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { NotesSheetContent, type DisplayNote } from "../components/NotesSheetContent";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { deleteNote, listNotes, retryPendingEmbeddings, type Note } from "../services/notes/noteManager";
 import { matchesKeywordSearch } from "../services/search/keywordMatch";
 import {
+  RecoveryCodeRequiredError,
   getSyncStatus,
   restoreFromDrive,
   signInWithGoogle,
   type SyncStatus,
 } from "../services/sync/driveSync";
+import { userFacingMessage } from "../services/errors/userMessage";
+import { restoreWithRecoveryCode } from "../services/sync/codeRestore";
 
 /**
  * Archive — the home screen's former "Recorded notes" card, demoted to its
@@ -48,7 +52,7 @@ export default function ArchiveScreen() {
     try {
       setNotes(await listNotes());
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load notes.");
+      setError(userFacingMessage(err, "Failed to load notes."));
     }
   }, []);
 
@@ -88,12 +92,18 @@ export default function ArchiveScreen() {
         if (!syncStatus.isConnected) {
           await signInWithGoogle();
         }
-        const { message } = await restoreFromDrive();
+        const result = await restoreFromDrive();
         await refreshNotes();
         await refreshSyncStatus();
-        Alert.alert("Vault Restored", message);
+        showRestoreResult(result);
       } catch (err) {
-        const message = err instanceof Error ? err.message : "Failed to restore from Google Drive.";
+        // An Extra Privacy backup: the same recovery-code prompt and restore
+        // as Settings (services/sync/codeRestore.ts).
+        if (err instanceof RecoveryCodeRequiredError) {
+          setCodePrompt({ busy: false, error: null });
+          return;
+        }
+        const message = userFacingMessage(err, "Failed to restore from Google Drive.");
         setError(message);
         Alert.alert("Restore didn't finish", message);
       } finally {
@@ -102,6 +112,25 @@ export default function ArchiveScreen() {
       }
     })();
   }, [syncStatus.isConnected, refreshNotes, refreshSyncStatus]);
+
+  const [codePrompt, setCodePrompt] = useState<{ busy: boolean; error: string | null } | null>(null);
+  // The code stays in memory for this call only; a wrong code or a failed
+  // restore keeps the prompt open and leaves this phone's notes unchanged.
+  const handleCodeSubmit = useCallback(
+    async (code: string) => {
+      setCodePrompt({ busy: true, error: null });
+      const outcome = await restoreWithRecoveryCode(code);
+      if (outcome.kind !== "restored") {
+        setCodePrompt({ busy: false, error: outcome.message });
+        return;
+      }
+      setCodePrompt(null);
+      await refreshNotes();
+      await refreshSyncStatus();
+      showRestoreResult(outcome.result);
+    },
+    [refreshNotes, refreshSyncStatus]
+  );
 
   const handleSelectNote = useCallback((noteId: string) => setSelectedNoteId(noteId), []);
 
@@ -115,7 +144,7 @@ export default function ArchiveScreen() {
           void deleteNote(noteId)
             .then(() => setNotes((prev) => prev.filter((note) => note.id !== noteId)))
             .catch((err) => {
-              const message = err instanceof Error ? err.message : "Failed to delete note.";
+              const message = userFacingMessage(err, "Failed to delete note.");
               setError(message);
               Alert.alert("Delete Error", message);
             });
@@ -197,6 +226,16 @@ export default function ArchiveScreen() {
           but nothing painted the nav-bar strip itself in this screen's own
           background color, unlike every other screen. */}
       <View pointerEvents="none" style={[styles.navBarInset, { height: insets.bottom }]} />
+
+      <RecoveryCodePrompt
+        visible={codePrompt !== null}
+        title="Enter your recovery code"
+        detail="Your backup is locked with Extra Privacy. Enter the recovery code you saved to restore it."
+        busy={codePrompt?.busy ?? false}
+        error={codePrompt?.error ?? null}
+        onSubmit={(code) => void handleCodeSubmit(code)}
+        onCancel={() => setCodePrompt(null)}
+      />
 
       <NoteDetailModal
         noteId={selectedNoteId}
