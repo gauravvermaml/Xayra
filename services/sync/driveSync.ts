@@ -10,7 +10,28 @@ import { Platform } from "react-native";
 import { assertNetworkFeatureAllowed } from "../dev/disposableVault";
 import { DriveSyncError, NotSignedInError } from "./driveErrors";
 import { rebindBackupAccount } from "../backup/backupAccount";
-import { collectRecoveryKeyCandidates, restoreLatestBackup, runEncryptedBackup } from "../backup/backupService";
+import {
+  activateExtraPrivacy,
+  collectRecoveryKeyCandidates,
+  getAccountProtection,
+  joinWithRecoveryCode,
+  replaceRecoveryCode,
+  restoreExtraKeyFromEscrow,
+  restoreLatestBackup,
+  retireStandardBackups,
+  runEncryptedBackup,
+  switchToStandard,
+  type RetireResult,
+} from "../backup/backupService";
+import { readLocalProtection, type ProtectionState } from "../backup/protection";
+import { setAccessTokenRefresher } from "../backup/driveAppData";
+
+// Long backup and protection operations can outlive an access token; the
+// encrypted backup asks for a fresh one on a 401 (driveAppData.ts).
+setAccessTokenRefresher(async (stale) => {
+  await GoogleSignin.clearCachedAccessToken(stale).catch(() => undefined);
+  return (await GoogleSignin.getTokens()).accessToken;
+});
 
 /**
  * `drive.appdata` is deliberately the only Drive scope ever requested. Files
@@ -47,6 +68,13 @@ const AUTO_SYNC_WIFI_STORAGE_KEY = "remi.driveSync.autoSyncOnWifi";
 // Defined in driveErrors.ts to break a load-order crash (see that file).
 export { DriveSyncError, NoBackupFoundError, NotSignedInError } from "./driveErrors";
 export { BackupAccountMismatchError } from "../backup/backupAccount";
+export {
+  ExtraPrivacyKeyNeededError,
+  ProtectionChangeUnfinishedError,
+  RecoveryCodeIncorrectError,
+  RecoveryCodeRequiredError,
+} from "../backup/backupErrors";
+export type { RetireResult } from "../backup/backupService";
 
 /**
  * Live data-loss incident, fixed 2026-09-16, superseded by a proper delta
@@ -333,9 +361,17 @@ export async function switchRecoveryAccount(): Promise<DriveUser> {
  * into memory only; each is just a candidate that originalVaultRecovery.ts
  * proves on a copy. Never writes to Drive.
  */
-export async function fetchRecoveryKeyCandidates(): Promise<string[]> {
+export async function fetchRecoveryKeyCandidates(options: { recoveryCode?: string } = {}): Promise<string[]> {
   await assertNetworkFeatureAllowed("Google Drive restore");
-  return collectRecoveryKeyCandidates(await requireAccessToken());
+  // With a recovery code, the local escrow works even when signed out.
+  const token = GoogleSignin.getCurrentUser() ? await requireAccessToken() : options.recoveryCode ? null : await requireAccessToken();
+  return collectRecoveryKeyCandidates(token, options);
+}
+
+/** After recovery with the code: puts the Extra Privacy key back behind the
+ * fingerprint from this phone's escrow. */
+export async function restoreExtraPrivacyKeyAfterRecovery(code: string): Promise<boolean> {
+  return restoreExtraKeyFromEscrow(code);
 }
 
 /** Revokes Drive access and clears the local session — deliberately does
@@ -517,10 +553,10 @@ function formatDate(iso: string): string {
  * (read-only) when the account has no encrypted one. Throws unless every
  * backed-up note is confirmed present afterwards.
  */
-export async function restoreFromDrive(): Promise<RestoreResult> {
+export async function restoreFromDrive(options: { recoveryCode?: string } = {}): Promise<RestoreResult> {
   await assertNetworkFeatureAllowed("Google Drive restore");
   const token = await requireAccessToken();
-  const outcome = await restoreLatestBackup({ token, accountId: currentAccountId() });
+  const outcome = await restoreLatestBackup({ token, accountId: currentAccountId() }, options);
   const from = outcome.source === "legacy" ? "your older backup" : `your backup of ${formatDate(outcome.backupDate)}`;
   const parts = [
     outcome.restoredNotes ? plural(outcome.restoredNotes, "note") : "",
@@ -537,4 +573,55 @@ export async function restoreFromDrive(): Promise<RestoreResult> {
  * this phone was bound to (backupAccount.ts). */
 export async function switchBackupsToSignedInAccount(): Promise<void> {
   await rebindBackupAccount(currentAccountId());
+}
+
+// ---------------------------------------------------------------------------
+// Extra Privacy (services/backup/backupService.ts)
+
+export type BackupProtectionStatus = {
+  /** The account-wide mode, when signed in (Drive is authoritative). */
+  account: "standard" | "extra" | null;
+  /** This phone's last established state. */
+  local: ProtectionState;
+};
+
+export async function getBackupProtectionStatus(): Promise<BackupProtectionStatus> {
+  const local = await readLocalProtection();
+  if (!GoogleSignin.getCurrentUser()) return { account: null, local };
+  try {
+    return { account: (await getAccountProtection(await requireAccessToken())).mode, local };
+  } catch {
+    return { account: null, local };
+  }
+}
+
+async function context(): Promise<{ token: string; accountId: string }> {
+  await assertNetworkFeatureAllowed("Google Drive backup");
+  return { token: await requireAccessToken(), accountId: currentAccountId() };
+}
+
+/** Resolves only once the recovery-code-protected backup is verified and the
+ * account has switched to Extra Privacy. */
+export async function turnOnExtraPrivacy(recoveryCode: string): Promise<void> {
+  const outcome = await activateExtraPrivacy(await context(), recoveryCode);
+  await writeLastBackupRecord({ time: outcome.verifiedAt, sizeBytes: outcome.sizeBytes });
+}
+
+/** `oldCodeRemoved` false: the new code is active, and the old one stops
+ * working after the next backup. */
+export async function replaceExtraPrivacyCode(newRecoveryCode: string): Promise<{ oldCodeRemoved: boolean }> {
+  return replaceRecoveryCode(await context(), newRecoveryCode);
+}
+
+export async function enterExtraPrivacyCode(recoveryCode: string): Promise<void> {
+  await joinWithRecoveryCode(await context(), recoveryCode);
+}
+
+export async function removeOlderGoogleOnlyBackups(includeLegacy: boolean): Promise<RetireResult> {
+  return retireStandardBackups(await context(), { includeLegacy });
+}
+
+export async function switchBackToStandardProtection(): Promise<void> {
+  const outcome = await switchToStandard(await context());
+  await writeLastBackupRecord({ time: outcome.verifiedAt, sizeBytes: outcome.sizeBytes });
 }

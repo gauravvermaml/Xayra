@@ -277,6 +277,37 @@ export async function readDeviceEntry(dir: string, name: string, backupKey: stri
   }
 }
 
+/**
+ * A small SQLCipher "secret container": name → value rows, encrypted under
+ * `sqlKey` (a raw key, or — for recovery-code protection — the normalised
+ * code as a SQLCipher passphrase, i.e. PBKDF2-HMAC-SHA512). Used for Extra
+ * Privacy keyrings and the local key escrow.
+ */
+export async function writeSecretContainer(dir: string, name: string, sqlKey: string, values: Record<string, string>): Promise<void> {
+  const db = openFile(dir, name, sqlKey, false);
+  try {
+    await db.execute("CREATE TABLE secret (name TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)");
+    for (const [key, value] of Object.entries(values)) {
+      await db.execute("INSERT INTO secret (name, value) VALUES (?, ?)", [key, value]);
+    }
+  } finally {
+    safeClose(db);
+  }
+}
+
+/** Null when `sqlKey` can't open it (wrong code) or it isn't a container. */
+export async function readSecretContainer(dir: string, name: string, sqlKey: string): Promise<Record<string, string> | null> {
+  const db = openFile(dir, name, sqlKey, true);
+  try {
+    const rows = (await db.execute("SELECT name, value FROM secret")).rows ?? [];
+    return Object.fromEntries(rows.map((row) => [String(row.name), String(row.value)]));
+  } catch {
+    return null;
+  } finally {
+    safeClose(db);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Record merge helpers (moved unchanged from driveSync.ts's legacy backup).
 

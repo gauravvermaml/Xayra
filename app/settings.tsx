@@ -17,7 +17,16 @@ import { colors, radius, spacing, typography } from "../constants/theme";
 import { listNotes, purgeAllNotes } from "../services/notes/noteManager";
 import {
   BackupAccountMismatchError,
+  ExtraPrivacyKeyNeededError,
+  ProtectionChangeUnfinishedError,
+  RecoveryCodeIncorrectError,
+  RecoveryCodeRequiredError,
   backupToDrive,
+  enterExtraPrivacyCode,
+  getBackupProtectionStatus,
+  removeOlderGoogleOnlyBackups,
+  switchBackToStandardProtection,
+  type BackupProtectionStatus,
   getSyncStatus,
   restoreFromDrive,
   signInWithGoogle,
@@ -26,6 +35,7 @@ import {
   type SyncStatus,
 } from "../services/sync/driveSync";
 import { showToast } from "../components/Toast";
+import { ExtraPrivacySetup, RecoveryCodePrompt } from "../components/ExtraPrivacyFlows";
 
 /**
  * Speech-to-text engine and AI chat model management used to live here too
@@ -36,7 +46,8 @@ import { showToast } from "../components/Toast";
  * download step, so there's nothing left here for either of them to manage.
  */
 
-type BusyAction = "connect" | "backup" | "disconnect" | "restore" | "wipe" | null;
+type BusyAction = "connect" | "backup" | "disconnect" | "restore" | "wipe" | "privacy" | null;
+type CodePrompt = { purpose: "restore" | "join"; busy: boolean; error: string | null } | null;
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -63,11 +74,15 @@ export default function SettingsScreen() {
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [notesStoredLocally, setNotesStoredLocally] = useState<number | null>(null);
+  const [protection, setProtection] = useState<BackupProtectionStatus>({ account: null, local: { mode: "standard" } });
+  const [setupMode, setSetupMode] = useState<"activate" | "replace" | null>(null);
+  const [codePrompt, setCodePrompt] = useState<CodePrompt>(null);
 
   const refreshStatus = useCallback(async () => {
     try {
-      const [syncStatus, notes] = await Promise.all([getSyncStatus(), listNotes()]);
+      const [syncStatus, notes, protectionStatus] = await Promise.all([getSyncStatus(), listNotes(), getBackupProtectionStatus()]);
       setStatus(syncStatus);
+      setProtection(protectionStatus);
       // A plain count, not "vector index size" or any other internal
       // storage detail — the one number a non-technical user actually wants
       // here is "how many of my notes are safely on this device."
@@ -131,6 +146,10 @@ export default function SettingsScreen() {
         offerAccountSwitch(() => void handleBackupNowRef.current?.());
         return;
       }
+      if (err instanceof ExtraPrivacyKeyNeededError) {
+        setCodePrompt({ purpose: "join", busy: false, error: null });
+        return;
+      }
       Alert.alert(
         "Backup didn't finish",
         `${err instanceof Error ? err.message : "Couldn't back up to Google Drive."} Your previous backup is unchanged.`
@@ -155,6 +174,10 @@ export default function SettingsScreen() {
         offerAccountSwitch(() => void handleRestoreNotesRef.current?.());
         return;
       }
+      if (err instanceof RecoveryCodeRequiredError) {
+        setCodePrompt({ purpose: "restore", busy: false, error: null });
+        return;
+      }
       Alert.alert("Restore didn't finish", err instanceof Error ? err.message : "Couldn't restore notes from Google Drive.");
     } finally {
       setBusyAction(null);
@@ -162,6 +185,91 @@ export default function SettingsScreen() {
   }, [refreshStatus, offerAccountSwitch]);
   const handleRestoreNotesRef = useRef<(() => Promise<void>) | null>(null);
   handleRestoreNotesRef.current = handleRestoreNotes;
+
+  // Recovery code entered for a restore (Extra Privacy backup) or to give this
+  // phone the Extra Privacy key. The code stays in memory for this call only.
+  const handleCodeSubmit = useCallback(
+    async (code: string) => {
+      const purpose = codePrompt?.purpose;
+      setCodePrompt((p) => (p ? { ...p, busy: true, error: null } : p));
+      try {
+        if (purpose === "restore") {
+          const { message } = await restoreFromDrive({ recoveryCode: code });
+          showToast(message);
+        } else {
+          await enterExtraPrivacyCode(code);
+          showToast("This phone can back up with Extra Privacy now.");
+        }
+        setCodePrompt(null);
+        await refreshStatus();
+      } catch (err) {
+        const message =
+          err instanceof RecoveryCodeIncorrectError
+            ? err.message
+            : `${err instanceof Error ? err.message : "Something went wrong."} Nothing was changed.`;
+        setCodePrompt((p) => (p ? { ...p, busy: false, error: message } : p));
+      }
+    },
+    [codePrompt, refreshStatus]
+  );
+
+  const handleRemoveOlderBackups = useCallback(() => {
+    Alert.alert(
+      "Remove older backups?",
+      "This removes the backups made before Extra Privacy, which Google account access alone can open, including the older unencrypted backup from earlier versions of Xayra. Your newest Extra Privacy backup is checked again first and is kept. Removing them can't recall copies that were already downloaded elsewhere.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove older backups",
+          style: "destructive",
+          onPress: () => {
+            setBusyAction("privacy");
+            void removeOlderGoogleOnlyBackups(true)
+              .then((r) =>
+                Alert.alert(
+                  "Older backups removed",
+                  `Removed ${r.generations} older backup${r.generations === 1 ? "" : "s"}${r.legacyFiles ? " and the older unencrypted backup" : ""}. Only backups locked with your recovery code remain.`
+                )
+              )
+              .catch((err: unknown) =>
+                Alert.alert("Nothing was removed", err instanceof Error ? err.message : "Couldn't remove older backups.")
+              )
+              .finally(() => {
+                setBusyAction(null);
+                void refreshStatus();
+              });
+          },
+        },
+      ]
+    );
+  }, [refreshStatus]);
+
+  const handleSwitchToStandard = useCallback(() => {
+    Alert.alert(
+      "Switch back to Standard Protection?",
+      "New backups will be restorable with your Google account alone, and anyone with enough access to your Google account could read them. Backups made with Extra Privacy still need your recovery code.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Switch",
+          onPress: () => {
+            setBusyAction("privacy");
+            void switchBackToStandardProtection()
+              .then(() => Alert.alert("Standard Protection is on", "A new backup was created and checked. Your fingerprint still opens Xayra."))
+              .catch((err: unknown) =>
+                err instanceof ProtectionChangeUnfinishedError
+                  ? Alert.alert("Standard Protection is on", err.message)
+                  : Alert.alert("Nothing was switched", `${err instanceof Error ? err.message : "Couldn't switch."} Extra Privacy is still on.`)
+              )
+              .finally(() => {
+                setBusyAction(null);
+                void refreshStatus();
+              });
+          },
+        },
+      ]
+    );
+  }, [refreshStatus]);
 
   const handleDisconnect = useCallback(() => {
     Alert.alert(
@@ -270,12 +378,21 @@ export default function SettingsScreen() {
             <>
               <View style={styles.divider} />
 
-              <Text style={styles.metaText}>
-                Backs up an encrypted copy of your notes to a hidden Xayra folder in your Google
-                Drive. The key to that copy is also kept in your Google account, so you can restore
-                with just your account — and anyone with enough access to your Google account could
-                read it.
-              </Text>
+              {protection.account === "extra" ? (
+                <Text style={styles.metaText}>
+                  Backs up to a hidden Xayra folder in your Google Drive, locked with your recovery
+                  code (Extra Privacy). New backups can't be read without that code — not by Google, and
+                  not by us. Backups made before Extra Privacy stay readable with Google account access
+                  until you remove them.
+                </Text>
+              ) : (
+                <Text style={styles.metaText}>
+                  Backs up an encrypted copy of your notes to a hidden Xayra folder in your Google
+                  Drive. The key to that copy is also kept in your Google account, so you can restore
+                  with just your account — and anyone with enough access to your Google account could
+                  read it.
+                </Text>
+              )}
 
               {/* "Auto-sync on Wi-Fi" is hidden until automatic backup really
                   exists and is tested. The stored preference is left as it is
@@ -358,6 +475,90 @@ export default function SettingsScreen() {
           )}
         </View>
 
+        {status.isConnected ? (
+          <>
+            <Text style={[styles.groupLabel, styles.sectionSpacing]}>Privacy & Security</Text>
+            <View style={styles.card}>
+              <Text style={styles.cardTitle}>Extra Privacy</Text>
+              <Text style={styles.metaText}>
+                {protection.account === "extra"
+                  ? protection.local.mode === "extra" && protection.local.keyId
+                    ? protection.local.state === "activating"
+                      ? "Finishing setup. Tap Back Up Now to complete it."
+                      : "On. Your backups are locked with your recovery code. Your fingerprint still opens Xayra every day."
+                    : "On for your account. Enter your recovery code once on this phone to keep backing up."
+                  : "Off. Your backups use Standard Protection: restorable with your Google account alone. Turn on Extra Privacy to also require a recovery code that only you keep."}
+              </Text>
+              {protection.account === "extra" ? (
+                protection.local.mode === "extra" && protection.local.keyId ? (
+                  <>
+                    <Pressable
+                      onPress={() => setSetupMode("replace")}
+                      disabled={busyAction !== null}
+                      style={({ pressed }) => [styles.secondaryButton, pressed && styles.buttonPressed]}
+                    >
+                      <Text style={styles.secondaryButtonText}>Replace recovery code</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handleRemoveOlderBackups}
+                      disabled={busyAction !== null}
+                      style={({ pressed }) => [styles.secondaryButton, styles.privacyButtonGap, pressed && styles.buttonPressed]}
+                    >
+                      <Text style={styles.secondaryButtonText}>Remove older Google-only backups</Text>
+                    </Pressable>
+                    <Pressable
+                      onPress={handleSwitchToStandard}
+                      disabled={busyAction !== null}
+                      style={({ pressed }) => [styles.secondaryButton, styles.privacyButtonGap, pressed && styles.buttonPressed]}
+                    >
+                      <Text style={styles.secondaryButtonText}>Switch back to Standard Protection</Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  <Pressable
+                    onPress={() => setCodePrompt({ purpose: "join", busy: false, error: null })}
+                    disabled={busyAction !== null}
+                    style={({ pressed }) => [styles.primaryButton, pressed && styles.buttonPressed]}
+                  >
+                    <Text style={styles.primaryButtonText}>Enter recovery code</Text>
+                  </Pressable>
+                )
+              ) : (
+                <Pressable
+                  onPress={() => setSetupMode("activate")}
+                  disabled={busyAction !== null}
+                  style={({ pressed }) => [styles.primaryButton, pressed && styles.buttonPressed]}
+                >
+                  <Text style={styles.primaryButtonText}>Turn on Extra Privacy</Text>
+                </Pressable>
+              )}
+              {busyAction === "privacy" ? <ActivityIndicator color={colors.textMuted} style={styles.cardLoading} /> : null}
+            </View>
+          </>
+        ) : null}
+
+        <ExtraPrivacySetup
+          visible={setupMode !== null}
+          mode={setupMode ?? "activate"}
+          onClose={() => {
+            setSetupMode(null);
+            void refreshStatus();
+          }}
+        />
+        <RecoveryCodePrompt
+          visible={codePrompt !== null}
+          title={codePrompt?.purpose === "restore" ? "Enter your recovery code" : "Use Extra Privacy on this phone"}
+          detail={
+            codePrompt?.purpose === "restore"
+              ? "Your backup is locked with Extra Privacy. Enter the recovery code you saved to restore it."
+              : "Your backups use Extra Privacy. Enter your recovery code once so this phone can keep backing up."
+          }
+          busy={codePrompt?.busy ?? false}
+          error={codePrompt?.error ?? null}
+          onSubmit={(code) => void handleCodeSubmit(code)}
+          onCancel={() => setCodePrompt(null)}
+        />
+
         <Text style={[styles.groupLabel, styles.sectionSpacing]}>Storage & Stats</Text>
         <View style={styles.card}>
           <View style={styles.metricRow}>
@@ -413,6 +614,7 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
+  privacyButtonGap: { marginTop: spacing.sm },
 
   safeArea: {
     flex: 1,

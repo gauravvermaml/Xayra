@@ -263,3 +263,32 @@ export async function installRecoveredDatabaseKey(key: string): Promise<void> {
     throw toAccessError(err);
   }
 }
+
+async function protectedOptions(): Promise<SecureStore.SecureStoreOptions> {
+  return (await isBiometricAuthAvailable())
+    ? { requireAuthentication: true, authenticationPrompt: "Unlock Xayra", keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY }
+    : { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
+}
+
+/**
+ * Other fingerprint-protected secrets (the Extra Privacy backup key — see
+ * services/backup/protection.ts): same SecureStore protection as the vault
+ * key, same error classification (`AuthenticationFailedError` /
+ * `DatabaseKeyError("unavailable")`). `null` means not stored or permanently
+ * invalidated.
+ */
+export async function readProtectedSecret(id: string): Promise<string | null> {
+  try {
+    return await SecureStore.getItemAsync(id, await protectedOptions());
+  } catch (err) {
+    throw toAccessError(err);
+  }
+}
+
+export async function writeProtectedSecret(id: string, value: string): Promise<void> {
+  try {
+    await SecureStore.setItemAsync(id, value, await protectedOptions());
+  } catch (err) {
+    throw toAccessError(err);
+  }
+}

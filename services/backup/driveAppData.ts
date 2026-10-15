@@ -25,8 +25,37 @@ export type AppDataFile = {
   appProperties?: Record<string, string>;
 };
 
+/**
+ * Access tokens expire after about an hour, and a backup or protection change
+ * can outlive one. On a 401 the token is refreshed once (driveSync.ts registers
+ * the refresher) and the request retried; later calls made with the old token
+ * use the refreshed one.
+ */
+let refreshToken: ((stale: string) => Promise<string>) | null = null;
+const refreshed = new Map<string, string>();
+
+export function setAccessTokenRefresher(refresher: (stale: string) => Promise<string>): void {
+  refreshToken = refresher;
+}
+
+function current(token: string): string {
+  return refreshed.get(token) ?? token;
+}
+
+async function renew(token: string): Promise<string | null> {
+  if (!refreshToken) return null;
+  const fresh = await refreshToken(current(token));
+  refreshed.set(token, fresh);
+  return fresh;
+}
+
 async function call(url: string, token: string, init?: RequestInit): Promise<Response> {
-  const res = await fetch(url, { ...init, headers: { ...init?.headers, Authorization: `Bearer ${token}` } });
+  const send = (t: string) => fetch(url, { ...init, headers: { ...init?.headers, Authorization: `Bearer ${t}` } });
+  let res = await send(current(token));
+  if (res.status === 401) {
+    const fresh = await renew(token);
+    if (fresh) res = await send(fresh);
+  }
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new DriveSyncError(`Google Drive request failed (${res.status}): ${body.slice(0, 300) || res.statusText}`);
@@ -79,11 +108,17 @@ export async function createFileFromDisk(
 ): Promise<string> {
   const id = await createRecord(token, name, appProperties);
   try {
-    const result = await FileSystem.uploadAsync(`${UPLOAD}/${id}?uploadType=media`, localUri, {
-      httpMethod: "PATCH",
-      uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/octet-stream" },
-    });
+    const upload = (t: string) =>
+      FileSystem.uploadAsync(`${UPLOAD}/${id}?uploadType=media`, localUri, {
+        httpMethod: "PATCH",
+        uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+        headers: { Authorization: `Bearer ${t}`, "Content-Type": "application/octet-stream" },
+      });
+    let result = await upload(current(token));
+    if (result.status === 401) {
+      const fresh = await renew(token);
+      if (fresh) result = await upload(fresh);
+    }
     if (result.status < 200 || result.status >= 300) {
       throw new DriveSyncError(`Google Drive upload failed (${result.status}).`);
     }
@@ -116,9 +151,13 @@ export async function createJsonFile(
 }
 
 export async function downloadToDisk(token: string, id: string, destinationUri: string): Promise<void> {
-  const result = await FileSystem.downloadAsync(`${FILES}/${id}?alt=media`, destinationUri, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
+  const download = (t: string) =>
+    FileSystem.downloadAsync(`${FILES}/${id}?alt=media`, destinationUri, { headers: { Authorization: `Bearer ${t}` } });
+  let result = await download(current(token));
+  if (result.status === 401) {
+    const fresh = await renew(token);
+    if (fresh) result = await download(fresh);
+  }
   if (result.status < 200 || result.status >= 300) {
     throw new DriveSyncError(`Google Drive download failed (${result.status}).`);
   }
@@ -139,4 +178,13 @@ export async function setAppProperties(token: string, id: string, appProperties:
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ appProperties }),
   });
+}
+
+/**
+ * Deletes an app-data file the USER explicitly chose to retire (e.g. older
+ * Standard backups after Extra Privacy was verified). Never called by
+ * automatic code paths.
+ */
+export async function deleteAppDataFile(token: string, id: string): Promise<void> {
+  await call(`${FILES}/${id}`, token, { method: "DELETE" });
 }

@@ -9,7 +9,8 @@ import {
   type ProbeResult,
   writeRecoveryPhase,
 } from "../services/recovery/originalVaultRecovery";
-import { fetchRecoveryKeyCandidates, signInForRecovery, switchRecoveryAccount, type DriveUser } from "../services/sync/driveSync";
+import { RecoveryCodePrompt } from "./ExtraPrivacyFlows";
+import { fetchRecoveryKeyCandidates, restoreExtraPrivacyKeyAfterRecovery, signInForRecovery, switchRecoveryAccount, type DriveUser } from "../services/sync/driveSync";
 
 /**
  * "Recover my notes" (Xayra Dev, Phase 2) — shown from the key-missing
@@ -71,13 +72,19 @@ export function RecoverNotesFlow({ onClose, onKeyInstalled }: { onClose: () => v
   const [account, setAccount] = useState<DriveUser | null>(null);
   const candidateKey = useRef<string | null>(null);
   const busy = useRef(false);
+  // Extra Privacy: the recovery code, held in memory only while this flow is
+  // open — used to open this phone's escrow / protected entries.
+  const recoveryCode = useRef<string | null>(null);
+  const [codePromptOpen, setCodePromptOpen] = useState(false);
 
   useEffect(() => () => {
     candidateKey.current = null;
+    recoveryCode.current = null;
   }, []);
 
   const close = useCallback(() => {
     candidateKey.current = null;
+    recoveryCode.current = null;
     onClose();
   }, [onClose]);
 
@@ -116,7 +123,8 @@ export function RecoverNotesFlow({ onClose, onKeyInstalled }: { onClose: () => v
         candidateKey.current = null;
         try {
           await cleanupStaleRecoveryStaging();
-          const keys = (await fetchRecoveryKeyCandidates()).filter(isWellFormedDatabaseKey);
+          const code = recoveryCode.current;
+          const keys = (await fetchRecoveryKeyCandidates(code ? { recoveryCode: code } : {})).filter(isWellFormedDatabaseKey);
           if (keys.length === 0) {
             setStep({
               name: "outcome",
@@ -171,6 +179,13 @@ export function RecoverNotesFlow({ onClose, onKeyInstalled }: { onClose: () => v
           await installRecoveredDatabaseKey(key);
           await writeRecoveryPhase("keyInstalled");
           candidateKey.current = null;
+          // Extra Privacy: the backup key was invalidated with the vault key;
+          // put it back behind the fingerprint from this phone's escrow.
+          const code = recoveryCode.current;
+          recoveryCode.current = null;
+          if (code) {
+            await restoreExtraPrivacyKeyAfterRecovery(code).catch(() => false);
+          }
           onKeyInstalled();
         } catch (err) {
           if (err instanceof AuthenticationFailedError) {
@@ -204,6 +219,7 @@ export function RecoverNotesFlow({ onClose, onKeyInstalled }: { onClose: () => v
             including ones added since the backup. Nothing on this phone changes unless you confirm.
           </Text>
           <Button label="Continue with Google" onPress={() => void signIn("remembered")} />
+          <Button label="Use my recovery code" secondary onPress={() => setCodePromptOpen(true)} />
           <Button label="Not now" secondary onPress={close} />
         </>
       ) : null}
@@ -236,6 +252,20 @@ export function RecoverNotesFlow({ onClose, onKeyInstalled }: { onClose: () => v
           <Button label="Cancel" secondary onPress={close} />
         </>
       ) : null}
+
+      <RecoveryCodePrompt
+        visible={codePromptOpen}
+        title="Enter your recovery code"
+        detail="If you turned on Extra Privacy, your recovery code can unlock the notes on this phone — even offline."
+        busy={false}
+        error={null}
+        onSubmit={(code) => {
+          recoveryCode.current = code;
+          setCodePromptOpen(false);
+          void check();
+        }}
+        onCancel={() => setCodePromptOpen(false)}
+      />
 
       {step.name === "outcome" ? (
         <>

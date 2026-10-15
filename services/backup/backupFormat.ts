@@ -19,6 +19,8 @@
 export const V2_PREFIX = "xayra2-";
 export const KEYRING_PREFIX = `${V2_PREFIX}keyring-`;
 export const DEVICE_PREFIX = `${V2_PREFIX}device-`;
+export const XKEYRING_PREFIX = `${V2_PREFIX}xkeyring-`;
+export const MODE_PREFIX = `${V2_PREFIX}mode-`;
 export const GENERATION_PREFIX = `${V2_PREFIX}gen-`;
 export const LEGACY_DB_NAME = "remi_backup.db";
 export const LEGACY_KEY_NAME = "remi_backup.key";
@@ -111,6 +113,53 @@ export function parseManifest(text: string): GenerationManifest | null {
   }
 }
 
-export function deviceEntryName(vaultId: string, keyFingerprint: string): string {
-  return `${DEVICE_PREFIX}${vaultId}-${keyFingerprint}.db`;
+/** `keyId` (the backup key the entry is encrypted with) is part of the name
+ * so a phone's Standard and Extra Privacy entries are distinct files. */
+export function deviceEntryName(vaultId: string, keyFingerprint: string, keyId: string): string {
+  return `${DEVICE_PREFIX}${vaultId}-${keyFingerprint}-${keyId.slice(0, 8)}.db`;
+}
+
+/** A backup key in memory. Standard keys come from the plaintext keyring in
+ * the Google account; Extra Privacy keys only from a recovery-code-protected
+ * keyring, this phone's fingerprint-protected store, or the local escrow. */
+export type BackupKey = { keyId: string; key: string; mode: "standard" | "extra" };
+
+/**
+ * Extra Privacy keyring: a SQLCipher file opened with the recovery code as its
+ * passphrase (PBKDF2-HMAC-SHA512, SQLCipher defaults), holding the account's
+ * Extra Privacy backup key. A new recovery code is a new epoch file holding
+ * the same key; older epochs are removed once the replacement has committed
+ * (new epoch verified and the phone's escrow rewritten under the new code).
+ */
+export function xkeyringName(keyId: string, epoch: number): string {
+  return `${XKEYRING_PREFIX}${keyId}-e${epoch}.db`;
+}
+
+export function parseXkeyringName(name: string): { keyId: string; epoch: number } | null {
+  const m = name.match(/^xayra2-xkeyring-([0-9a-f-]{36})-e(\d+)\.db$/);
+  return m ? { keyId: m[1], epoch: Number(m[2]) } : null;
+}
+
+/** The account's protection mode. A change is a NEW mode file; the newest
+ * (Drive createdTime) is authoritative for every phone. */
+export type ModeRecord = { format: "xayra-mode"; version: 1; mode: "standard" | "extra"; keyId: string; createdAt: string };
+
+export function modeFileName(id: string): string {
+  return `${MODE_PREFIX}${id}.json`;
+}
+
+export function parseModeRecord(text: string): ModeRecord | null {
+  try {
+    const m = JSON.parse(text) as Partial<ModeRecord>;
+    return m.format === "xayra-mode" &&
+      m.version === 1 &&
+      (m.mode === "standard" || m.mode === "extra") &&
+      typeof m.keyId === "string" &&
+      ID.test(m.keyId) &&
+      typeof m.createdAt === "string"
+      ? (m as ModeRecord)
+      : null;
+  } catch {
+    return null;
+  }
 }
