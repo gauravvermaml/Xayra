@@ -9,7 +9,7 @@ import {
   type ProbeResult,
   writeRecoveryPhase,
 } from "../services/recovery/originalVaultRecovery";
-import { fetchBackupKeyForRecovery, signInForRecovery, switchRecoveryAccount, type DriveUser } from "../services/sync/driveSync";
+import { fetchRecoveryKeyCandidates, signInForRecovery, switchRecoveryAccount, type DriveUser } from "../services/sync/driveSync";
 
 /**
  * "Recover my notes" (Xayra Dev, Phase 2) — shown from the key-missing
@@ -116,8 +116,8 @@ export function RecoverNotesFlow({ onClose, onKeyInstalled }: { onClose: () => v
         candidateKey.current = null;
         try {
           await cleanupStaleRecoveryStaging();
-          const key = await fetchBackupKeyForRecovery();
-          if (key === null) {
+          const keys = (await fetchRecoveryKeyCandidates()).filter(isWellFormedDatabaseKey);
+          if (keys.length === 0) {
             setStep({
               name: "outcome",
               title: "No backup key in this account",
@@ -126,15 +126,26 @@ export function RecoverNotesFlow({ onClose, onKeyInstalled }: { onClose: () => v
             });
             return;
           }
-          if (!isWellFormedDatabaseKey(key)) {
-            setStep({ name: "outcome", title: "The backup key isn't valid", detail: "This account's backup key is damaged. Nothing was changed." });
-            return;
-          }
           setStep({ name: "busy", label: "Testing the key on a copy of your notes…" });
-          const result = await probeOriginalVaultWithKey(key);
+          // Each candidate (this phone's entry first) is proven only on a copy;
+          // a key that doesn't open it is simply skipped.
+          let key: string | null = null;
+          let result: ProbeResult = { kind: "doesNotOpen" };
+          for (const candidate of keys) {
+            result = await probeOriginalVaultWithKey(candidate);
+            if (result.kind === "match") {
+              key = candidate;
+              break;
+            }
+            if (result.kind !== "doesNotOpen") break;
+          }
           const outcome = outcomeForProbe(result);
-          if (outcome) {
-            setStep({ name: "outcome", ...outcome, retry: result.kind === "insufficientStorage" || result.kind === "copyFailed" ? "check" : undefined });
+          if (outcome || !key) {
+            setStep({
+              name: "outcome",
+              ...(outcome ?? outcomeForProbe({ kind: "doesNotOpen" })!),
+              retry: result.kind === "insufficientStorage" || result.kind === "copyFailed" ? "check" : undefined,
+            });
             return;
           }
           candidateKey.current = key;

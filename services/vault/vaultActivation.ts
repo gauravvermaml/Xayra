@@ -7,6 +7,7 @@ import { devTiming } from "../ai/perf";
 import { DatabaseKeyError, getOrCreateDatabaseKey } from "../crypto/keyManager";
 import { isRunningDevPackage } from "../dev/disposableVault";
 import { VaultStateError } from "./vaultErrors";
+import { setSessionVaultKey } from "./vaultIdentity";
 import { toRawSqlcipherKey, VAULT_KEY_FORMAT } from "./vaultKey";
 import { classifyHeader, decideVaultAction, type FileKind, type PointerState, type VaultDecision, type VaultFacts } from "./vaultState";
 
@@ -171,7 +172,9 @@ export async function prepareNormalVault(): Promise<VaultOpenParams> {
 
   if (decision.kind === "open") {
     // A committed vault only ever opens with the stored key; none is minted.
-    const key = toRawSqlcipherKey(await getOrCreateDatabaseKey({ allowCreate: false }));
+    const hexKey = await getOrCreateDatabaseKey({ allowCreate: false });
+    const key = toRawSqlcipherKey(hexKey);
+    setSessionVaultKey(hexKey);
     if (decision.ensureMarker) {
       await setMarkerBestEffort();
     }
@@ -189,8 +192,10 @@ export async function prepareNormalVault(): Promise<VaultOpenParams> {
   }
   // No committed vault depends on a key yet (the legacy file is plaintext),
   // so the existing key is reused if readable, otherwise one is created.
-  const key = toRawSqlcipherKey(await getOrCreateDatabaseKey({ allowCreate: true }));
+  const hexKey = await getOrCreateDatabaseKey({ allowCreate: true });
+  const key = toRawSqlcipherKey(hexKey);
   await establishVault(decision, key);
+  setSessionVaultKey(hexKey);
   return params(key);
 }
 

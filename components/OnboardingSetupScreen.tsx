@@ -270,8 +270,8 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
           <Text style={styles.title}>Preparing Xayra - Your Pocket Companion</Text>
         </View>
         <Text style={styles.body}>
-          Everything Xayra needs is loading directly onto your phone so your thoughts and notes
-          stay 100% private. Feel free to minimize the app—we’ll notify you the moment it’s ready!
+          Everything Xayra needs is loading onto your phone, so your voice, notes and questions are
+          processed right here. Feel free to minimize the app—we’ll notify you the moment it’s ready!
         </Text>
 
         {isPaused && (

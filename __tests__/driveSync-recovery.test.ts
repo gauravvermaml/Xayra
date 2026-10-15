@@ -58,7 +58,14 @@ const mockFileSystem = {
 };
 jest.mock("expo-file-system/legacy", () => mockFileSystem);
 
-const { signInForRecovery, switchRecoveryAccount, fetchBackupKeyForRecovery } = require("../services/sync/driveSync");
+const mockCollect = jest.fn(async (_token: string) => [] as string[]);
+jest.mock("../services/backup/backupService", () => ({
+  collectRecoveryKeyCandidates: (token: string) => mockCollect(token),
+  restoreLatestBackup: jest.fn(),
+  runEncryptedBackup: jest.fn(),
+}));
+jest.mock("../services/backup/backupAccount", () => ({ rebindBackupAccount: jest.fn(), BackupAccountMismatchError: class extends Error {} }));
+const { signInForRecovery, switchRecoveryAccount, fetchRecoveryKeyCandidates } = require("../services/sync/driveSync");
 
 const KEY = "b".repeat(64);
 let mockKeyFile: { id: string; name: string; size?: string } | null = { id: "key-file", name: "remi_backup.key", size: "64" };
@@ -110,41 +117,17 @@ describe("recovery sign-in", () => {
   });
 });
 
-describe("fetchBackupKeyForRecovery", () => {
-  function expectReadOnlyAndNoFiles(): void {
-    for (const call of fetchSpy.mock.calls) {
-      const init = call[1] as RequestInit | undefined;
-      expect(init?.method ?? "GET").toBe("GET");
-    }
-    expect(mockFileSystem.writeAsStringAsync).not.toHaveBeenCalled();
-    expect(mockFileSystem.downloadAsync).not.toHaveBeenCalled();
-    expect(mockFileSystem.uploadAsync).not.toHaveBeenCalled();
-    expect(mockFileSystem.deleteAsync).not.toHaveBeenCalled();
-  }
-
-  it("returns the key from memory, read-only, with no file written", async () => {
-    expect(await fetchBackupKeyForRecovery()).toBe(KEY);
-    expectReadOnlyAndNoFiles();
-  });
-
-  it("no backup key in the account → null", async () => {
-    mockKeyFile = null;
-    expect(await fetchBackupKeyForRecovery()).toBeNull();
-    expectReadOnlyAndNoFiles();
-  });
-
-  it("an oversized key file is refused (by metadata or by body)", async () => {
-    mockKeyFile = { id: "key-file", name: "remi_backup.key", size: "999999" };
-    await expect(fetchBackupKeyForRecovery()).rejects.toThrow(/isn't a valid key/);
-    mockKeyFile = { id: "key-file", name: "remi_backup.key" };
-    mockKeyBody = "x".repeat(5000);
-    await expect(fetchBackupKeyForRecovery()).rejects.toThrow(/isn't a valid key/);
-    expectReadOnlyAndNoFiles();
+describe("fetchRecoveryKeyCandidates", () => {
+  it("delegates to the encrypted backup's candidate collection with the signed-in token", async () => {
+    mockCollect.mockResolvedValueOnce([KEY]);
+    expect(await fetchRecoveryKeyCandidates()).toEqual([KEY]);
+    expect(mockCollect).toHaveBeenCalledTimes(1);
   });
 
   it("is refused in a disposable test vault before any Drive call", async () => {
     mockMode = "disposable";
-    await expect(fetchBackupKeyForRecovery()).rejects.toThrow();
+    await expect(fetchRecoveryKeyCandidates()).rejects.toThrow();
+    expect(mockCollect).not.toHaveBeenCalled();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

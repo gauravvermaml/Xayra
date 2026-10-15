@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -16,15 +16,13 @@ import Constants from "expo-constants";
 import { colors, radius, spacing, typography } from "../constants/theme";
 import { listNotes, purgeAllNotes } from "../services/notes/noteManager";
 import {
-  BackupPausedError,
-  DRIVE_BACKUP_PAUSED,
+  BackupAccountMismatchError,
   backupToDrive,
-  getAutoSyncOnWifi,
   getSyncStatus,
   restoreFromDrive,
-  setAutoSyncOnWifi,
   signInWithGoogle,
   signOutFromGoogle,
+  switchBackupsToSignedInAccount,
   type SyncStatus,
 } from "../services/sync/driveSync";
 import { showToast } from "../components/Toast";
@@ -62,20 +60,14 @@ export default function SettingsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [status, setStatus] = useState<SyncStatus>({ isConnected: false });
-  const [autoSyncOnWifi, setAutoSyncOnWifiState] = useState(false);
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [notesStoredLocally, setNotesStoredLocally] = useState<number | null>(null);
 
   const refreshStatus = useCallback(async () => {
     try {
-      const [syncStatus, autoSync, notes] = await Promise.all([
-        getSyncStatus(),
-        getAutoSyncOnWifi(),
-        listNotes(),
-      ]);
+      const [syncStatus, notes] = await Promise.all([getSyncStatus(), listNotes()]);
       setStatus(syncStatus);
-      setAutoSyncOnWifiState(autoSync);
       // A plain count, not "vector index size" or any other internal
       // storage detail — the one number a non-technical user actually wants
       // here is "how many of my notes are safely on this device."
@@ -105,37 +97,53 @@ export default function SettingsScreen() {
     }
   }, [refreshStatus]);
 
-  // Live data-loss report, fixed 2026-09-16 (see backupToDrive()'s own doc
-  // comment in driveSync.ts): this used to VACUUM INTO the local database
-  // and overwrite Drive with it wholesale, so a freshly-reinstalled app
-  // with 0 local notes silently replaced a real backup with nothing.
-  // backupToDrive() is now a true delta backup — it merges local notes/
-  // to-dos INTO whatever's already in Drive rather than replacing it, so
-  // there's no longer a destructive case here to warn about at all: 0
-  // local notes now structurally can't remove anything already backed up,
-  // it just adds nothing. `message` reports exactly what got added (or
-  // that nothing needed to).
+  // A different Google account than the one this phone backs up to: never
+  // merge or restore across accounts silently — the user chooses.
+  const offerAccountSwitch = useCallback((retry: () => void) => {
+    Alert.alert(
+      "Different Google account",
+      "This phone backs up to a different Google account. Switch back to that account to keep using its backup, or use the account you're signed in with from now on.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Use this account",
+          onPress: () => {
+            void switchBackupsToSignedInAccount()
+              .then(retry)
+              .catch((err: unknown) => Alert.alert("Couldn't switch accounts", err instanceof Error ? err.message : "Nothing was changed."));
+          },
+        },
+      ]
+    );
+  }, []);
+
+  // backupToDrive() resolves only after the new encrypted generation was
+  // downloaded back, decrypted and checked (services/backup/backupService.ts),
+  // so "Backup verified" is never shown for a backup that didn't happen.
   const handleBackupNow = useCallback(async () => {
     setBusyAction("backup");
     try {
-      const { message } = await backupToDrive();
+      const { message, skipped } = await backupToDrive();
       await refreshStatus();
-      Alert.alert("Backup Complete", message);
+      Alert.alert(skipped ? "Already backed up" : "Backup verified", message);
     } catch (err) {
+      if (err instanceof BackupAccountMismatchError) {
+        offerAccountSwitch(() => void handleBackupNowRef.current?.());
+        return;
+      }
       Alert.alert(
-        err instanceof BackupPausedError ? err.title : "Backup Failed",
-        err instanceof Error ? err.message : "Failed to back up to Google Drive."
+        "Backup didn't finish",
+        `${err instanceof Error ? err.message : "Couldn't back up to Google Drive."} Your previous backup is unchanged.`
       );
     } finally {
       setBusyAction(null);
     }
-  }, [refreshStatus]);
+  }, [refreshStatus, offerAccountSwitch]);
+  const handleBackupNowRef = useRef<(() => Promise<void>) | null>(null);
+  handleBackupNowRef.current = handleBackupNow;
 
-  // Delta/merge restore (see driveSync.ts's restoreFromDrive): safe to tap
-  // repeatedly and safe even with local notes already on the device — it
-  // only ever adds notes this device doesn't already have, never overwrites
-  // or duplicates. `refreshStatus` re-fetches `notesStoredLocally` too, so
-  // the count on screen reflects the merge immediately.
+  // Merge restore: only adds what this phone doesn't have; reports success
+  // only after every backed-up note is confirmed present.
   const handleRestoreNotes = useCallback(async () => {
     setBusyAction("restore");
     try {
@@ -143,14 +151,17 @@ export default function SettingsScreen() {
       await refreshStatus();
       showToast(message);
     } catch (err) {
-      Alert.alert(
-        err instanceof BackupPausedError ? err.title : "Restore Failed",
-        err instanceof Error ? err.message : "Failed to restore notes from Google Drive."
-      );
+      if (err instanceof BackupAccountMismatchError) {
+        offerAccountSwitch(() => void handleRestoreNotesRef.current?.());
+        return;
+      }
+      Alert.alert("Restore didn't finish", err instanceof Error ? err.message : "Couldn't restore notes from Google Drive.");
     } finally {
       setBusyAction(null);
     }
-  }, [refreshStatus]);
+  }, [refreshStatus, offerAccountSwitch]);
+  const handleRestoreNotesRef = useRef<(() => Promise<void>) | null>(null);
+  handleRestoreNotesRef.current = handleRestoreNotes;
 
   const handleDisconnect = useCallback(() => {
     Alert.alert(
@@ -209,11 +220,6 @@ export default function SettingsScreen() {
     );
   }, [refreshStatus]);
 
-  const handleToggleAutoSync = useCallback((next: boolean) => {
-    setAutoSyncOnWifiState(next);
-    void setAutoSyncOnWifi(next);
-  }, []);
-
   return (
     <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
       <ScrollView
@@ -265,26 +271,15 @@ export default function SettingsScreen() {
               <View style={styles.divider} />
 
               <Text style={styles.metaText}>
-                Stores an encrypted backup in your personal Google Drive that only Xayra can read
-                — no one else, not even Google, can open it.
+                Backs up an encrypted copy of your notes to a hidden Xayra folder in your Google
+                Drive. The key to that copy is also kept in your Google account, so you can restore
+                with just your account — and anyone with enough access to your Google account could
+                read it.
               </Text>
 
-              {DRIVE_BACKUP_PAUSED ? (
-                <Text style={styles.pausedNotice}>
-                  Backup and restore are paused while Xayra moves to protected backups. Your notes
-                  are encrypted on this phone, and your existing Drive backup is left as it is.
-                </Text>
-              ) : null}
-
-              <View style={styles.toggleRow}>
-                <Text style={styles.toggleLabel}>Auto-sync on Wi-Fi</Text>
-                <Switch
-                  value={autoSyncOnWifi}
-                  onValueChange={handleToggleAutoSync}
-                  trackColor={{ false: colors.border, true: colors.accent }}
-                  thumbColor={colors.textPrimary}
-                />
-              </View>
+              {/* "Auto-sync on Wi-Fi" is hidden until automatic backup really
+                  exists and is tested. The stored preference is left as it is
+                  (driveSync.ts getAutoSyncOnWifi) — nothing reads it. */}
 
               <View style={styles.modelButtonRow}>
                 <Pressable
@@ -341,8 +336,8 @@ export default function SettingsScreen() {
           ) : (
             <>
               <Text style={styles.metaText}>
-                Stores an encrypted backup in your personal Google Drive that only Xayra can
-                read. Your notes never leave this device until you connect Google Drive here.
+                Optional encrypted backup to a hidden Xayra folder in your Google Drive. Your notes
+                stay only on this phone unless you back them up.
               </Text>
               <Pressable
                 onPress={handleConnect}
@@ -390,8 +385,9 @@ export default function SettingsScreen() {
         <Text style={[styles.groupLabel, styles.sectionSpacing]}>Data & Privacy</Text>
         <View style={styles.card}>
           <Text style={styles.metaText}>
-            Every note, recording, and search index lives only in this app's own encrypted storage on this device.
-            Deleting them here removes them completely and immediately — there's no server copy to also clear.
+            Your notes, to-dos and search index are stored encrypted on this phone. Any older voice recordings kept
+            with notes are in Xayra's private storage but aren't encrypted. Deleting here removes everything from this
+            phone right away; it doesn't delete a Google Drive backup.
           </Text>
           <Pressable
             onPress={handleWipeAllNotes}
@@ -417,12 +413,7 @@ export default function SettingsScreen() {
 }
 
 const styles = StyleSheet.create({
-  pausedNotice: {
-    color: colors.warning,
-    fontSize: 13,
-    marginTop: -spacing.sm,
-    marginBottom: spacing.lg,
-  },
+
   safeArea: {
     flex: 1,
     backgroundColor: colors.background,

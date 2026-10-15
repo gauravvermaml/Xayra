@@ -10,8 +10,6 @@ import { colors, radius, spacing, typography } from "../constants/theme";
 import { deleteNote, listNotes, retryPendingEmbeddings, type Note } from "../services/notes/noteManager";
 import { matchesKeywordSearch } from "../services/search/keywordMatch";
 import {
-  BackupPausedError,
-  DRIVE_BACKUP_PAUSED,
   getSyncStatus,
   restoreFromDrive,
   signInWithGoogle,
@@ -87,10 +85,6 @@ export default function ArchiveScreen() {
       setIsRestoring(true);
       setError(null);
       try {
-        // Paused (driveErrors.ts): say so before asking anyone to sign in.
-        if (DRIVE_BACKUP_PAUSED) {
-          throw new BackupPausedError("restore");
-        }
         if (!syncStatus.isConnected) {
           await signInWithGoogle();
         }
@@ -101,7 +95,7 @@ export default function ArchiveScreen() {
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to restore from Google Drive.";
         setError(message);
-        Alert.alert(err instanceof BackupPausedError ? err.title : "Restore Failed", message);
+        Alert.alert("Restore didn't finish", message);
       } finally {
         isRestoringRef.current = false;
         setIsRestoring(false);

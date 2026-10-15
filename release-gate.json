@@ -1,10 +1,13 @@
 {
   "productionBlocked": true,
-  "reason": "Encrypted Google Drive backup and restore are not finished. Local SQLCipher encryption ships only together with a working, independently tested encrypted backup-and-restore path.",
+  "reason": "Encrypted Google Drive backup is still in development (Standard Protection implemented and emulator-tested; optional Extra Privacy in progress). Local SQLCipher encryption ships only together with a working, independently tested encrypted backup-and-restore path.",
   "blockers": [
-    "Encrypted Google Drive backup and restore implemented and tested end to end (recovery design pending product decision)",
-    "Privacy policy, Play listing, in-app wording and Data safety answers updated for the encrypted release",
+    "Optional Extra Privacy (recovery-code-protected backups and mode transitions) implemented, reviewed and tested",
+    "Real concurrent multi-device backup safety verified (two devices backing up at the same time)",
+    "Google Calendar consent loop fixed: Drive permission must be requested independently of Calendar permission",
     "First launch: the notification-permission dialog cancels the first fingerprint prompt (key creation lands on 'Xayra is locked')",
-    "Recovery sign-in errors show raw developer diagnostics (package name, SHA-1, client ID) to users"
+    "Recovery sign-in errors show raw developer diagnostics (package name, SHA-1, client ID) to users",
+    "Keyboard/input sheet hidden behind the keyboard after a send: checked on a physical device",
+    "Privacy policy, Play listing, in-app wording and Data safety answers updated for the encrypted release"
   ]
 }

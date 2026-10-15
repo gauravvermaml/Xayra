@@ -34,7 +34,7 @@ export function ModelDownloadCard({ modelDownload }: ModelDownloadCardProps) {
           progress... 58% of 100%". */}
       <Text style={styles.progressText}>{`Downloading in progress... ${percent}% of 100%`}</Text>
       <Text style={styles.subtitleText}>
-        Setting up Xayra's intelligence. Once complete, you can start asking questions 100% offline.
+        Setting up Xayra's intelligence. Once complete, you can ask questions without an internet connection.
       </Text>
     </View>
   );

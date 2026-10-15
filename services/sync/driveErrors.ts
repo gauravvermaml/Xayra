@@ -30,27 +30,3 @@ export class NoBackupFoundError extends DriveSyncError {
   }
 }
 
-/**
- * Google Drive backup and restore are paused: the vault is now SQLCipher-
- * encrypted, and the legacy backup format (a plaintext snapshot with its key
- * uploaded beside it) must not carry encrypted-vault data, nor be overwritten.
- * The protected format (recovery-code-wrapped key) replaces it in a later
- * stage. The legacy Drive files are left exactly as they are.
- */
-export class BackupPausedError extends DriveSyncError {
-  readonly title: string;
-
-  constructor(action: "backup" | "restore") {
-    super(
-      action === "backup"
-        ? "Google Drive backup is paused while Xayra moves to protected, encrypted backups. Your notes are encrypted on this phone, and your existing Drive backup is left as it is. Nothing was uploaded."
-        : "Restoring from Google Drive is paused while Xayra moves to protected, encrypted backups. Your existing Drive backup is left as it is, and nothing on this phone was changed."
-    );
-    this.name = "BackupPausedError";
-    this.title = action === "backup" ? "Backup paused" : "Restore paused";
-  }
-}
-
-/** While true, backupToDrive()/restoreFromDrive() refuse before any network
- * or file work. Lifted only when the recovery-code-protected format ships. */
-export const DRIVE_BACKUP_PAUSED = true;
