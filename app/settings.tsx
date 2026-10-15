@@ -383,12 +383,16 @@ export default function SettingsScreen() {
     );
   }, [status.isConnected, removeOldCopy]);
 
+  // Deleting everything local also removes the old unencrypted copy, when
+  // it's still here: no new backup is required (the user means to delete),
+  // keys and recovery information for the kept vault are untouched, and
+  // each part's outcome is reported as it actually happened.
   const handleWipeAllNotes = useCallback(() => {
     Alert.alert(
       "Delete All Notes",
-      `This permanently deletes every note, recording, and search index on this device. This cannot be undone. Your Google Drive backup (if any) is not affected.${
-        legacyCopyPresent ? " The old unencrypted copy from before the update to encryption is removed separately, with \"Remove the old unencrypted copy\"." : ""
-      }`,
+      legacyCopyPresent
+        ? "This permanently deletes every note, recording and search index on this phone, and the old unencrypted copy of your notes and to-dos left from before the update to encryption. This cannot be undone. Your Google Drive backups aren't deleted; remove those separately."
+        : "This permanently deletes every note, recording, and search index on this device. This cannot be undone. Your Google Drive backup (if any) is not affected.",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -396,15 +400,33 @@ export default function SettingsScreen() {
           style: "destructive",
           onPress: () => {
             setBusyAction("wipe");
-            void purgeAllNotes()
-              .then(async () => {
-                await refreshStatus();
+            void (async () => {
+              let notesError: unknown = null;
+              try {
+                await purgeAllNotes();
+              } catch (err) {
+                notesError = err;
+              }
+              const legacy = legacyCopyPresent ? await removeLegacyCopy().catch(() => null) : { removed: [], failed: [] };
+              await refreshStatus();
+              setBusyAction(null);
+              const legacyFullyRemoved = legacy !== null && legacy.failed.length === 0;
+              const legacyNote = legacyCopyPresent
+                ? legacyFullyRemoved
+                  ? " The old unencrypted copy was deleted too."
+                  : " The old unencrypted copy couldn't be fully deleted; try Delete All Notes again."
+                : "";
+              if (notesError) {
+                Alert.alert("Notes weren't deleted", `${userFacingMessage(notesError, "Failed to delete local notes.")}${legacyNote}`);
+              } else if (!legacyCopyPresent) {
                 showToast("All local notes deleted.");
-              })
-              .catch((err) => {
-                Alert.alert("Error", userFacingMessage(err, "Failed to delete local notes."));
-              })
-              .finally(() => setBusyAction(null));
+              } else {
+                Alert.alert(
+                  legacyFullyRemoved ? "Deleted" : "Notes deleted, old copy not fully removed",
+                  `Every note, recording and search index on this phone was deleted.${legacyNote} Your Google Drive backups weren't deleted.`
+                );
+              }
+            })();
           },
         },
       ]
@@ -696,7 +718,7 @@ export default function SettingsScreen() {
           ) : null}
           <Pressable
             onPress={handleWipeAllNotes}
-            disabled={busyAction !== null || notesStoredLocally === 0}
+            disabled={busyAction !== null || (notesStoredLocally === 0 && !legacyCopyPresent)}
             style={({ pressed }) => [
               styles.dangerButton,
               pressed && styles.buttonPressed,
