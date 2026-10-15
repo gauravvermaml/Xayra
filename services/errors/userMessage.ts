@@ -12,7 +12,7 @@ export const NETWORK_MESSAGE = "Xayra couldn't reach Google. Check your internet
 export const DATABASE_MESSAGE = "Xayra couldn't read or save your notes just now. Close and reopen Xayra, then try again.";
 
 const NETWORK_PATTERN =
-  /fetch failed|network request failed|unknownhostexception|unable to resolve host|failed to connect to|connectexception|sockettimeoutexception|sslexception|econnrefused|econnreset|enotfound|no address associated with hostname/i;
+  /fetch failed|network request failed|unknownhostexception|unable to resolve host|failed to connect to|connectexception|sockettimeoutexception|sslexception|econnrefused|econnreset|enotfound|no address associated with hostname|^network ?error$|network_error/i;
 const DATABASE_PATTERN = /sqlite|sqlcipher|no such (table|column)|database (is locked|disk image)|constraint failed|op-sqlite/i;
 const RAW_PATTERN =
   /java\.|kotlin\.|exception|\berror code\b|code=|developer_error|sha-1|client id|package name|undefined is not|null is not|cannot read propert|is not a function|typeerror|referenceerror|syntaxerror|\bat \S+ \(|injected failure|err_[a-z_]+|\[object /i;

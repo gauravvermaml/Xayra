@@ -21,6 +21,7 @@ describe("userFacingMessage", () => {
       'fetch failed: java.net.UnknownHostException: Unable to resolve host "www.googleapis.com": No address associated with hostname',
       "Network request failed",
       "java.net.SocketTimeoutException: timeout",
+      "NetworkError", // Google Play services' token request
     ]) {
       expect(userFacingMessage(new Error(raw), "fallback")).toBe(NETWORK_MESSAGE);
     }

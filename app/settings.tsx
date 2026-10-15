@@ -37,6 +37,7 @@ import {
 import { showToast } from "../components/Toast";
 import { ExtraPrivacySetup, RecoveryCodePrompt, showRestoreResult } from "../components/ExtraPrivacyFlows";
 import { restoreWithRecoveryCode } from "../services/sync/codeRestore";
+import { checkVaultAgainstLegacy, getLegacyCopyStatus, removeLegacyCopy } from "../services/vault/legacyCopy";
 import { userFacingMessage } from "../services/errors/userMessage";
 
 /**
@@ -48,7 +49,7 @@ import { userFacingMessage } from "../services/errors/userMessage";
  * download step, so there's nothing left here for either of them to manage.
  */
 
-type BusyAction = "connect" | "backup" | "disconnect" | "restore" | "wipe" | "privacy" | null;
+type BusyAction = "connect" | "backup" | "disconnect" | "restore" | "wipe" | "privacy" | "legacy" | null;
 type CodePrompt = { purpose: "restore" | "join"; busy: boolean; error: string | null } | null;
 
 function formatBytes(bytes: number): string {
@@ -73,6 +74,8 @@ export default function SettingsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [status, setStatus] = useState<SyncStatus>({ isConnected: false });
+  // The unencrypted database from before the update to encryption, if still here.
+  const [legacyCopyPresent, setLegacyCopyPresent] = useState(false);
   const [isLoadingStatus, setIsLoadingStatus] = useState(true);
   const [busyAction, setBusyAction] = useState<BusyAction>(null);
   const [notesStoredLocally, setNotesStoredLocally] = useState<number | null>(null);
@@ -82,9 +85,15 @@ export default function SettingsScreen() {
 
   const refreshStatus = useCallback(async () => {
     try {
-      const [syncStatus, notes, protectionStatus] = await Promise.all([getSyncStatus(), listNotes(), getBackupProtectionStatus()]);
+      const [syncStatus, notes, protectionStatus, legacy] = await Promise.all([
+        getSyncStatus(),
+        listNotes(),
+        getBackupProtectionStatus(),
+        getLegacyCopyStatus().catch(() => ({ present: false, bytes: 0 })),
+      ]);
       setStatus(syncStatus);
       setProtection(protectionStatus);
+      setLegacyCopyPresent(legacy.present);
       // A plain count, not "vector index size" or any other internal
       // storage detail — the one number a non-technical user actually wants
       // here is "how many of my notes are safely on this device."
@@ -309,10 +318,77 @@ export default function SettingsScreen() {
   // Alert, matching handleDisconnect's own pattern) since there's no undo —
   // this is deliberately more final than "Disconnect Google Drive" above,
   // which only ever stops future syncing.
+  // Removing the old unencrypted copy: only after a verified Google Drive
+  // backup (a copy you can restore) and a check of the encrypted notes; only
+  // the old file set is deleted (services/vault/legacyCopy.ts).
+  const removeOldCopy = useCallback(async () => {
+    setBusyAction("legacy");
+    try {
+      const removal = await removeLegacyCopy();
+      if (removal.failed.length === 0) {
+        Alert.alert("Old copy removed", "The old unencrypted copy was deleted from this phone. Your encrypted notes and your Google Drive backups weren't changed.");
+      } else if (removal.removed.length === 0) {
+        Alert.alert("Nothing was removed", "The old copy couldn't be deleted. Your notes and backups weren't changed. Try again later.");
+      } else {
+        Alert.alert(
+          "Only partly removed",
+          `${removal.removed.length} of ${removal.removed.length + removal.failed.length} files of the old copy were deleted; ${removal.failed.length} couldn't be. Try again to remove the rest. Your encrypted notes and backups weren't changed.`
+        );
+      }
+    } finally {
+      setBusyAction(null);
+      void refreshStatus();
+    }
+  }, [refreshStatus]);
+
+  const handleRemoveLegacyCopy = useCallback(() => {
+    Alert.alert(
+      "Remove the old unencrypted copy?",
+      "Before this version, Xayra stored your notes without encryption, and that original copy is still on this phone. Xayra will first back up to Google Drive and check that backup, then check your encrypted notes, and only then delete the old copy. Your encrypted notes and your Google Drive backups aren't touched. Deleting a file doesn't guarantee it can never be recovered from the phone's storage.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Continue",
+          onPress: () => {
+            if (!status.isConnected) {
+              Alert.alert("Back up first", "Connect Google Drive and back up first, so you have a copy you can restore. Then remove the old copy. Nothing was removed.");
+              return;
+            }
+            setBusyAction("legacy");
+            void (async () => {
+              try {
+                await backupToDrive();
+                const coverage = await checkVaultAgainstLegacy();
+                setBusyAction(null);
+                if (coverage.missingNotes + coverage.missingTodos === 0) {
+                  await removeOldCopy();
+                  return;
+                }
+                Alert.alert(
+                  "Some items will be gone for good",
+                  `The old copy has ${coverage.missingNotes} note${coverage.missingNotes === 1 ? "" : "s"} and ${coverage.missingTodos} to-do${coverage.missingTodos === 1 ? "" : "s"} that aren't in Xayra any more, usually ones you deleted since the update. Removing the old copy removes them for good.`,
+                  [
+                    { text: "Keep the old copy", style: "cancel" },
+                    { text: "Remove", style: "destructive", onPress: () => void removeOldCopy() },
+                  ]
+                );
+              } catch (err) {
+                setBusyAction(null);
+                Alert.alert("Nothing was removed", userFacingMessage(err, "The old copy was kept because the checks didn't finish."));
+              }
+            })();
+          },
+        },
+      ]
+    );
+  }, [status.isConnected, removeOldCopy]);
+
   const handleWipeAllNotes = useCallback(() => {
     Alert.alert(
       "Delete All Notes",
-      "This permanently deletes every note, recording, and search index on this device. This cannot be undone. Your Google Drive backup (if any) is not affected.",
+      `This permanently deletes every note, recording, and search index on this device. This cannot be undone. Your Google Drive backup (if any) is not affected.${
+        legacyCopyPresent ? " The old unencrypted copy from before the update to encryption is removed separately, with \"Remove the old unencrypted copy\"." : ""
+      }`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -333,7 +409,7 @@ export default function SettingsScreen() {
         },
       ]
     );
-  }, [refreshStatus]);
+  }, [refreshStatus, legacyCopyPresent]);
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
@@ -599,6 +675,25 @@ export default function SettingsScreen() {
             with notes are in Xayra's private storage but aren't encrypted. Deleting here removes everything from this
             phone right away; it doesn't delete a Google Drive backup.
           </Text>
+          {legacyCopyPresent ? (
+            <>
+              <Text style={[styles.metaText, styles.privacyButtonGap]}>
+                You updated from an earlier version, and the original unencrypted copy of your notes is still in Xayra's
+                private storage on this phone.
+              </Text>
+              <Pressable
+                onPress={handleRemoveLegacyCopy}
+                disabled={busyAction !== null}
+                style={({ pressed }) => [styles.secondaryButton, styles.privacyButtonGap, pressed && styles.buttonPressed]}
+              >
+                {busyAction === "legacy" ? (
+                  <ActivityIndicator color={colors.accent} size="small" />
+                ) : (
+                  <Text style={styles.secondaryButtonText}>Remove the old unencrypted copy</Text>
+                )}
+              </Pressable>
+            </>
+          ) : null}
           <Pressable
             onPress={handleWipeAllNotes}
             disabled={busyAction !== null || notesStoredLocally === 0}

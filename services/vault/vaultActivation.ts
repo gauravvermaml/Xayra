@@ -41,6 +41,8 @@ import { classifyHeader, decideVaultAction, type FileKind, type PointerState, ty
 export const VAULT_DATABASE_NAME = "xayra.sqlite";
 export const LEGACY_DATABASE_NAME = "silent-confidant.sqlite";
 const SIDE_FILE_SUFFIXES = ["-journal", "-wal", "-shm"] as const;
+/** The legacy database's side files (legacyCopy.ts removes exactly these). */
+export const LEGACY_SIDE_FILE_SUFFIXES = SIDE_FILE_SUFFIXES;
 const POINTER_VERSION = 1;
 const POINTER_DATABASE = `vault/${VAULT_DATABASE_NAME}`;
 const POINTER_CIPHER = "sqlcipher4";
