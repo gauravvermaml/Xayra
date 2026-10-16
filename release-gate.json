@@ -5,5 +5,11 @@
     "Confirm on a physical device the release-batch-1 fixes verified on the emulator: first-launch notification prompt no longer cancels the fingerprint, plain error messages, Drive/Calendar consent requested separately (no loop), 'Recover my notes' reachable in the production package for a missing key",
     "Keyboard/input: input tray hidden behind the keyboard after a send (fixed on the emulator) and consecutive typed notes — checked on a physical device",
     "Privacy policy, Play listing, in-app wording and Data safety answers corrected for the encrypted release"
-  ]
+  ],
+  "internalTestingBuild": {
+    "version": "1.0.43",
+    "versionCode": 51,
+    "openedAt": "2026-10-16T01:03:00Z",
+    "expiresAt": "2026-10-18T01:03:00Z"
+  }
 }
