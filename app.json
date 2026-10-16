@@ -27,9 +27,7 @@
         "android.permission.USE_BIOMETRIC",
         "android.permission.USE_FINGERPRINT",
         "android.permission.RECORD_AUDIO",
-        "android.permission.MODIFY_AUDIO_SETTINGS",
-        "android.permission.FOREGROUND_SERVICE",
-        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
       "blockedPermissions": [
         "android.permission.SYSTEM_ALERT_WINDOW",
@@ -49,7 +47,8 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow Xayra to access your microphone to record voice notes."
+          "microphonePermission": "Allow Xayra to access your microphone to record voice notes.",
+          "enableBackgroundPlayback": false
         }
       ],
       "onnxruntime-react-native",
