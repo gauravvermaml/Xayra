@@ -391,8 +391,8 @@ export default function SettingsScreen() {
     Alert.alert(
       "Delete All Notes",
       legacyCopyPresent
-        ? "This permanently deletes every note, recording and search index on this phone, and the old unencrypted copy of your notes and to-dos left from before the update to encryption. This cannot be undone. Your Google Drive backups aren't deleted; remove those separately."
-        : "This permanently deletes every note, recording, and search index on this device. This cannot be undone. Your Google Drive backup (if any) is not affected.",
+        ? "This permanently deletes every note, recording and search index on this phone, and the old unencrypted copy of your notes and to-dos left from before the update to encryption. Your to-dos in Xayra are kept. Existing Google Drive backups aren't deleted. This cannot be undone."
+        : "This permanently deletes every note, recording and search index on this phone. Your to-dos are kept. Existing Google Drive backups aren't deleted. This cannot be undone.",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -419,11 +419,11 @@ export default function SettingsScreen() {
               if (notesError) {
                 Alert.alert("Notes weren't deleted", `${userFacingMessage(notesError, "Failed to delete local notes.")}${legacyNote}`);
               } else if (!legacyCopyPresent) {
-                showToast("All local notes deleted.");
+                showToast("All notes deleted. Your to-dos and Drive backups are kept.");
               } else {
                 Alert.alert(
                   legacyFullyRemoved ? "Deleted" : "Notes deleted, old copy not fully removed",
-                  `Every note, recording and search index on this phone was deleted.${legacyNote} Your Google Drive backups weren't deleted.`
+                  `Every note, recording and search index on this phone was deleted.${legacyNote} Your to-dos were kept, and your Google Drive backups weren't deleted.`
                 );
               }
             })();
@@ -486,9 +486,9 @@ export default function SettingsScreen() {
               {protection.account === "extra" ? (
                 <Text style={styles.metaText}>
                   Backs up to a hidden Xayra folder in your Google Drive, locked with your recovery
-                  code (Extra Privacy). New backups can't be read without that code — not by Google, and
-                  not by us. Backups made before Extra Privacy stay readable with Google account access
-                  until you remove them.
+                  code (Extra Privacy). New backups open only with that code, or on one of your phones
+                  that already holds the key — not by Google, and not by us. Backups made before Extra
+                  Privacy stay readable with Google account access until you remove them.
                 </Text>
               ) : (
                 <Text style={styles.metaText}>

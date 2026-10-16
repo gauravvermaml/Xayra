@@ -107,6 +107,13 @@ export function ExtraPrivacySetup({ visible, mode, onClose }: { visible: boolean
           <>
             <Text style={styles.title}>{mode === "activate" ? "Your recovery code" : "Your new recovery code"}</Text>
             <Text style={styles.body}>Xayra created this code for you. Save it somewhere safe now — it won't be shown again.</Text>
+            {mode === "replace" ? (
+              <Text style={styles.body}>
+                Once the new code is active, your old code stops opening your Google Drive backup. Other phones with Xayra
+                keep their own protected recovery copy, which the old code can still open until each phone is given the new
+                code.
+              </Text>
+            ) : null}
             {code ? (
               <View style={styles.codeBox} accessible accessibilityLabel={`Recovery code ${codeGroups.join(", ")}`}>
                 {codeGroups.map((g, i) => (

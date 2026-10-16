@@ -18,7 +18,8 @@ export function SmartNudgeBanner({ onConnect, onDismiss }: SmartNudgeBannerProps
   return (
     <View style={styles.container}>
       <Text style={styles.text}>
-        Keep a backup of your notes. Connect Google Drive for encrypted backups.
+        Keep a backup of your notes in your Google Drive. Backups are encrypted, and the key is kept in your Google
+        account so you can restore with just your account.
       </Text>
       <View style={styles.actions}>
         <Pressable onPress={onConnect} style={styles.connectButton}>
