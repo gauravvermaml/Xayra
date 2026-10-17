@@ -1,6 +1,6 @@
 import { forwardRef, useCallback, useMemo } from "react";
 import { Pressable, StyleSheet, View } from "react-native";
-import BottomSheet, { type BottomSheetProps } from "@gorhom/bottom-sheet";
+import BottomSheet, { BottomSheetFooter, type BottomSheetFooterProps, type BottomSheetProps } from "@gorhom/bottom-sheet";
 import type { SharedValue } from "react-native-reanimated";
 
 import { ModelDownloadCard } from "./ModelDownloadCard";
@@ -78,7 +78,7 @@ export const SHEET_SNAP_POINTS = ["20%", "50%"];
 const SheetDragHandle = forwardRef<View, { onPress: () => void }>(function SheetDragHandle({ onPress }, ref) {
   return (
     <View ref={ref} style={styles.handleWrap}>
-      <Pressable onPress={onPress} hitSlop={12} style={styles.dragHandleHitArea}>
+      <Pressable testID="sheet-handle" onPress={onPress} hitSlop={12} style={styles.dragHandleHitArea}>
         <View style={styles.dragHandle} />
       </Pressable>
     </View>
@@ -161,6 +161,16 @@ export type HistorySheetProps = {
    * (backdrop tap, auto-peek on submit, keyboard focus, drag-handle tap)
    * decelerates with the same soft, native-feeling curve. */
   animationConfigs?: BottomSheetProps["animationConfigs"];
+  /** STAGE 2 SPIKE ONLY — overrides for the tray/dock comparison
+   * (services/dev/trayVariant.ts). All default to today's behaviour. */
+  spikeSnapPoints?: (string | number)[];
+  /** Variant A: area below the sheet reserved for the dock (gorhom
+   * `bottomInset`, subtracted before % snap points resolve). */
+  spikeSheetBottomInset?: number;
+  /** Variant B: the dock, rendered as the sheet's footer. */
+  spikeFooter?: React.ReactNode;
+  /** Variant B: keeps the list's end clear of the footer. */
+  spikeContentBottomPadding?: number;
 };
 
 /**
@@ -190,6 +200,10 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     expandDragDistance,
     onExpandSettle,
     animationConfigs,
+    spikeSnapPoints,
+    spikeSheetBottomInset,
+    spikeFooter,
+    spikeContentBottomPadding,
   },
   ref
 ) {
@@ -221,11 +235,18 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
 
   const renderHandle = useCallback(() => <SheetDragHandle onPress={handleTapDragHandle} />, [handleTapDragHandle]);
 
+  const renderSpikeFooter = useCallback(
+    (props: BottomSheetFooterProps) => <BottomSheetFooter {...props}>{spikeFooter}</BottomSheetFooter>,
+    [spikeFooter]
+  );
+
   return (
     <BottomSheet
       ref={ref}
       index={0}
-      snapPoints={SHEET_SNAP_POINTS}
+      snapPoints={spikeSnapPoints ?? SHEET_SNAP_POINTS}
+      bottomInset={spikeSheetBottomInset ?? 0}
+      footerComponent={spikeFooter ? renderSpikeFooter : undefined}
       animatedIndex={animatedIndex}
       onChange={onIndexChange}
       onAnimate={(from: number, to: number) => devTiming("VoiceAskTiming", "tray animation start", { from, to })}
@@ -326,7 +347,11 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           below) is a real flex margin, not a clipping trick — the list can
           structurally never render behind the sticky header above it. */}
       <View
-        style={[styles.body, (sheetIndex === 0 || contentHidden) && styles.bodyHidden]}
+        style={[
+          styles.body,
+          spikeContentBottomPadding ? { paddingBottom: spikeContentBottomPadding } : null,
+          (sheetIndex === 0 || contentHidden) && styles.bodyHidden,
+        ]}
         pointerEvents={sheetIndex === 0 || contentHidden ? "none" : undefined}
       >
         {/* Monochromatic glass container: one translucent, bordered box

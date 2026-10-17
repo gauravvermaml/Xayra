@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Dimensions, Image, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import { getRecordingPermissionsAsync } from "expo-audio";
@@ -28,6 +28,8 @@ import { NoteDetailModal } from "../components/NoteDetailModal";
 import { showToast } from "../components/Toast";
 import { TodosOverlay } from "../components/TodosOverlay";
 import { HOME_SUBTITLE } from "../constants/copy";
+import { SpikeDock, SPIKE_DOCK_ROW_HEIGHT } from "../components/dev/SpikeDock";
+import { useTrayVariant, type TrayVariant } from "../services/dev/trayVariant";
 import { colors } from "../constants/theme";
 import { useLaunchShortcut } from "../hooks/useLaunchShortcut";
 import { useToDos } from "../hooks/useToDos";
@@ -197,6 +199,40 @@ const EXPAND_DRAG_DISTANCE = SHEET_HEIGHTS_PX[1] - SHEET_HEIGHTS_PX[0];
  * an ASK request is in flight. */
 const CENTER_AREA_BREATHING_ROOM_PX = 40;
 
+/** STAGE 2 SPIKE ONLY — handle area (20) + compose bar (48) + gap (12): the
+ * part of the sheet above the dock at variant B's content-sized rest. */
+const SPIKE_B_HEADER_PX = 80;
+
+type SpikeGeometry = {
+  /** Distance from the screen bottom to the sheet's top edge at index 0/1
+   * (including any reserved dock area below it). */
+  heights: [number, number];
+  snapPoints?: (string | number)[];
+  dockInset: number;
+  expandDragDistance: number;
+};
+
+function spikeGeometry(variant: TrayVariant, dockHeight: number): SpikeGeometry {
+  if (variant === "A" || variant === "A2") {
+    const container = SCREEN_HEIGHT - dockHeight;
+    return {
+      heights: [0.2 * container + dockHeight, 0.5 * container + dockHeight],
+      dockInset: dockHeight,
+      expandDragDistance: 0.3 * container,
+    };
+  }
+  if (variant === "B") {
+    const rest = SPIKE_B_HEADER_PX + dockHeight;
+    return {
+      heights: [rest, 0.5 * SCREEN_HEIGHT],
+      snapPoints: [rest, "50%"],
+      dockInset: 0,
+      expandDragDistance: EXPAND_DRAG_DISTANCE,
+    };
+  }
+  return { heights: SHEET_HEIGHTS_PX, dockInset: 0, expandDragDistance: EXPAND_DRAG_DISTANCE };
+}
+
 /**
  * Build 22 — REVERT TO EXPLICIT MODE SWITCHING: the automatic RECORD/ASK
  * classification introduced in Build 18 (a regex + Llama micro-prompt
@@ -224,6 +260,13 @@ let didCleanupRecordingsThisLaunch = false;
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  // STAGE 2 SPIKE ONLY — tray/dock architecture under comparison
+  // (services/dev/trayVariant.ts). "control" everywhere outside dev builds.
+  const trayVariant = useTrayVariant();
+  const isSpikeDock = trayVariant !== "control";
+  const spikeDockHeight = SPIKE_DOCK_ROW_HEIGHT + insets.bottom;
+  const geometry = useMemo(() => spikeGeometry(trayVariant, spikeDockHeight), [trayVariant, spikeDockHeight]);
+  const sheetHeights = geometry.heights;
   const recorder = useVoiceRecorder();
   const chatSession = useChatSession();
   // Only the count is used on this screen (the pill's badge) — TodosOverlay
@@ -437,10 +480,10 @@ export default function HomeScreen() {
     paddingBottom: interpolate(
       sheetAnimatedIndex.value,
       [0, 1],
-      SHEET_HEIGHTS_PX.map((heightPx) => heightPx + CENTER_AREA_BREATHING_ROOM_PX),
+      sheetHeights.map((heightPx) => heightPx + CENTER_AREA_BREATHING_ROOM_PX),
       "clamp"
     ),
-  }));
+  }), [sheetHeights]);
 
   // Build 23 POSITION FLOATING PILLS (live-tracked): found by testing on a
   // physical device — a fixed `bottom: SHEET_HEIGHTS_PX[0] + margin` (the
@@ -454,8 +497,8 @@ export default function HomeScreen() {
   // there's no text input or keyboard interaction in this stack at all, just
   // a plain shared-value interpolation against the sheet's own index.
   const drawerFloatingStackAnimatedStyle = useAnimatedStyle(() => ({
-    bottom: interpolate(sheetAnimatedIndex.value, [0, 1], SHEET_HEIGHTS_PX, "clamp") + 16,
-  }));
+    bottom: interpolate(sheetAnimatedIndex.value, [0, 1], sheetHeights, "clamp") + 16,
+  }), [sheetHeights]);
 
   // BACKDROP TAP TO DISMISS: tapping anywhere on the canvas outside the
   // sheet/compose bar/center button (all of which are Pressables of their
@@ -1312,6 +1355,20 @@ export default function HomeScreen() {
     mode: inputMode,
   });
   const showCancelProcessing = canvasState === "transcribing" && !activeMode.isActive && cancellableJobId !== null;
+
+  // STAGE 2 SPIKE ONLY — the placeholder dock shared by variants A and B.
+  const spikeDock = isSpikeDock ? (
+    <SpikeDock
+      ref={quickMenuButtonRef}
+      handsfreeActive={activeMode.isActive}
+      handsfreeState={activeMode.state}
+      pendingCount={pendingCount}
+      bottomInset={insets.bottom}
+      onHandsfree={handleToggleHandsfree}
+      onTodos={() => setIsTodosVisible(true)}
+      onMore={handleOpenQuickMenu}
+    />
+  ) : null;
   // Record/Ask can't change while a manual utterance is in flight — its
   // meaning was frozen when recording began.
   const isModeLocked = manualUtterance.phase !== "idle";
@@ -1509,25 +1566,29 @@ export default function HomeScreen() {
               One small icon, inline with To-Dos (the cluster's own
               least-frequent existing member), opens a two-row popover
               instead. Record/Ask/Handsfree below are unchanged. */}
-          <View style={styles.topRow}>
-            <Pressable ref={quickMenuButtonRef} onPress={handleOpenQuickMenu} hitSlop={10} style={styles.quickMenuButton}>
-              <Text style={styles.quickMenuButtonText}>•••</Text>
-            </Pressable>
-            <Pressable onPress={() => setIsTodosVisible(true)} style={styles.todosPill}>
-              <Text style={styles.todosPillText}>
-                {pendingCount > 0 ? `To-Dos (${pendingCount})` : "To-Dos"}
-              </Text>
-            </Pressable>
-          </View>
+          {!isSpikeDock && (
+            <>
+              <View style={styles.topRow}>
+                <Pressable ref={quickMenuButtonRef} onPress={handleOpenQuickMenu} hitSlop={10} style={styles.quickMenuButton}>
+                  <Text style={styles.quickMenuButtonText}>•••</Text>
+                </Pressable>
+                <Pressable onPress={() => setIsTodosVisible(true)} style={styles.todosPill}>
+                  <Text style={styles.todosPillText}>
+                    {pendingCount > 0 ? `To-Dos (${pendingCount})` : "To-Dos"}
+                  </Text>
+                </Pressable>
+              </View>
 
-          <Pressable
-            onPress={handleToggleHandsfree}
-            style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
-          >
-            <Text style={[styles.handsfreePillText, activeMode.isActive && styles.handsfreePillTextActive]}>
-              🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
-            </Text>
-          </Pressable>
+              <Pressable
+                onPress={handleToggleHandsfree}
+                style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
+              >
+                <Text style={[styles.handsfreePillText, activeMode.isActive && styles.handsfreePillTextActive]}>
+                  🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
+                </Text>
+              </Pressable>
+            </>
+          )}
 
           <View style={styles.modePill}>
             {(["record", "ask"] as const).map((mode) => (
@@ -1560,9 +1621,15 @@ export default function HomeScreen() {
         modelDownload={chatSession.modelDownload}
         bottomInset={insets.bottom}
         expandProgress={expandProgress}
-        expandDragDistance={EXPAND_DRAG_DISTANCE}
+        expandDragDistance={geometry.expandDragDistance}
         onExpandSettle={handleExpandSettle}
         animationConfigs={sheetAnimationConfigs}
+        spikeSnapPoints={geometry.snapPoints}
+        spikeSheetBottomInset={
+          trayVariant === "A2" ? (isComposing ? 0 : geometry.dockInset) : trayVariant === "A" ? geometry.dockInset : undefined
+        }
+        spikeFooter={trayVariant === "B" && !isComposing ? spikeDock : undefined}
+        spikeContentBottomPadding={trayVariant === "B" ? spikeDockHeight : undefined}
         composeBarSlot={
           <ComposeBar
             inputText={inputText}
@@ -1612,6 +1679,10 @@ export default function HomeScreen() {
           no reason to paint above it), so the surface behind the system nav
           buttons reads correctly even on a device where the OS-level color
           is ignored. */}
+      {(trayVariant === "A" || trayVariant === "A2") && !isComposing && !isTextBoxExpanded && !isTodosVisible && (
+        <View style={styles.spikeDockA}>{spikeDock}</View>
+      )}
+
       <View pointerEvents="none" style={[styles.navBarInset, { height: insets.bottom }]} />
 
       {/* MONOCHROMATIC GLASS — FULL-SCREEN EXPANDED STAGE: a plain, opaque
@@ -1635,7 +1706,7 @@ export default function HomeScreen() {
         topInset={insets.top}
         bottomInset={insets.bottom}
         progress={expandProgress}
-        dragDistance={EXPAND_DRAG_DISTANCE}
+        dragDistance={geometry.expandDragDistance}
         onSettle={handleExpandSettle}
       >
         <ChatSheetContent
@@ -1801,6 +1872,14 @@ const styles = StyleSheet.create({
   // sheet), so unlike Build 20's ComposeBar this has no keyboard-avoidance
   // of its own to fight with anything — just a plain shared-value
   // interpolation against the sheet's own index.
+  spikeDockA: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    bottom: 0,
+    zIndex: 30,
+    elevation: 30,
+  },
   drawerFloatingStack: {
     position: "absolute",
     alignItems: "flex-end",
