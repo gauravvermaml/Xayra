@@ -84,7 +84,31 @@
           "color": "#0E0F12"
         }
       ],
-      "expo-font",
+      [
+        "expo-font",
+        {
+          "android": {
+            "fonts": [
+              {
+                "fontFamily": "PlusJakartaSans",
+                "fontDefinitions": [
+                  { "path": "./assets/fonts/plusjakartasans_medium.ttf", "weight": 500 },
+                  { "path": "./assets/fonts/plusjakartasans_semibold.ttf", "weight": 600 },
+                  { "path": "./assets/fonts/plusjakartasans_bold.ttf", "weight": 700 }
+                ]
+              },
+              {
+                "fontFamily": "DMSans",
+                "fontDefinitions": [
+                  { "path": "./assets/fonts/dmsans_regular.ttf", "weight": 400 },
+                  { "path": "./assets/fonts/dmsans_medium.ttf", "weight": 500 },
+                  { "path": "./assets/fonts/dmsans_semibold.ttf", "weight": 600 }
+                ]
+              }
+            ]
+          }
+        }
+      ],
       "expo-asset",
       "@react-native-community/datetimepicker"
     ],
