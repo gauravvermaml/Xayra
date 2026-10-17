@@ -1,9 +1,10 @@
-import { memo, useEffect, useRef } from "react";
-import { Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
+import { memo, useEffect, useRef, useState } from "react";
+import { Keyboard, type LayoutChangeEvent, PixelRatio, Platform, Pressable, StyleSheet, Text, View } from "react-native";
 import { BottomSheetTextInput } from "@gorhom/bottom-sheet";
 import { Feather } from "@expo/vector-icons";
 
 import { colors, radius, spacing } from "../constants/theme";
+import { composeClearance } from "../utils/composeClearance";
 
 /** Live-requested cap: past this many lines, earlier lines scroll up out of
  * view instead of the box growing further, so the line currently being
@@ -12,6 +13,16 @@ import { colors, radius, spacing } from "../constants/theme";
  * other half of this. */
 const MAX_INPUT_LINES = 5;
 const INPUT_LINE_HEIGHT = 20;
+const INPUT_MAX_HEIGHT = INPUT_LINE_HEIGHT * MAX_INPUT_LINES;
+const SEARCH_BAR_MIN_HEIGHT = 40;
+/** Kept between the field's bottom edge and the keyboard's top edge. */
+const KEYBOARD_MARGIN = 8;
+/** The 20% -> 50% focus snap can still be settling when the keyboard reports
+ * itself shown, so the field is measured again once it has. */
+const SETTLE_REMEASURE_MS = 300;
+
+type InputCap = { lines: number; maxHeight: number };
+const DEFAULT_CAP: InputCap = { lines: MAX_INPUT_LINES, maxHeight: INPUT_MAX_HEIGHT };
 
 export type ComposeBarProps = {
   inputText: string;
@@ -139,10 +150,79 @@ export const ComposeBar = memo(function ComposeBar({
     onSubmit(inputText.trim());
   };
 
+  // While the keyboard is open, the field may only grow as far as the space
+  // actually left above it (see utils/composeClearance.ts for why the tray
+  // itself doesn't move). The cap is recomputed only on keyboard show/hide —
+  // never from layout or typing — so growing the field can't feed back into
+  // it. The input's one-line height (text plus Android's own padding, which
+  // varies with font scale) is the smallest height it has laid out at; it's
+  // kept in a ref, so recording it never re-renders.
+  const searchBarRef = useRef<View>(null);
+  const oneLineRef = useRef<{ fontScale: number; height: number } | null>(null);
+  const [cap, setCap] = useState<InputCap>(DEFAULT_CAP);
+  const handleInputLayout = (e: LayoutChangeEvent) => {
+    const fontScale = PixelRatio.getFontScale();
+    const { height } = e.nativeEvent.layout;
+    const known = oneLineRef.current;
+    if (!known || known.fontScale !== fontScale || height < known.height) {
+      oneLineRef.current = { fontScale, height };
+    }
+  };
+  useEffect(() => {
+    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
+    let keyboardTop: number | null = null;
+    const measure = () => {
+      const node = searchBarRef.current;
+      if (!node || keyboardTop === null) return;
+      const top = keyboardTop;
+      node.measureInWindow((_x, y) => {
+        if (keyboardTop !== top) return; // keyboard moved or closed since
+        const fontScale = PixelRatio.getFontScale();
+        const lineHeight = INPUT_LINE_HEIGHT * fontScale;
+        const known = oneLineRef.current;
+        const { lines, maxHeight } = composeClearance({
+          keyboardTop: top,
+          containerTop: y,
+          containerPadding: spacing.xs,
+          containerMinHeight: SEARCH_BAR_MIN_HEIGHT,
+          margin: KEYBOARD_MARGIN,
+          lineHeight,
+          oneLineHeight: known && known.fontScale === fontScale ? known.height : lineHeight,
+          maxLines: MAX_INPUT_LINES,
+          maxHeight: INPUT_MAX_HEIGHT,
+        });
+        // Same values -> keep the same object, so React skips the re-render.
+        setCap((prev) => (prev.lines === lines && prev.maxHeight === maxHeight ? prev : { lines, maxHeight }));
+      });
+    };
+    const clearTimer = () => {
+      if (settleTimer !== null) clearTimeout(settleTimer);
+      settleTimer = null;
+    };
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      keyboardTop = e.endCoordinates.screenY;
+      clearTimer();
+      measure();
+      settleTimer = setTimeout(measure, SETTLE_REMEASURE_MS);
+    });
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      keyboardTop = null;
+      clearTimer();
+      setCap(DEFAULT_CAP);
+    });
+    return () => {
+      clearTimer();
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
   return (
     <View style={styles.container}>
       <View style={styles.row}>
-        <View style={styles.searchBar}>
+        <View ref={searchBarRef} testID="compose-field" style={styles.searchBar}>
           <Feather
             testID="compose-mode-icon"
             name={mode === "record" ? "edit-3" : "search"}
@@ -157,7 +237,8 @@ export const ComposeBar = memo(function ComposeBar({
             onBlur={onInputBlur}
             placeholder={placeholder}
             placeholderTextColor="rgba(235,235,245,0.45)"
-            style={styles.input}
+            style={[styles.input, cap !== DEFAULT_CAP && { maxHeight: cap.maxHeight }]}
+            onLayout={handleInputLayout}
             multiline
             // Android-specific: for a multiline TextInput, this is what
             // actually caps the box to N lines' worth of height and makes it
@@ -166,7 +247,11 @@ export const ComposeBar = memo(function ComposeBar({
             // didn't reliably cap growth on-device. `MAX_INPUT_LINES` and
             // `input`'s explicit `lineHeight` below are kept in exact
             // agreement so the two mechanisms describe the same 5 lines.
-            numberOfLines={MAX_INPUT_LINES}
+            //
+            // While the keyboard is open both are lowered together (`cap`),
+            // so on a short screen the box starts scrolling earlier instead
+            // of reaching under the keyboard.
+            numberOfLines={cap.lines}
             textAlignVertical="top"
             blurOnSubmit={false}
           />
@@ -183,6 +268,9 @@ export const ComposeBar = memo(function ComposeBar({
             onPress={handleSubmit}
             disabled={!canSubmit}
             hitSlop={8}
+            testID="compose-submit"
+            accessibilityRole="button"
+            accessibilityLabel="Send"
             style={[styles.submitButton, !canSubmit && styles.submitButtonDisabled]}
           >
             <Text style={styles.submitIcon}>↑</Text>
@@ -218,7 +306,7 @@ const styles = StyleSheet.create({
     // fixed height — `multiline` above means this box needs to actually grow
     // as the user types more lines, the same way any chat composer's input
     // does, instead of clipping everything past the first line.
-    minHeight: 40,
+    minHeight: SEARCH_BAR_MIN_HEIGHT,
     paddingVertical: spacing.xs,
   },
   searchIcon: {
@@ -233,7 +321,8 @@ const styles = StyleSheet.create({
     // Android) needs to agree with this exactly, or the two disagree about
     // where the 5th line ends.
     lineHeight: INPUT_LINE_HEIGHT,
-    maxHeight: INPUT_LINE_HEIGHT * MAX_INPUT_LINES,
+    // Lowered inline while the keyboard leaves less room (`cap`).
+    maxHeight: INPUT_MAX_HEIGHT,
   },
   submitButton: {
     width: 30,
