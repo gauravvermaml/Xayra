@@ -25,6 +25,7 @@ import {
 } from "../components/CentralRecorderCanvas";
 import { ChatSheetContent } from "../components/ChatSheetContent";
 import { CancelProcessingButton } from "../components/CancelProcessingButton";
+import { RecordingActions } from "../components/RecordingActions";
 import { ComposeBar } from "../components/ComposeBar";
 import { ExpandedTextOverlay } from "../components/ExpandedTextOverlay";
 import { HandsfreeTypingStatus } from "../components/HandsfreeTypingStatus";
@@ -68,6 +69,7 @@ import {
   idleTapCue,
   recordCompletionSpeech,
   ManualUtteranceController,
+  recordingActionsFor,
   type ManualUtteranceSnapshot,
   type UtteranceMode,
 } from "../services/audio/manualUtterance";
@@ -1177,10 +1179,15 @@ export default function HomeScreen() {
       // Cancel during recording: the native recognizer started alongside
       // the recording goes too, and no audio file is ever written.
       discardRecording: async () => {
-        asrRouter.cancelListening();
+        // Throws, leaving the recording as it was, if the microphone
+        // couldn't be told to stop — then the recognizer keeps going too.
         await recorderRef.current.discardRecording();
+        asrRouter.cancelListening();
       },
-      onCancelCleanupError: (err) => console.warn("[Recorder] Closing the microphone failed while cancelling", err),
+      onCancelCleanupError: (err) => {
+        console.warn("[Recorder] Stopping the microphone failed while cancelling", err);
+        setError("Couldn’t stop the microphone. Try Cancel again.");
+      },
       processUtterance: async (audioUri, mode, trigger, release) => {
         if (__DEV__) {
           console.log(`[Recorder] Finished by ${trigger === "silence" ? "trailing silence" : "tap"} (${mode})`);
@@ -1272,6 +1279,16 @@ export default function HomeScreen() {
       void manualController.cancel(utteranceId).then((cancelled) => {
         if (cancelled) showToast("Cancelled");
       });
+    },
+    [manualController]
+  );
+
+  // Finish from the compact control shown only when the emblem is hidden
+  // (constrained screens): the same manual completion as tapping the
+  // emblem, pinned to the recording it was shown for.
+  const handleFinishRecording = useCallback(
+    (utteranceId: number) => {
+      void manualController.finish("tap", utteranceId);
     },
     [manualController]
   );
@@ -1506,10 +1523,6 @@ export default function HomeScreen() {
     mode: inputMode,
   });
   const showCancelProcessing = canvasState === "transcribing" && !activeMode.isActive && cancellableJobId !== null;
-  // Cancel while a manual recording is capturing; Handsfree keeps its own
-  // tap-to-discard.
-  const showCancelRecording =
-    canvasState === "recording" && manualUtterance.phase === "recording" && !activeMode.isActive;
   const recordingUtteranceId = manualController.utteranceId;
   // Record/Ask can't change while a manual utterance is in flight — its
   // meaning was frozen when recording began.
@@ -1586,6 +1599,13 @@ export default function HomeScreen() {
     zoneHalf,
   ]);
   const emblemTier = sheetIndex === 0 ? emblemTiers.rest : emblemTiers.half;
+  // Cancel while a manual recording is capturing (Handsfree keeps its own
+  // tap-to-discard); Finish beside it only when the emblem is hidden.
+  const recordingActions = recordingActionsFor({
+    isCapturing: canvasState === "recording" && manualUtterance.phase === "recording",
+    isHandsfreeActive: activeMode.isActive,
+    emblemHidden: emblemTier.hidden,
+  });
 
   const emblemLabel = activeMode.isActive
     ? "Handsfree is on. Long-press to turn it off"
@@ -1791,14 +1811,11 @@ export default function HomeScreen() {
         )}
         {canvasState === "recording" && emblemTier.cue && <Text style={styles.statusHint}>Tap to finish</Text>}
         {showCancelProcessing && <CancelProcessingButton onCancel={handleCancelProcessing} />}
-        {showCancelRecording && (
-          <CancelProcessingButton
-            testID="cancel-recording"
-            accessibilityLabel={
-              manualUtterance.mode === "ask"
-                ? "Cancel question. Stops listening without asking."
-                : "Cancel recording. Stops listening without saving."
-            }
+        {recordingActions.cancel && (
+          <RecordingActions
+            mode={manualUtterance.mode}
+            showFinish={recordingActions.finish}
+            onFinish={() => handleFinishRecording(recordingUtteranceId)}
             onCancel={() => handleCancelRecording(recordingUtteranceId)}
           />
         )}

@@ -37,8 +37,10 @@ export type VoiceRecorder = {
   stopRecording: () => Promise<string | null>;
   /** Cancel: stops capture and throws the audio away — no WAV is written,
    * so there is no file to clean up. Aborts a start that hasn't opened the
-   * microphone yet. The microphone is released even if the native stop
-   * throws. A no-op when nothing is recording or a stop is in flight. */
+   * microphone yet. If the native stop call itself throws, the microphone
+   * was never told to stop, so nothing is reported free: the recording is
+   * left exactly as it was and the error is rethrown. A no-op when nothing
+   * is recording or a stop is in flight. */
   discardRecording: () => Promise<void>;
 };
 
@@ -330,20 +332,23 @@ export function useVoiceRecorder(): VoiceRecorder {
     if (isBusyRef.current || !isRecordingRef.current) {
       return;
     }
+    // The native stop only clears the capture loop's flag; the capture
+    // thread then stops and releases the AudioRecord in its own `finally`
+    // (patched RNLiveAudioStreamModule.java). If this call throws, that flag
+    // was never cleared and the microphone is still capturing.
+    AudioRecord.stop();
     isBusyRef.current = true;
     setIsTransitioning(true);
     clearAutoStop();
-    // Stop listening first: nothing captured from here on is kept.
+    // Nothing captured from here on is kept.
     subscriptionRef.current?.remove();
     subscriptionRef.current = null;
     errorSubscriptionRef.current?.remove();
     errorSubscriptionRef.current = null;
     chunksRef.current = [];
     try {
-      AudioRecord.stop();
-      // The native capture thread releases the microphone on its next
-      // loop; give it the same drain time as a normal stop before the
-      // microphone is reported free for the next recording.
+      // The same drain a normal stop gives the capture thread to exit and
+      // release the microphone before it's reported free.
       await new Promise((resolve) => setTimeout(resolve, STOP_DRAIN_MS));
     } finally {
       isRecordingRef.current = false;

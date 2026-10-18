@@ -17,10 +17,17 @@ export function CancelProcessingButton({
   onCancel,
   testID = "cancel-processing",
   accessibilityLabel = "Cancel",
+  label = "Cancel",
+  tone = "outline",
 }: {
   onCancel: () => void;
   testID?: string;
   accessibilityLabel?: string;
+  /** Visible text. "Finish" is the only other use (recording, when the
+   * emblem is hidden). */
+  label?: string;
+  /** "filled" sets the primary of a Finish / Cancel pair apart. */
+  tone?: "outline" | "filled";
 }) {
   const scale = useSharedValue(1);
   const animatedStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
@@ -44,8 +51,10 @@ export function CancelProcessingButton({
       accessibilityLabel={accessibilityLabel}
     >
       {({ pressed }) => (
-        <Animated.View style={[styles.button, pressed && styles.buttonPressed, animatedStyle]}>
-          <Text style={styles.text}>Cancel</Text>
+        <Animated.View
+          style={[styles.button, tone === "filled" && styles.buttonFilled, pressed && styles.buttonPressed, animatedStyle]}
+        >
+          <Text style={styles.text}>{label}</Text>
         </Animated.View>
       )}
     </Pressable>
@@ -64,6 +73,10 @@ const styles = StyleSheet.create({
     borderColor: xayraColors.outline,
     alignItems: "center",
     justifyContent: "center",
+  },
+  buttonFilled: {
+    backgroundColor: xayraColors.lilacSoft,
+    borderColor: xayraColors.lilacRing,
   },
   buttonPressed: {
     backgroundColor: xayraColors.line,

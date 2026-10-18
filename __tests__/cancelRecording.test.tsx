@@ -271,18 +271,23 @@ describe("Cancel during recording discards the utterance", () => {
 });
 
 describe("lifecycle and failures", () => {
-  it("a microphone stop failure still releases the mic, returns to idle and allows a new recording", async () => {
+  it("a native stop failure never reports the mic free: the recording continues and Cancel can be retried", async () => {
     const s = await setup();
     await s.start("record");
     mockAudioRecord.stop.mockImplementationOnce(() => {
       throw new Error("native stop failed");
     });
-    expect(await run(() => s.controller.cancel())).toBe(true);
+    expect(await run(() => s.controller.cancel())).toBe(false);
     expect(s.cleanupErrors).toHaveLength(1);
-    expect(isMicInUse()).toBe(false);
-    expect(s.controller.snapshot).toEqual({ phase: "idle", mode: null });
+    // The capture loop was never told to stop, so it still owns the mic.
+    expect(isMicInUse()).toBe(true);
+    expect(s.recorder().isRecording).toBe(true);
+    expect(s.controller.snapshot).toEqual({ phase: "recording", mode: "record" });
     expectNothingKept(s);
 
+    expect(await run(() => s.controller.cancel())).toBe(true);
+    expect(isMicInUse()).toBe(false);
+    expect(s.controller.snapshot).toEqual({ phase: "idle", mode: null });
     await s.start("record");
     expect(s.controller.snapshot.phase).toBe("recording");
   });
@@ -368,5 +373,61 @@ describe("lifecycle and failures", () => {
     await advance(400);
     expect(s.processed).toEqual([expect.objectContaining({ mode: "ask", trigger: "silence" })]);
     expect(mockWrite).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("late and stale callbacks", () => {
+  /** A controller whose recorder is fake, so each utterance's silence
+   * callback can be fired by hand at any time. */
+  function fakeController() {
+    const autoStops: (() => void)[] = [];
+    const processed: string[] = [];
+    const controller = new ManualUtteranceController({
+      startRecording: async (o) => {
+        autoStops.push(o.onAutoStop!);
+        return true;
+      },
+      stopRecording: async () => "file:///fake-cache/recordings/x.wav",
+      discardRecording: async () => {},
+      processUtterance: async (_uri, mode, trigger) => {
+        processed.push(`${mode}:${trigger}`);
+      },
+    });
+    return { controller, autoStops, processed };
+  }
+
+  it("a cancelled recording's late silence callback can't finish the next recording", async () => {
+    const { controller, autoStops, processed } = fakeController();
+    await controller.start("record");
+    await controller.cancel();
+    await controller.start("ask");
+    autoStops[0]();
+    await flush();
+    expect(controller.snapshot).toEqual({ phase: "recording", mode: "ask" });
+    expect(processed).toHaveLength(0);
+    autoStops[1]();
+    await flush();
+    expect(processed).toEqual(["ask:silence"]);
+  });
+
+  it("a Finish aimed at an earlier recording never finishes a newer one", async () => {
+    const { controller, processed } = fakeController();
+    await controller.start("record");
+    const firstId = controller.utteranceId;
+    await controller.cancel(firstId);
+    await controller.start("record");
+    await controller.finish("tap", firstId);
+    expect(controller.snapshot.phase).toBe("recording");
+    expect(processed).toHaveLength(0);
+  });
+
+  it("a delayed Finish after Cancel saves nothing", async () => {
+    const { controller, processed } = fakeController();
+    await controller.start("record");
+    const id = controller.utteranceId;
+    await controller.cancel(id);
+    await controller.finish("tap", id);
+    await controller.finish("tap");
+    expect(processed).toHaveLength(0);
   });
 });
