@@ -91,6 +91,7 @@ describe("HomeDock", () => {
     expect(dockLayout(360, 1)).toBe("stacked");
     expect(dockLayout(411, 1.3)).toBe("stacked");
     expect(dockLayout(360, 1.3)).toBe("rows");
+    expect(dockLayout(360, 1.2999999523)).toBe("rows"); // how Android reports 130 %
     expect(dockLayout(411, 2)).toBe("rows");
   });
 

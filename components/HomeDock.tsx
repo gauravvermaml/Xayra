@@ -51,8 +51,10 @@ export type HomeDockProps = {
 export type DockLayout = "inline" | "stacked" | "rows";
 
 export function dockLayout(width: number, fontScale: number): DockLayout {
-  if (fontScale >= 1.5 || (width < 380 && fontScale >= 1.3)) return "rows";
-  if (width < 380 || fontScale > 1.1) return "stacked";
+  // Android reports e.g. 1.3 as 1.2999…; compare with a small tolerance.
+  const fs = fontScale + 0.01;
+  if (fs >= 1.5 || (width < 380 && fs >= 1.3)) return "rows";
+  if (width < 380 || fs > 1.11) return "stacked";
   return "inline";
 }
 export const HomeDock = forwardRef<View, HomeDockProps>(function HomeDock(
