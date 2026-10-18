@@ -35,6 +35,11 @@ export type VoiceRecorder = {
    * the native session opened — no capture is left running. */
   startRecording: (options?: StartRecordingOptions) => Promise<boolean>;
   stopRecording: () => Promise<string | null>;
+  /** Cancel: stops capture and throws the audio away — no WAV is written,
+   * so there is no file to clean up. Aborts a start that hasn't opened the
+   * microphone yet. The microphone is released even if the native stop
+   * throws. A no-op when nothing is recording or a stop is in flight. */
+  discardRecording: () => Promise<void>;
 };
 
 /**
@@ -317,6 +322,40 @@ export function useVoiceRecorder(): VoiceRecorder {
     }
   }, [clearAutoStop]);
 
+  const discardRecording = useCallback(async () => {
+    if (isBusyRef.current && !isRecordingRef.current) {
+      startAbortRef.current = true;
+      return;
+    }
+    if (isBusyRef.current || !isRecordingRef.current) {
+      return;
+    }
+    isBusyRef.current = true;
+    setIsTransitioning(true);
+    clearAutoStop();
+    // Stop listening first: nothing captured from here on is kept.
+    subscriptionRef.current?.remove();
+    subscriptionRef.current = null;
+    errorSubscriptionRef.current?.remove();
+    errorSubscriptionRef.current = null;
+    chunksRef.current = [];
+    try {
+      AudioRecord.stop();
+      // The native capture thread releases the microphone on its next
+      // loop; give it the same drain time as a normal stop before the
+      // microphone is reported free for the next recording.
+      await new Promise((resolve) => setTimeout(resolve, STOP_DRAIN_MS));
+    } finally {
+      isRecordingRef.current = false;
+      backgroundedDuringRecordingRef.current = false;
+      setIsRecording(false);
+      setAmplitude(0);
+      setMicInUse(false);
+      isBusyRef.current = false;
+      setIsTransitioning(false);
+    }
+  }, [clearAutoStop]);
+
   return {
     isRecording,
     isTransitioning,
@@ -324,5 +363,6 @@ export function useVoiceRecorder(): VoiceRecorder {
     requestPermissions,
     startRecording,
     stopRecording,
+    discardRecording,
   };
 }

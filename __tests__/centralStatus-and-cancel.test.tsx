@@ -137,4 +137,23 @@ describe("Cancel press feedback", () => {
     expect(button.props.accessibilityRole).toBe("button");
     expect(button.props.accessibilityLabel).toBe("Cancel");
   });
+
+  it("the recording Cancel (Stage 5a) carries its own id and a label that says nothing is kept, with a 48dp target", async () => {
+    let tree!: ReactTestRenderer;
+    await act(async () => {
+      tree = create(
+        <CancelProcessingButton
+          testID="cancel-recording"
+          accessibilityLabel="Cancel recording. Stops listening without saving."
+          onCancel={jest.fn()}
+        />
+      );
+    });
+    const button = tree.root.findByProps({ testID: "cancel-recording" });
+    expect(button.props.accessibilityLabel).toBe("Cancel recording. Stops listening without saving.");
+    // 40dp pill + hitSlop on each side = the 48dp minimum.
+    const pressable = tree.root.findAll((n) => n.props.testID === "cancel-recording" && n.props.hitSlop !== undefined)[0];
+    expect(40 + 2 * pressable.props.hitSlop).toBeGreaterThanOrEqual(48);
+    expect(tree.root.findAllByProps({ testID: "cancel-processing" })).toHaveLength(0);
+  });
 });

@@ -13,7 +13,15 @@ const PRESSED_SCALE = 0.9;
  * and a spring back on release. `onCancel` fires on the normal press —
  * nothing waits for the animation.
  */
-export function CancelProcessingButton({ onCancel }: { onCancel: () => void }) {
+export function CancelProcessingButton({
+  onCancel,
+  testID = "cancel-processing",
+  accessibilityLabel = "Cancel",
+}: {
+  onCancel: () => void;
+  testID?: string;
+  accessibilityLabel?: string;
+}) {
   const scale = useSharedValue(1);
   const animatedStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
 
@@ -27,13 +35,13 @@ export function CancelProcessingButton({ onCancel }: { onCancel: () => void }) {
 
   return (
     <Pressable
-      testID="cancel-processing"
+      testID={testID}
       onPress={onCancel}
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
       hitSlop={(MIN_TOUCH_TARGET - BUTTON_HEIGHT) / 2}
       accessibilityRole="button"
-      accessibilityLabel="Cancel"
+      accessibilityLabel={accessibilityLabel}
     >
       {({ pressed }) => (
         <Animated.View style={[styles.button, pressed && styles.buttonPressed, animatedStyle]}>

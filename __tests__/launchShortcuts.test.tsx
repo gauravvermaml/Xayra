@@ -389,6 +389,7 @@ describe("the shortcut's mode is the utterance's mode", () => {
         autoStop = o.onAutoStop;
       },
       stopRecording: async () => "file:///fake.wav",
+      discardRecording: async () => {},
       processUtterance: async (_uri, mode) => {
         processed.push(mode);
       },

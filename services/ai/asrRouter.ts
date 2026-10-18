@@ -102,6 +102,18 @@ class NativeASRSession {
   /** Stops the session and resolves once the native side has confirmed
    * `end` (or `error`) — never rejects, since a Tier 1 failure is always a
    * signal to fall back, not a hard error for the caller. */
+  /** Cancel: ends recognition without waiting for a transcript. */
+  abort(): void {
+    try {
+      ExpoSpeechRecognitionModule.abort();
+    } catch (err) {
+      console.warn("[ASRRouter] Tier 1 abort() threw", err);
+    }
+    this.finish();
+    this.subscriptions.forEach((sub) => sub.remove());
+    this.subscriptions = [];
+  }
+
   async stop(): Promise<string> {
     try {
       ExpoSpeechRecognitionModule.stop();
@@ -150,6 +162,16 @@ export function startListening(): void {
  * approach already does elsewhere in this app, rather than attempting a
  * throttling mechanism this app doesn't actually have the power to enforce.
  */
+/** A cancelled recording: the native recognizer started alongside it is
+ * aborted and its transcript is never used. A no-op when nothing is
+ * listening. */
+export function cancelListening(): void {
+  const session = activeSession;
+  activeSession = null;
+  sessionIsNative = false;
+  session?.abort();
+}
+
 let hasWarnedAboutDownloadContention = false;
 
 /**
@@ -187,4 +209,4 @@ export async function transcribe(audioUri: string | null, job?: ProcessingJob): 
   return { transcript, tier: "whisper", whisperModelId: modelId };
 }
 
-export const asrRouter = { startListening, transcribe };
+export const asrRouter = { startListening, cancelListening, transcribe };

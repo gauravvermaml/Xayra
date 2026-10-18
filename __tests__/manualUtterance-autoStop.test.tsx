@@ -94,6 +94,7 @@ async function setup(options?: { processUtterance?: (p: Processed, release: () =
   const controller = new ManualUtteranceController({
     startRecording: (o) => recorderRef.current!.startRecording(o),
     stopRecording: () => recorderRef.current!.stopRecording(),
+    discardRecording: () => recorderRef.current!.discardRecording(),
     processUtterance: async (uri, mode, trigger, release) => {
       processed.push({ uri, mode, trigger });
       await options?.processUtterance?.({ uri, mode, trigger }, release);
@@ -398,6 +399,7 @@ describe("Record/Ask is frozen per utterance", () => {
     const controller = new ManualUtteranceController({
       startRecording: (o) => recorderRef.current!.startRecording(o),
       stopRecording: () => recorderRef.current!.stopRecording(),
+    discardRecording: () => recorderRef.current!.discardRecording(),
       processUtterance: () => new Promise<void>((resolve) => (finishProcessing = resolve)),
       onChange: (s) => snapshots.push(`${s.phase}:${s.mode}`),
     });
@@ -570,6 +572,7 @@ describe("no orphaned capture (launcher-shortcut ghost recording)", () => {
     const controller = new ManualUtteranceController({
       startRecording: async () => false,
       stopRecording: async () => null,
+      discardRecording: async () => {},
       processUtterance: async (_u, mode) => {
         processed.push(mode);
       },

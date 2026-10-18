@@ -113,6 +113,8 @@ const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Vertical gap between the central button and the status lines under it. */
 const CENTER_AREA_GAP_PX = 10;
+/** The "Tap to finish" hint sits this much closer to the status line. */
+const STATUS_HINT_OFFSET = -4;
 
 /** Emblem zone limits (canvas row P): full size at the tray's rest stage,
  * the compact answer-ready size at 50%, and a floor below which it stops
@@ -1172,6 +1174,13 @@ export default function HomeScreen() {
     manualControllerRef.current = new ManualUtteranceController({
       startRecording: (options) => recorderRef.current.startRecording(options),
       stopRecording: () => recorderRef.current.stopRecording(),
+      // Cancel during recording: the native recognizer started alongside
+      // the recording goes too, and no audio file is ever written.
+      discardRecording: async () => {
+        asrRouter.cancelListening();
+        await recorderRef.current.discardRecording();
+      },
+      onCancelCleanupError: (err) => console.warn("[Recorder] Closing the microphone failed while cancelling", err),
       processUtterance: async (audioUri, mode, trigger, release) => {
         if (__DEV__) {
           console.log(`[Recorder] Finished by ${trigger === "silence" ? "trailing silence" : "tap"} (${mode})`);
@@ -1210,21 +1219,23 @@ export default function HomeScreen() {
   // If this screen unmounts mid-utterance (e.g. the activity is re-created),
   // that utterance must die with it — never finish or be processed by a
   // screen nobody can see. (The recorder hook closes the mic itself.)
-  useEffect(() => () => manualControllerRef.current?.dispose(), []);
+  useEffect(
+    () => () => {
+      const controller = manualControllerRef.current;
+      const phase = controller?.snapshot.phase;
+      if (phase === "starting" || phase === "recording") asrRouter.cancelListening();
+      controller?.dispose();
+    },
+    []
+  );
 
   useFocusEffect(
     useCallback(() => {
       return () => {
-        // An abandoned recording is never transcribed, so its WAV is
-        // deleted here — it used to be left behind permanently.
-        void recorderRef.current
-          .stopRecording()
-          .then((uri) => {
-            if (!uri) return undefined;
-            manualControllerRef.current?.abandon();
-            return FileSystem.deleteAsync(uri, { idempotent: true });
-          })
-          .catch(() => {});
+        // Leaving the screen mid-recording cancels it exactly like the
+        // Cancel button: never transcribed, no audio file written. (Once
+        // capture has ended, processing carries on as before.)
+        void manualControllerRef.current?.cancel();
       };
     }, [])
   );
@@ -1251,6 +1262,20 @@ export default function HomeScreen() {
     showToast("Cancelled");
   }, []);
 
+  // Cancel DURING RECORDING (Stage 5a) — distinct from the processing
+  // Cancel above: closes the microphone and throws the utterance away
+  // before anything is transcribed, saved or asked. The id pins it to the
+  // recording the button was shown for; if that recording already finished
+  // (a tap or trailing silence won the race), this does nothing.
+  const handleCancelRecording = useCallback(
+    (utteranceId: number) => {
+      void manualController.cancel(utteranceId).then((cancelled) => {
+        if (cancelled) showToast("Cancelled");
+      });
+    },
+    [manualController]
+  );
+
   // The one way a manual utterance starts — a central-button tap or a
   // launcher shortcut — with the mode it will mean.
   const startManualUtterance = useCallback(
@@ -1265,7 +1290,8 @@ export default function HomeScreen() {
         // (`setAudioModeAsync`, inside startRecording) while Tier 1's
         // SpeechRecognizer was already listening starved it of audio.
         await manualController.start(mode);
-        asrRouter.startListening();
+        // Not for a start that was cancelled (or failed) on the way.
+        if (manualController.snapshot.phase === "recording") asrRouter.startListening();
       } catch (err) {
         setError(userFacingMessage(err, "Recording failed."));
       }
@@ -1442,7 +1468,11 @@ export default function HomeScreen() {
   // once so the hand-off is visible.
   const isManualStopping =
     manualUtterance.phase === "processing" && (recorder.isRecording || recorder.isTransitioning);
-  const canvasState: RecorderCanvasState = isManualStopping
+  // Cancelling acknowledges at once: the listening visuals go while the
+  // microphone closes underneath.
+  const canvasState: RecorderCanvasState = manualUtterance.phase === "cancelling"
+    ? "idle"
+    : isManualStopping
     ? "transcribing"
     : recorder.isRecording
     ? "recording"
@@ -1476,6 +1506,11 @@ export default function HomeScreen() {
     mode: inputMode,
   });
   const showCancelProcessing = canvasState === "transcribing" && !activeMode.isActive && cancellableJobId !== null;
+  // Cancel while a manual recording is capturing; Handsfree keeps its own
+  // tap-to-discard.
+  const showCancelRecording =
+    canvasState === "recording" && manualUtterance.phase === "recording" && !activeMode.isActive;
+  const recordingUtteranceId = manualController.utteranceId;
   // Record/Ask can't change while a manual utterance is in flight — its
   // meaning was frozen when recording began.
   const isModeLocked = manualUtterance.phase !== "idle";
@@ -1486,6 +1521,15 @@ export default function HomeScreen() {
   // optional cue, then shrink the emblem, and hide it only when even the
   // smallest emblem can't fit beside the essential controls.
   const isEmblemBusy = canvasState === "recording" || canvasState === "transcribing";
+  const isManualRecording = canvasState === "recording";
+  // The status line's measured height: at large text it wraps ("Listening…
+  // I'll finish when you're done" takes two lines at 200%), which a
+  // one-line estimate under-counts — enough to push Cancel into the switch.
+  const [statusTextHeight, setStatusTextHeight] = useState(0);
+  const handleStatusTextLayout = useCallback((e: LayoutChangeEvent) => {
+    const height = Math.round(e.nativeEvent.layout.height);
+    setStatusTextHeight((prev) => (prev === height ? prev : height));
+  }, []);
   const [emblemTiers, setEmblemTiers] = useState<{ rest: EmblemTier; half: EmblemTier }>({
     rest: FULL_EMBLEM_TIER,
     half: FULL_EMBLEM_TIER,
@@ -1493,12 +1537,20 @@ export default function HomeScreen() {
   useEffect(() => {
     if (centerRegionHeight === 0) return;
     const textLine = (xayraType.cue.lineHeight ?? 20) * PixelRatio.getFontScale();
-    // Essential under the emblem: the status line, plus the waveform and
-    // Cancel while working. Optional: the idle "Tap to …" cue.
+    const statusLines = Math.max(textLine, statusTextHeight);
+    // Essential under the emblem: the status line (as measured), plus the
+    // waveform and Cancel while working. Optional: the idle "Tap to …" cue,
+    // or while recording the "Tap to finish" hint (Stage 5a: Cancel now
+    // shows during recording too, so the hint is what gives way first).
     const essentialBelow = isEmblemBusy
-      ? CENTER_AREA_GAP_PX + textLine + WAVEFORM_ROW_HEIGHT + CENTER_AREA_GAP_PX + MIN_TOUCH_TARGET
+      ? CENTER_AREA_GAP_PX + statusLines + WAVEFORM_ROW_HEIGHT + CENTER_AREA_GAP_PX + MIN_TOUCH_TARGET
       : 0;
-    const cueBelow = isEmblemBusy ? 0 : CENTER_AREA_GAP_PX + textLine;
+    const hintLine = (xayraType.meta.lineHeight ?? 18) * PixelRatio.getFontScale() + STATUS_HINT_OFFSET;
+    const cueBelow = isManualRecording
+      ? CENTER_AREA_GAP_PX + hintLine
+      : isEmblemBusy
+        ? 0
+        : CENTER_AREA_GAP_PX + textLine;
     const reserve = modeSwitchHeight + MODE_SWITCH_BOTTOM_GAP + CENTER_AREA_BREATHING_ROOM_PX;
     // The outer orbit arcs span ORBIT_SPAN x the zone; keep them inside the
     // screen's side gutters too.
@@ -1521,7 +1573,18 @@ export default function HomeScreen() {
     setEmblemTiers((prev) =>
       sameEmblemTier(prev.rest, rest.tier) && sameEmblemTier(prev.half, half.tier) ? prev : { rest: rest.tier, half: half.tier }
     );
-  }, [centerRegionHeight, modeSwitchHeight, isEmblemBusy, windowWidth, restHeight, sheetHalfPx, zoneRest, zoneHalf]);
+  }, [
+    centerRegionHeight,
+    modeSwitchHeight,
+    isEmblemBusy,
+    isManualRecording,
+    statusTextHeight,
+    windowWidth,
+    restHeight,
+    sheetHalfPx,
+    zoneRest,
+    zoneHalf,
+  ]);
   const emblemTier = sheetIndex === 0 ? emblemTiers.rest : emblemTiers.half;
 
   const emblemLabel = activeMode.isActive
@@ -1716,14 +1779,29 @@ export default function HomeScreen() {
           // support.
           disabled={recorder.isTransitioning}
         />
-        {recordingStatusText && <Text style={styles.statusText}>{recordingStatusText}</Text>}
+        {recordingStatusText && (
+          <Text style={styles.statusText} onLayout={handleStatusTextLayout}>
+            {recordingStatusText}
+          </Text>
+        )}
         {idleCue && emblemTier.cue && (
           <Text testID="idle-tap-cue" style={styles.statusText}>
             {idleCue}
           </Text>
         )}
-        {canvasState === "recording" && <Text style={styles.statusHint}>Tap to finish</Text>}
+        {canvasState === "recording" && emblemTier.cue && <Text style={styles.statusHint}>Tap to finish</Text>}
         {showCancelProcessing && <CancelProcessingButton onCancel={handleCancelProcessing} />}
+        {showCancelRecording && (
+          <CancelProcessingButton
+            testID="cancel-recording"
+            accessibilityLabel={
+              manualUtterance.mode === "ask"
+                ? "Cancel question. Stops listening without asking."
+                : "Cancel recording. Stops listening without saving."
+            }
+            onCancel={() => handleCancelRecording(recordingUtteranceId)}
+          />
+        )}
         {error && <Text style={styles.errorText}>{error}</Text>}
       </Animated.View>
 
@@ -2027,7 +2105,7 @@ const styles = StyleSheet.create({
   statusHint: {
     ...xayraType.meta,
     color: xayraColors.textFaint,
-    marginTop: -4,
+    marginTop: STATUS_HINT_OFFSET,
   },
   errorText: {
     ...xayraType.meta,
