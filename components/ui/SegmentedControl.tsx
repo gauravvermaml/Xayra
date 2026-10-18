@@ -38,6 +38,9 @@ export function SegmentedControl<K extends string>({
             accessibilityLabel={segment.label}
             accessibilityState={{ selected, checked: selected, disabled }}
             disabled={disabled}
+            // 42dp visible + 3dp above and below (the track's own padding)
+            // = a 48dp touch target.
+            hitSlop={{ top: 3, bottom: 3 }}
             onPress={() => onChange(segment.key)}
             // Locked: the selected mode stays fully readable (it's what the
             // in-flight utterance means); only the other one dims.
