@@ -1652,7 +1652,18 @@ export default function HomeScreen() {
         earlier version of this fix nested them inside the same Pressable and
         `pointerEvents="none"` blocked TodosOverlay's own subtree too,
         freezing the entire To-Dos screen (no scroll, no tap, nothing). */}
-    <Pressable style={styles.canvas} onPress={handleBackdropPress} pointerEvents={isTodosVisible ? "none" : "auto"}>
+    <Pressable
+      style={styles.canvas}
+      onPress={handleBackdropPress}
+      pointerEvents={isTodosVisible ? "none" : "auto"}
+      // A tap-to-dismiss surface only: not an accessibility element, so it
+      // doesn't swallow the header, emblem and switch into one giant focus
+      // stop (TalkBack reads and focuses them individually instead). "no"
+      // hides only this node, never its children.
+      accessible={false}
+      focusable={false}
+      importantForAccessibility="no"
+    >
       {/* Xayra 2.0 header: centred mark and guidance only — Handsfree, To-Dos
           and More live in the tray's dock (HomeDock). */}
       <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
