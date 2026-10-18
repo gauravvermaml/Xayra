@@ -1,22 +1,26 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Dimensions, Image, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
+import type { LayoutChangeEvent } from "react-native";
+import { Alert, Dimensions, Image, Keyboard, PixelRatio, Pressable, StyleSheet, Text, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import { getRecordingPermissionsAsync } from "expo-audio";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import BottomSheet, { useBottomSheetSpringConfigs } from "@gorhom/bottom-sheet";
+import { Feather } from "@expo/vector-icons";
 import Animated, {
   FadeIn,
   FadeOut,
   interpolate,
   useAnimatedStyle,
+  useDerivedValue,
   useSharedValue,
   withSpring,
+  withTiming,
 } from "react-native-reanimated";
 
 import {
   CentralRecorderCanvas,
-  IDLE_TEXT_CLEARANCE_PX,
+  WAVEFORM_ROW_HEIGHT,
   type RecorderCanvasState,
 } from "../components/CentralRecorderCanvas";
 import { ChatSheetContent } from "../components/ChatSheetContent";
@@ -27,8 +31,11 @@ import { HistorySheet, SHEET_SNAP_POINTS } from "../components/HistorySheet";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { showToast } from "../components/Toast";
 import { TodosOverlay } from "../components/TodosOverlay";
+import { IconButton } from "../components/ui/IconButton";
+import { SegmentedControl } from "../components/ui/SegmentedControl";
+import { XText } from "../components/ui/XText";
 import { HOME_SUBTITLE } from "../constants/copy";
-import { colors } from "../constants/theme";
+import { BRAND_MAX_FONT_SCALE, MIN_TOUCH_TARGET, xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
 import { useLaunchShortcut } from "../hooks/useLaunchShortcut";
 import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
@@ -102,7 +109,31 @@ import { userFacingMessage } from "../services/errors/userMessage";
 const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Vertical gap between the central button and the status lines under it. */
-const CENTER_AREA_GAP_PX = 12;
+const CENTER_AREA_GAP_PX = 10;
+
+/** Emblem zone limits (canvas row P): full size at the tray's rest stage,
+ * the compact answer-ready size at 50%, and a floor below which it stops
+ * shrinking. The actual size comes from the measured space (see zone0/zone1). */
+const EMBLEM_ZONE_MAX_REST = 248;
+const EMBLEM_ZONE_MAX_HALF = 168;
+const EMBLEM_ZONE_MIN = 72;
+/** Extra room, as a multiple of the zone, kept for the orbit rings that
+ * reach beyond it. */
+const ORBIT_ROOM = 1.22;
+/** Gap between the Record/Ask switch and the tray's top edge. */
+const MODE_SWITCH_BOTTOM_GAP = 12;
+/** Until the switch has been measured (first frame only). */
+const MODE_SWITCH_FALLBACK_HEIGHT = 50;
+
+/** Header corner buttons (visible size; touch area is 48dp). */
+const HEADER_BUTTON_SIZE = 44;
+/** Soft red on black for the inline error line (6.9:1). */
+const ERROR_TEXT = "#F2A5A5";
+
+const MODE_SEGMENTS = [
+  { key: "record", label: "Record" },
+  { key: "ask", label: "Ask" },
+] as const;
 
 /** How long the launch greeting ("Good morning, ...") stays up before
  * cross-fading into the header's normal persistent subtitle. */
@@ -191,11 +222,9 @@ const SHEET_HEIGHTS_PX = SHEET_SNAP_POINTS.map(
  * does. See SwipeableTrayHandle.tsx's own doc comment for the full gesture
  * design this feeds. */
 const EXPAND_DRAG_DISTANCE = SHEET_HEIGHTS_PX[1] - SHEET_HEIGHTS_PX[0];
-/** Clean breathing room kept between the record button and the sheet's top
- * edge, on top of the sheet's own current height — Build 20 BUTTON
- * CLEARANCE, most visible when the sheet auto-peeks to Index 1 (50%) while
- * an ASK request is in flight. */
-const CENTER_AREA_BREATHING_ROOM_PX = 40;
+/** Breathing room between the emblem area and the Record/Ask switch above
+ * the tray — Build 20 BUTTON CLEARANCE, now measured from the switch. */
+const CENTER_AREA_BREATHING_ROOM_PX = 12;
 
 /**
  * Build 22 — REVERT TO EXPLICIT MODE SWITCHING: the automatic RECORD/ASK
@@ -428,18 +457,26 @@ export default function HomeScreen() {
     overshootClamping: false,
   });
 
+  // Xayra 2.0: the Record/Ask switch sits centred just above the tray and
+  // follows it (drawerFloatingStackAnimatedStyle below). Its measured height
+  // feeds the centre area's clearance, so the emblem never runs into it.
+  const modeSwitchReserve = useSharedValue(MODE_SWITCH_FALLBACK_HEIGHT + MODE_SWITCH_BOTTOM_GAP + CENTER_AREA_BREATHING_ROOM_PX);
+  const [modeSwitchHeight, setModeSwitchHeight] = useState(MODE_SWITCH_FALLBACK_HEIGHT);
+  const handleModeSwitchLayout = useCallback(
+    (e: LayoutChangeEvent) => setModeSwitchHeight(Math.round(e.nativeEvent.layout.height)),
+    []
+  );
+  useEffect(() => {
+    modeSwitchReserve.value = modeSwitchHeight + MODE_SWITCH_BOTTOM_GAP + CENTER_AREA_BREATHING_ROOM_PX;
+  }, [modeSwitchHeight, modeSwitchReserve]);
+
   // Build 20 BUTTON CLEARANCE: the center canvas's own bottom padding tracks
-  // the sheet's live height (same interpolation approach as ComposeBar's
-  // PINNED DRAWER HEADER below) plus a fixed breathing-room margin, so the
-  // record button never ends up crowded against — or covered by — the sheet
-  // once it auto-peeks to 50% during an ASK request.
+  // the sheet's live height plus the Record/Ask switch above it, so the
+  // emblem never ends up crowded against — or covered by — either one once
+  // the sheet auto-peeks to 50% during an ASK request.
   const centerAreaAnimatedStyle = useAnimatedStyle(() => ({
-    paddingBottom: interpolate(
-      sheetAnimatedIndex.value,
-      [0, 1],
-      SHEET_HEIGHTS_PX.map((heightPx) => heightPx + CENTER_AREA_BREATHING_ROOM_PX),
-      "clamp"
-    ),
+    paddingBottom:
+      interpolate(sheetAnimatedIndex.value, [0, 1], SHEET_HEIGHTS_PX, "clamp") + modeSwitchReserve.value,
   }));
 
   // Build 23 POSITION FLOATING PILLS (live-tracked): found by testing on a
@@ -454,8 +491,24 @@ export default function HomeScreen() {
   // there's no text input or keyboard interaction in this stack at all, just
   // a plain shared-value interpolation against the sheet's own index.
   const drawerFloatingStackAnimatedStyle = useAnimatedStyle(() => ({
-    bottom: interpolate(sheetAnimatedIndex.value, [0, 1], SHEET_HEIGHTS_PX, "clamp") + 16,
+    bottom: interpolate(sheetAnimatedIndex.value, [0, 1], SHEET_HEIGHTS_PX, "clamp") + MODE_SWITCH_BOTTOM_GAP,
   }));
+
+  // The emblem zone takes the space actually left between the header and
+  // the switch at each tray stage (measured centre-area height), less what
+  // sits under it (cue/status, plus the waveform and Cancel while working),
+  // within the canvas's limits. Two targets, interpolated live with the
+  // tray's position, so it resizes in step with a drag or snap.
+  const [centerRegionHeight, setCenterRegionHeight] = useState(0);
+  const handleCenterAreaLayout = useCallback(
+    (e: LayoutChangeEvent) => setCenterRegionHeight(Math.round(e.nativeEvent.layout.height)),
+    []
+  );
+  const zoneRest = useSharedValue(EMBLEM_ZONE_MAX_HALF);
+  const zoneHalf = useSharedValue(EMBLEM_ZONE_MAX_HALF);
+  const emblemZoneSize = useDerivedValue(() =>
+    interpolate(sheetAnimatedIndex.value, [0, 1], [zoneRest.value, zoneHalf.value], "clamp")
+  );
 
   // BACKDROP TAP TO DISMISS: tapping anywhere on the canvas outside the
   // sheet/compose bar/center button (all of which are Pressables of their
@@ -1316,6 +1369,33 @@ export default function HomeScreen() {
   // meaning was frozen when recording began.
   const isModeLocked = manualUtterance.phase !== "idle";
 
+  // Emblem zone targets (see emblemZoneSize). Recomputed only when the
+  // measured space or what sits under the emblem changes — never per frame.
+  // The orbit reaches past the zone, so the zone keeps ORBIT_ROOM of its
+  // size free for it rather than letting the rings run into the header.
+  const isEmblemBusy = canvasState === "recording" || canvasState === "transcribing";
+  useEffect(() => {
+    if (centerRegionHeight === 0) return;
+    const textLine = (xayraType.cue.lineHeight ?? 20) * PixelRatio.getFontScale();
+    const below =
+      CENTER_AREA_GAP_PX + textLine + (isEmblemBusy ? WAVEFORM_ROW_HEIGHT + CENTER_AREA_GAP_PX + MIN_TOUCH_TARGET : 0);
+    const reserve = modeSwitchHeight + MODE_SWITCH_BOTTOM_GAP + CENTER_AREA_BREATHING_ROOM_PX;
+    const fit = (sheetPx: number, max: number) =>
+      Math.round(
+        Math.max(EMBLEM_ZONE_MIN, Math.min(max, (centerRegionHeight - sheetPx - reserve - below) / ORBIT_ROOM))
+      );
+    zoneRest.value = withTiming(fit(SHEET_HEIGHTS_PX[0], EMBLEM_ZONE_MAX_REST), { duration: 220 });
+    zoneHalf.value = withTiming(fit(SHEET_HEIGHTS_PX[1], EMBLEM_ZONE_MAX_HALF), { duration: 220 });
+  }, [centerRegionHeight, modeSwitchHeight, isEmblemBusy, zoneRest, zoneHalf]);
+
+  const emblemLabel = activeMode.isActive
+    ? "Handsfree is on. Long-press to turn it off"
+    : canvasState === "recording"
+      ? "Recording. Tap to finish"
+      : inputMode === "ask"
+        ? "Tap to ask. Long-press for Handsfree"
+        : "Tap to record. Long-press for Handsfree";
+
   // Opens a note's detail modal — shared by a chat citation chip's tap AND
   // a row tap in the Record-mode notes list (ChatSheetContent's
   // `onShowCitation` prop is reused for both, same `(noteId: string) => void`
@@ -1417,15 +1497,63 @@ export default function HomeScreen() {
         `pointerEvents="none"` blocked TodosOverlay's own subtree too,
         freezing the entire To-Dos screen (no scroll, no tap, nothing). */}
     <Pressable style={styles.canvas} onPress={handleBackdropPress} pointerEvents={isTodosVisible ? "none" : "auto"}>
-      {/* Build 23 CLEAN TOP BRAND HEADER: back to just the logo/title (plus
-          its subtitle) — no pills, no cogwheel. Both moved out: the cogwheel
-          returned to ComposeBar's row (see that component), and Handsfree +
-          the Record/Ask pill now float above the drawer instead (below). */}
-      <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
-        <View style={styles.brandRow}>
-          {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
-          <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
-          <Text style={styles.brandTitle}>Xayra</Text>
+      {/* Xayra 2.0 header: centred mark and guidance. Handsfree, To-Dos and
+          More sit in its corners for now — a temporary arrangement until
+          the Stage 4 dock; behaviour is unchanged. */}
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
+        <View style={styles.headerRow}>
+          <View style={styles.headerSide}>
+            <Pressable
+              testID="handsfree-toggle"
+              onPress={handleToggleHandsfree}
+              hitSlop={(MIN_TOUCH_TARGET - HEADER_BUTTON_SIZE) / 2}
+              accessibilityRole="switch"
+              accessibilityLabel={activeMode.isActive ? `Handsfree, ${activeMode.state}` : "Handsfree"}
+              accessibilityState={{ checked: activeMode.isActive }}
+              style={({ pressed }) => [
+                styles.headerButton,
+                activeMode.isActive && styles.headerButtonActive,
+                pressed && styles.pressed,
+              ]}
+            >
+              <Feather name="headphones" size={19} color={activeMode.isActive ? xayraColors.teal : xayraColors.dockText} />
+            </Pressable>
+          </View>
+          <View style={styles.brandRow}>
+            {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
+            <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
+            <XText variant="wordmark" accessibilityRole="header">
+              Xayra
+            </XText>
+          </View>
+          <View style={[styles.headerSide, styles.headerSideEnd]}>
+            <Pressable
+              testID="todos-button"
+              onPress={() => setIsTodosVisible(true)}
+              hitSlop={(MIN_TOUCH_TARGET - HEADER_BUTTON_SIZE) / 2}
+              accessibilityRole="button"
+              accessibilityLabel={pendingCount > 0 ? `To-Dos, ${pendingCount} pending` : "To-Dos"}
+              style={({ pressed }) => [styles.headerButton, pressed && styles.pressed]}
+            >
+              <Feather name="check-circle" size={19} color={xayraColors.dockText} />
+              {pendingCount > 0 && (
+                <View style={styles.badge} pointerEvents="none">
+                  <Text style={styles.badgeText} maxFontSizeMultiplier={BRAND_MAX_FONT_SCALE}>
+                    {pendingCount > 99 ? "99+" : pendingCount}
+                  </Text>
+                </View>
+              )}
+            </Pressable>
+            <View ref={quickMenuButtonRef} collapsable={false}>
+              <IconButton
+                testID="more-button"
+                accessibilityLabel="More"
+                onPress={handleOpenQuickMenu}
+                size={HEADER_BUTTON_SIZE}
+                icon={<Feather name="more-horizontal" size={20} color={xayraColors.dockText} />}
+              />
+            </View>
+          </View>
         </View>
         {showGreeting ? (
           <Animated.Text key="greeting" entering={FadeIn} exiting={FadeOut} style={styles.brandSubtitle}>
@@ -1438,9 +1566,11 @@ export default function HomeScreen() {
         )}
       </View>
 
-      <Animated.View style={[styles.centerArea, centerAreaAnimatedStyle]}>
+      <Animated.View style={[styles.centerArea, centerAreaAnimatedStyle]} onLayout={handleCenterAreaLayout}>
         <CentralRecorderCanvas
           state={canvasState}
+          zoneSize={emblemZoneSize}
+          accessibilityLabel={emblemLabel}
           amplitude={recorder.amplitude}
           onPress={() => void handleRecordPress()}
           onLongPress={handleLongPressCenterButton}
@@ -1462,8 +1592,15 @@ export default function HomeScreen() {
         />
         {recordingStatusText && <Text style={styles.statusText}>{recordingStatusText}</Text>}
         {idleCue && (
-          <Text testID="idle-tap-cue" style={[styles.statusText, styles.idleCue]}>
+          <Text testID="idle-tap-cue" style={styles.statusText}>
             {idleCue}
+          </Text>
+        )}
+        {/* Handsfree's own state, shown where the old pill's label was read
+            ("Handsfree · listening"), while nothing else is being said here. */}
+        {activeMode.isActive && !recordingStatusText && (
+          <Text testID="handsfree-status" style={[styles.statusText, styles.handsfreeStatus]}>
+            {`Handsfree · ${activeMode.state}`}
           </Text>
         )}
         {canvasState === "recording" && <Text style={styles.statusHint}>Tap to finish</Text>}
@@ -1471,83 +1608,27 @@ export default function HomeScreen() {
         {error && <Text style={styles.errorText}>{error}</Text>}
       </Animated.View>
 
-      {/* Build 23 POSITION FLOATING PILLS: Handsfree + the Record/Ask mode
-          pill float in a single right-aligned cluster directly above the
-          bottom sheet drawer, tracking the sheet's live height (see
-          drawerFloatingStackAnimatedStyle above) so it stays above the
-          drawer at every snap index instead of only at the 20% rest peek.
-
-          Hidden entirely while the glass box is at its 88% expanded stage:
-          `drawerFloatingStackAnimatedStyle` tracks `sheetAnimatedIndex`,
-          which never reports anything past its 50%-height value during that
-          stage (see this screen's own SHEET_HEIGHTS_PX comment for why) —
-          confirmed on-device, this cluster stayed pinned at the 50%
-          position and visibly overlapped the now-much-taller box's note
-          cards instead of floating cleanly above it. Rather than build a
-          second, independent animated position purely to track an
-          overshoot state the user isn't even meant to interact with these
-          controls during (they're browsing/reading, not recording, while
-          expanded — a swipe down on the expanded view's own handle is right
-          there to get back), hiding the cluster removes the collision
-          outright. */}
-      {/* Also hidden while TodosOverlay is open (isTodosVisible) — plain
-          sibling paint order alone didn't reliably keep this Animated.View
-          (entering/exiting FadeIn/FadeOut) behind the overlay on-device;
-          not mounting it at all while the overlay is up is the same
-          defensive pattern already used for isTextBoxExpanded above,
-          applied for the same reason. */}
+      {/* The Record/Ask switch, centred directly above the tray and tracking
+          its live height (drawerFloatingStackAnimatedStyle), so it stays
+          above the tray at every snap index. Hidden in the full-screen
+          reading overlay and under To-Dos — same reasons as the floating
+          cluster it replaces (sibling paint order alone didn't reliably keep
+          it behind either). */}
       {!isTextBoxExpanded && !isTodosVisible && (
         <Animated.View
           entering={FadeIn.duration(150)}
           exiting={FadeOut.duration(120)}
           pointerEvents="box-none"
-          style={[styles.drawerFloatingStack, { right: 24 }, drawerFloatingStackAnimatedStyle]}
+          onLayout={handleModeSwitchLayout}
+          style={[styles.modeSwitchRow, drawerFloatingStackAnimatedStyle]}
         >
-          {/* "Quiet Corner" pass: Archive and Settings are both deliberate,
-              infrequent visits — never something reached for mid-recording —
-              so they don't get their own permanent pills in this cluster.
-              One small icon, inline with To-Dos (the cluster's own
-              least-frequent existing member), opens a two-row popover
-              instead. Record/Ask/Handsfree below are unchanged. */}
-          <View style={styles.topRow}>
-            <Pressable ref={quickMenuButtonRef} onPress={handleOpenQuickMenu} hitSlop={10} style={styles.quickMenuButton}>
-              <Text style={styles.quickMenuButtonText}>•••</Text>
-            </Pressable>
-            <Pressable onPress={() => setIsTodosVisible(true)} style={styles.todosPill}>
-              <Text style={styles.todosPillText}>
-                {pendingCount > 0 ? `To-Dos (${pendingCount})` : "To-Dos"}
-              </Text>
-            </Pressable>
-          </View>
-
-          <Pressable
-            onPress={handleToggleHandsfree}
-            style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
-          >
-            <Text style={[styles.handsfreePillText, activeMode.isActive && styles.handsfreePillTextActive]}>
-              🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
-            </Text>
-          </Pressable>
-
-          <View style={styles.modePill}>
-            {(["record", "ask"] as const).map((mode) => (
-              <Pressable
-                key={mode}
-                onPress={() => handleSelectMode(mode)}
-                disabled={isModeLocked}
-                accessibilityState={{ selected: inputMode === mode, disabled: isModeLocked }}
-                style={[
-                  styles.modePillOption,
-                  inputMode === mode && styles.modePillOptionActive,
-                  isModeLocked && inputMode !== mode && styles.modePillOptionLocked,
-                ]}
-              >
-                <Text style={[styles.modePillText, inputMode === mode && styles.modePillTextActive]}>
-                  {mode === "record" ? "Record" : "Ask"}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
+          <SegmentedControl
+            segments={MODE_SEGMENTS}
+            value={inputMode}
+            onChange={handleSelectMode}
+            disabled={isModeLocked}
+            accessibilityLabel="Mode"
+          />
         </Animated.View>
       )}
 
@@ -1570,7 +1651,7 @@ export default function HomeScreen() {
             onInputFocus={handleInputFocus}
             onInputBlur={handleInputBlur}
             onSubmit={handleSubmitText}
-            placeholder={inputMode === "record" ? "Type your thoughts..." : "Search your thoughts..."}
+            placeholder={inputMode === "record" ? "Type your thoughts…" : "Search your thoughts…"}
             mode={inputMode}
           />
         }
@@ -1701,10 +1782,9 @@ export default function HomeScreen() {
         <View style={styles.quickMenuBackdropView} pointerEvents="box-none">
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setIsQuickMenuOpen(false)} />
           {/* Anchored to the icon's actual measured position (quickMenuAnchor),
-              not a fixed corner — grows UPWARD (bottom-anchored, per the
-              screen-height math below) since the icon sits low on screen,
-              and right-aligns its own right edge to the icon's, so it never
-              spills off the right edge of the screen. */}
+              not a fixed corner — grows DOWNWARD from the header's More
+              button, and right-aligns its own right edge to the icon's, so it
+              never spills off the right edge of the screen. */}
           {/* Design-sandbox pass: this used to pop into existence with zero
               animation — the one overlay in this file with no entrance
               transition at all. Fluid pop-out spring (scale 0.95->1.0 +
@@ -1719,27 +1799,31 @@ export default function HomeScreen() {
               styles.quickMenuPopover,
               {
                 right: Dimensions.get("window").width - (quickMenuAnchor.x + quickMenuAnchor.width),
-                bottom: Dimensions.get("window").height - quickMenuAnchor.y + 8,
+                top: quickMenuAnchor.y + quickMenuAnchor.height + 6,
               },
             ]}
           >
             <Pressable
+              accessibilityRole="menuitem"
               style={({ pressed }) => [styles.quickMenuRow, pressed && styles.quickMenuRowPressed]}
               onPress={() => {
                 setIsQuickMenuOpen(false);
                 handleOpenArchive();
               }}
             >
-              <Text style={styles.quickMenuRowText}>🗄️ Archived notes ({notesCount})</Text>
+              <Feather name="archive" size={18} color={xayraColors.textSoft} />
+              <Text style={styles.quickMenuRowText}>Archived notes ({notesCount})</Text>
             </Pressable>
             <Pressable
+              accessibilityRole="menuitem"
               style={({ pressed }) => [styles.quickMenuRow, pressed && styles.quickMenuRowPressed]}
               onPress={() => {
                 setIsQuickMenuOpen(false);
                 handleSettingsPress();
               }}
             >
-              <Text style={styles.quickMenuRowText}>⚙️ Settings</Text>
+              <Feather name="settings" size={18} color={xayraColors.textSoft} />
+              <Text style={styles.quickMenuRowText}>Settings</Text>
             </Pressable>
           </Animated.View>
         </View>
@@ -1768,136 +1852,85 @@ const styles = StyleSheet.create({
     bottom: 0,
   },
   header: {
-    paddingHorizontal: 24,
+    paddingHorizontal: 12,
     paddingBottom: 4,
+    alignItems: "center",
+    gap: 8,
   },
-  brandRow: {
+  headerRow: {
+    alignSelf: "stretch",
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  // Equal-width sides keep the mark optically centred whatever sits in them.
+  headerSide: {
+    width: HEADER_BUTTON_SIZE * 2 + 8,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
   },
-  brandLogo: {
-    width: 26,
-    height: 26,
-    borderRadius: 6,
+  headerSideEnd: {
+    justifyContent: "flex-end",
   },
-  brandTitle: {
-    color: "#FFFFFF",
-    fontSize: 22,
-    fontWeight: "700",
-    letterSpacing: -0.3,
-  },
-  brandSubtitle: {
-    color: "rgba(235,235,245,0.55)",
-    fontSize: 13,
-    marginTop: 4,
-    lineHeight: 18,
-  },
-  // Build 23 POSITION FLOATING PILLS: Handsfree + the Record/Ask pill,
-  // right-aligned, floating above the drawer — `bottom` is animated (see
-  // drawerFloatingStackAnimatedStyle) to track the sheet's live height so
-  // this stays above the drawer at every snap index, not just its resting
-  // peek. No text input lives in here (that's ComposeBar's job, inside the
-  // sheet), so unlike Build 20's ComposeBar this has no keyboard-avoidance
-  // of its own to fight with anything — just a plain shared-value
-  // interpolation against the sheet's own index.
-  drawerFloatingStack: {
-    position: "absolute",
-    alignItems: "flex-end",
-    zIndex: 25,
-    elevation: 25,
-  },
-  // Order here is visual top-to-bottom: To-Dos, then Handsfree, then the
-  // Record/Ask pill. Styled as a plain dark pill, deliberately unstyled by
-  // pendingCount (no accent tint at >0) — the badge NUMBER inside the label
-  // is the whole affordance per spec, not a color change on top of it.
-  // Wraps the new "•••" quick-menu icon and the To-Dos pill side by side —
-  // inline, not stacked as its own row, so the cluster's total height
-  // doesn't grow past what it was before this pass (see the "Quiet Corner"
-  // placement discussion for why inline-with-To-Dos won out over a plain
-  // 4th stacked row).
-  topRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 10, // gap above the Handsfree pill
-  },
-  quickMenuButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    borderWidth: 1,
+  headerButton: {
+    width: HEADER_BUTTON_SIZE,
+    height: HEADER_BUTTON_SIZE,
+    borderRadius: HEADER_BUTTON_SIZE / 2,
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(28, 28, 30, 0.85)",
-    borderColor: "rgba(255,255,255,0.1)",
   },
-  quickMenuButtonText: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#8E8E93",
-    letterSpacing: 1,
-  },
-  todosPill: {
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
+  headerButtonActive: {
+    backgroundColor: xayraColors.tealSoft,
     borderWidth: 1,
-    backgroundColor: "rgba(28, 28, 30, 0.85)",
-    borderColor: "rgba(255,255,255,0.1)",
+    borderColor: xayraColors.tealRing,
   },
-  todosPillText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: "#8E8E93",
+  pressed: {
+    opacity: 0.7,
   },
-  handsfreePill: {
-    marginBottom: 10, // gap above the Record/Ask pill
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderWidth: 1,
-    // OFF state, per spec.
-    backgroundColor: "rgba(28, 28, 30, 0.85)",
-    borderColor: "rgba(255,255,255,0.1)",
+  badge: {
+    position: "absolute",
+    top: 2,
+    right: 0,
+    minWidth: 18,
+    height: 18,
+    paddingHorizontal: 4,
+    borderRadius: 9,
+    backgroundColor: xayraColors.badge,
+    alignItems: "center",
+    justifyContent: "center",
   },
-  handsfreePillActive: {
-    // ON state, per spec.
-    backgroundColor: "#635BFF",
-    borderColor: "#635BFF",
+  badgeText: {
+    ...xayraType.badge,
+    fontSize: 11,
+    lineHeight: 14,
+    color: xayraColors.badgeText,
   },
-  handsfreePillText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: "#8E8E93",
-  },
-  handsfreePillTextActive: {
-    color: "#FFFFFF",
-  },
-  modePill: {
+  brandRow: {
+    flex: 1,
     flexDirection: "row",
-    backgroundColor: "#1C1C1E",
-    borderRadius: 999,
-    padding: 3,
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 9,
   },
-  modePillOption: {
+  brandLogo: {
+    width: 28,
+    height: 28,
+    borderRadius: 7,
+  },
+  brandSubtitle: {
+    ...xayraType.guidance,
+    color: xayraColors.textMuted,
+    textAlign: "center",
+    maxWidth: 320,
     paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 999,
   },
-  modePillOptionActive: {
-    backgroundColor: colors.accent,
-  },
-  modePillOptionLocked: {
-    opacity: 0.35,
-  },
-  modePillText: {
-    color: "rgba(235,235,245,0.6)",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  modePillTextActive: {
-    color: colors.onAccent,
+  modeSwitchRow: {
+    position: "absolute",
+    left: 0,
+    right: 0,
+    alignItems: "center",
+    zIndex: 25,
+    elevation: 25,
   },
   centerArea: {
     flex: 1,
@@ -1905,25 +1938,23 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: CENTER_AREA_GAP_PX,
   },
-  // While idle there's no waveform row between the button and this line,
-  // so it needs its own clearance past the rim's shadow, plus breathing
-  // room. Recording/processing status keeps its existing spacing.
-  idleCue: {
-    marginTop: IDLE_TEXT_CLEARANCE_PX - CENTER_AREA_GAP_PX,
-  },
   statusText: {
-    color: "rgba(255,255,255,0.7)",
-    fontSize: 13,
-    fontWeight: "600",
+    ...xayraType.cue,
+    color: xayraColors.textMuted,
+    textAlign: "center",
+    paddingHorizontal: 24,
+  },
+  handsfreeStatus: {
+    color: xayraColors.teal,
   },
   statusHint: {
-    color: "rgba(255,255,255,0.45)",
-    fontSize: 12,
-    marginTop: -6,
+    ...xayraType.meta,
+    color: xayraColors.textFaint,
+    marginTop: -4,
   },
   errorText: {
-    color: "#F87171",
-    fontSize: 12,
+    ...xayraType.meta,
+    color: ERROR_TEXT,
     textAlign: "center",
     paddingHorizontal: 32,
   },
@@ -1932,7 +1963,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: "#1C1C1E",
+    backgroundColor: xayraColors.surface,
     // Above ComposeBar's own zIndex/elevation (20, see that component) —
     // this strip must win the bottom edge even when the compose bar's
     // sheet-tracked position brings it this low on screen.
@@ -1957,11 +1988,11 @@ const styles = StyleSheet.create({
   // time) — `right`/`bottom` are set inline at the render site, not here.
   quickMenuPopover: {
     position: "absolute",
-    minWidth: 168,
-    backgroundColor: "#1C1C1E",
-    borderRadius: 14,
+    minWidth: 208,
+    backgroundColor: xayraColors.dock,
+    borderRadius: xayraRadius.card,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
+    borderColor: xayraColors.lineStrong,
     paddingVertical: 6,
     // Same shadow language as NoteDetailModal/other floating surfaces in
     // this app — a popover specifically needs to visibly lift off the
@@ -1973,17 +2004,20 @@ const styles = StyleSheet.create({
     elevation: 12,
   },
   quickMenuRow: {
-    paddingVertical: 12,
+    minHeight: MIN_TOUCH_TARGET,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
     paddingHorizontal: 14,
-    borderRadius: 10,
-    marginHorizontal: 4,
+    borderRadius: 12,
+    marginHorizontal: 6,
   },
   quickMenuRowPressed: {
-    backgroundColor: "rgba(255,255,255,0.08)",
+    backgroundColor: xayraColors.line,
   },
   quickMenuRowText: {
-    color: "#F8FAFC",
+    ...xayraType.chip,
     fontSize: 15,
-    fontWeight: "600",
+    color: xayraColors.text,
   },
 });

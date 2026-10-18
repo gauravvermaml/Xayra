@@ -200,17 +200,19 @@ describe("empty states", () => {
   });
 });
 
-describe("idle cue spacing", () => {
-  it("starts below the button's shadow, with breathing room", () => {
+describe("emblem zone", () => {
+  // Xayra 2.0 replaced the shadowed rim (whose shadow the idle cue had to
+  // clear) with the emblem zone: the cue now sits in normal flow below the
+  // zone, and the zone is sized from the measured space (app/index.tsx).
+  it("is drawn at the approved design size, with room for the waveform row under it", () => {
     jest.doMock("react-native-worklets", () => require("react-native-worklets/src/mock"));
     jest.doMock("react-native-reanimated", () => require("react-native-reanimated/mock"));
-    let constants!: { BUTTON_SHADOW_EXTENT_PX: number; IDLE_TEXT_CLEARANCE_PX: number };
+    let constants!: { ZONE_BASE: number; WAVEFORM_ROW_HEIGHT: number };
     jest.isolateModules(() => {
       constants = require("../components/CentralRecorderCanvas");
     });
-    const { BUTTON_SHADOW_EXTENT_PX, IDLE_TEXT_CLEARANCE_PX } = constants;
-    expect(BUTTON_SHADOW_EXTENT_PX).toBe(28);
-    expect(IDLE_TEXT_CLEARANCE_PX).toBeGreaterThanOrEqual(BUTTON_SHADOW_EXTENT_PX + 8);
+    expect(constants.ZONE_BASE).toBe(248);
+    expect(constants.WAVEFORM_ROW_HEIGHT).toBeGreaterThan(0);
   });
 });
 
