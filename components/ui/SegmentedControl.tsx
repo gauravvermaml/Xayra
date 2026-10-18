@@ -39,7 +39,9 @@ export function SegmentedControl<K extends string>({
             accessibilityState={{ selected, checked: selected, disabled }}
             disabled={disabled}
             onPress={() => onChange(segment.key)}
-            style={[styles.segment, selected && styles.selected, disabled && styles.locked]}
+            // Locked: the selected mode stays fully readable (it's what the
+            // in-flight utterance means); only the other one dims.
+            style={[styles.segment, selected && styles.selected, disabled && !selected && styles.locked]}
           >
             <XText variant={selected ? "segment" : "segmentInactive"}>{segment.label}</XText>
           </Pressable>
@@ -74,6 +76,6 @@ const styles = StyleSheet.create({
     borderColor: xayraColors.lilacRing,
   },
   locked: {
-    opacity: 0.45,
+    opacity: 0.35,
   },
 });

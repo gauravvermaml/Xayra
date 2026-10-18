@@ -10,8 +10,8 @@ export type OrbitProps = {
 };
 
 /**
- * The restrained Halo + Orbit rings: one hairline ring, one dotted ring and a
- * single lilac arc with its leading point. Static — motion (and its
+ * The restrained Halo + Orbit rings: one hairline ring, one dotted ring, a
+ * lilac arc with its leading point and a faint teal counter-arc (canvas P). Static — motion (and its
  * reduced-motion fallback) belongs to the emblem component that hosts it.
  * Decorative, so it's hidden from accessibility services.
  */
@@ -24,6 +24,9 @@ export function Orbit({ size, detail = "full" }: OrbitProps) {
       ) : null}
       <Path d="M270 65.1 A150 150 0 0 1 342.7 221" fill="none" stroke={xayraColors.lilac} strokeOpacity={0.5} strokeWidth={1.4} strokeLinecap="round" />
       <Circle cx={342.7} cy={221} r={2.8} fill={xayraColors.lilac} fillOpacity={0.85} />
+      {detail === "full" ? (
+        <Path d="M42.6 283 A176 176 0 0 1 35.5 120.6" fill="none" stroke={xayraColors.teal} strokeOpacity={0.32} strokeWidth={1.4} strokeLinecap="round" />
+      ) : null}
     </Svg>
   );
 }
