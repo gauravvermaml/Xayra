@@ -61,7 +61,7 @@ const baseProps = {
   modelDownload: { status: "ready" } as never,
   isModelReady: true,
   onSubmitStarterPrompt: jest.fn(),
-  bottomInset: 0,
+  listBottomPadding: 0,
   usePlainList: true,
 };
 

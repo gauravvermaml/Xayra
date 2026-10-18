@@ -58,7 +58,9 @@ const styles = StyleSheet.create({
     paddingTop: spacing.md,
     paddingBottom: spacing.base,
     marginHorizontal: spacing.base,
-    marginBottom: 24,
+    // Sits directly above the dock now (HistorySheet pads the body by the
+    // dock's measured height), so only a small gap is needed.
+    marginBottom: spacing.md,
     gap: 6,
   },
   track: {

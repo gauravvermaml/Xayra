@@ -130,7 +130,7 @@ describe("empty states", () => {
     onSubmitStarterPrompt: jest.fn(),
     onToggleSpeech: jest.fn(),
     onShowCitation: jest.fn(),
-    bottomInset: 0,
+    listBottomPadding: 0,
     usePlainList: true,
   };
 

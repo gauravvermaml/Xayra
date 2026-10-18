@@ -1,6 +1,6 @@
-import { forwardRef, useCallback, useMemo } from "react";
-import { Pressable, StyleSheet, View } from "react-native";
-import BottomSheet, { type BottomSheetProps } from "@gorhom/bottom-sheet";
+import { createContext, forwardRef, useCallback, useContext, useMemo } from "react";
+import { type LayoutChangeEvent, Pressable, StyleSheet, View } from "react-native";
+import BottomSheet, { BottomSheetFooter, type BottomSheetFooterProps, type BottomSheetProps } from "@gorhom/bottom-sheet";
 import type { SharedValue } from "react-native-reanimated";
 
 import { ModelDownloadCard } from "./ModelDownloadCard";
@@ -65,6 +65,14 @@ import { devTiming } from "../services/ai/perf";
  */
 export const SHEET_SNAP_POINTS = ["20%", "50%"];
 
+/** Xayra 2.0 (Option B): the expanded stage, unchanged. The rest stage is no
+ * longer a percentage — it's the measured content height (`restHeight`):
+ * handle + compose field + dock. SHEET_SNAP_POINTS stays only as the source
+ * of the full-screen drag distance (app/index.tsx), which is unchanged. */
+export const SHEET_HALF_SNAP_POINT = "50%";
+/** The drag handle's rendered height (8 + 5 + 7, see styles below). */
+export const SHEET_HANDLE_HEIGHT = 20;
+
 /**
  * A trivial, permanently-stable component — no props that change on every
  * keystroke or every render ever reach it — passed directly as
@@ -81,7 +89,8 @@ const SheetDragHandle = forwardRef<View, { onPress: () => void }>(function Sheet
     <View ref={ref} style={styles.handleWrap}>
       <Pressable
         onPress={onPress}
-        hitSlop={12}
+        // 20dp row + 14dp above and below = a 48dp touch target.
+        hitSlop={14}
         accessibilityRole="button"
         accessibilityLabel="Tray handle. Tap to open, drag to resize"
         style={styles.dragHandleHitArea}
@@ -147,6 +156,17 @@ export type HistorySheetProps = {
       screenshot showed the card's subtitle clipped flush against the
       Android nav bar without it). */
   bottomInset: number;
+  /** Rest snap point in px, measured by app/index.tsx (handle + compose
+   * field + gap + dock). */
+  restHeight: number;
+  /** The dock, rendered as the sheet's footer (bottom-pinned at every
+   * stage); null while typing. */
+  footer: React.ReactNode | null;
+  /** The footer's measured height (bottom inset included) — the body ends
+   * above it, so the list and its last item never run under the dock. */
+  footerHeight: number;
+  /** The compose header's rendered height. */
+  onHeaderLayout: (height: number) => void;
   /** Shared 0..1 progress this sheet's own handle drives once a drag
    * continues past its highest (50%) snap point — see
    * useExpandOverdragGestureHandlers.ts's own doc comment for the full
@@ -193,6 +213,10 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     contentHidden,
     modelDownload,
     bottomInset,
+    restHeight,
+    footer,
+    footerHeight,
+    onHeaderLayout,
     expandProgress,
     expandDragDistance,
     onExpandSettle,
@@ -228,11 +252,35 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
 
   const renderHandle = useCallback(() => <SheetDragHandle onPress={handleTapDragHandle} />, [handleTapDragHandle]);
 
+  const snapPoints = useMemo(() => [restHeight, SHEET_HALF_SNAP_POINT], [restHeight]);
+
+  // The dock as the sheet's footer: gorhom keeps it pinned to the bottom of
+  // the visible sheet at every stage. Omitted entirely while typing.
+  // gorhom treats `footerComponent` as a component type, so its identity
+  // must never change while shown (a new function would remount the dock on
+  // every keystroke elsewhere on the screen). The dock element reaches it
+  // through FooterContext instead.
+  const renderFooter = useCallback(
+    (props: BottomSheetFooterProps) => (
+      <BottomSheetFooter {...props}>
+        <FooterSlot />
+      </BottomSheetFooter>
+    ),
+    []
+  );
+  const handleHeaderLayout = useCallback(
+    (e: LayoutChangeEvent) => onHeaderLayout(Math.round(e.nativeEvent.layout.height)),
+    [onHeaderLayout]
+  );
+  const footerVisible = footer !== null;
+
   return (
+    <FooterContext.Provider value={footer}>
     <BottomSheet
       ref={ref}
       index={0}
-      snapPoints={SHEET_SNAP_POINTS}
+      snapPoints={snapPoints}
+      footerComponent={footerVisible ? renderFooter : undefined}
       animatedIndex={animatedIndex}
       onChange={onIndexChange}
       onAnimate={(from: number, to: number) => devTiming("VoiceAskTiming", "tray animation start", { from, to })}
@@ -306,7 +354,9 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           above — see the long comment on that prop for the real root cause;
           this `onFocus` call only does anything useful once that prop stops
           the library's own keyboard math from overriding it. */}
-      <View style={styles.header}>{composeBarSlot}</View>
+      <View style={styles.header} onLayout={handleHeaderLayout}>
+        {composeBarSlot}
+      </View>
 
       {/* IDLE PEEK ISOLATION, REVISED — was a full conditional mount/unmount
           (`{sheetIndex > 0 && !contentHidden && (<View>...)}`), which is
@@ -333,7 +383,15 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           below) is a real flex margin, not a clipping trick — the list can
           structurally never render behind the sticky header above it. */}
       <View
-        style={[styles.body, (sheetIndex === 0 || contentHidden) && styles.bodyHidden]}
+        style={[
+          styles.body,
+          // The body ends at the dock's top edge: the list's last item and
+          // the download card stay above it. The bottom safe-area inset is
+          // part of the dock's measured height — counted once, there. With
+          // no dock (typing — the body is hidden then anyway) it's the inset.
+          { paddingBottom: footerVisible ? footerHeight : bottomInset },
+          (sheetIndex === 0 || contentHidden) && styles.bodyHidden,
+        ]}
         pointerEvents={sheetIndex === 0 || contentHidden ? "none" : undefined}
       >
         {/* Monochromatic glass container: one translucent, bordered box
@@ -346,13 +404,18 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
             padded content, same as any other flex box in this app. */}
         <View style={styles.textContainerBox}>{content}</View>
 
-        <View style={{ paddingBottom: bottomInset }}>
-          <ModelDownloadCard modelDownload={modelDownload} />
-        </View>
+        <ModelDownloadCard modelDownload={modelDownload} />
       </View>
     </BottomSheet>
+    </FooterContext.Provider>
   );
 });
+
+const FooterContext = createContext<React.ReactNode | null>(null);
+
+function FooterSlot() {
+  return <>{useContext(FooterContext)}</>;
+}
 
 const styles = StyleSheet.create({
   // Xayra 2.0: the reading tray is a quiet slate surface lifted off the

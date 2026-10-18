@@ -126,11 +126,11 @@ export type ChatSheetContentProps = {
   /** Opens a note's detail view — a chat citation-chip tap (Ask mode) and a
    * row tap in the notes list (Record mode) both call this. */
   onShowCitation: (noteId: string) => void;
-  /** Device's safe-area bottom inset — Build 20 SCROLL CONTENT CLEARANCE:
-   * added as extra trailing padding (on top of an 80px margin) so the last
-   * message can scroll clear of the solid Android nav bar instead of ending
-   * up clipped behind it. */
-  bottomInset: number;
+  /** Space after the list's last item. In the tray the body already ends
+   * at the dock's top edge (HistorySheet), so this is just breathing room;
+   * the full-screen overlay passes the bottom safe-area inset plus room. The
+   * inset is counted once, by whichever container owns the bottom edge. */
+  listBottomPadding: number;
   /** True only when rendered inside `ExpandedTextOverlay` — a plain
    * full-screen View, NOT a real `<BottomSheet>`. See
    * NotesSheetContent.tsx's identical prop for why `BottomSheetFlatList`
@@ -177,7 +177,7 @@ export function ChatSheetContent({
   onSubmitStarterPrompt,
   onToggleSpeech,
   onShowCitation,
-  bottomInset,
+  listBottomPadding,
   usePlainList,
 }: ChatSheetContentProps) {
   // Two separate, exactly-typed refs rather than one shared union-typed
@@ -207,7 +207,7 @@ export function ChatSheetContent({
     void resumeDownloads();
   };
 
-  const messageListContentContainerStyle = { paddingBottom: bottomInset + 80 };
+  const messageListContentContainerStyle = { paddingBottom: listBottomPadding };
 
   const data: DrawerListItem[] = useMemo(() => {
     if (mode === "record") {

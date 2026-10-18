@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LayoutChangeEvent } from "react-native";
 import { Alert, Dimensions, Image, Keyboard, PixelRatio, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
@@ -27,15 +27,16 @@ import { ChatSheetContent } from "../components/ChatSheetContent";
 import { CancelProcessingButton } from "../components/CancelProcessingButton";
 import { ComposeBar } from "../components/ComposeBar";
 import { ExpandedTextOverlay } from "../components/ExpandedTextOverlay";
-import { HistorySheet, SHEET_SNAP_POINTS } from "../components/HistorySheet";
+import { HandsfreeTypingStatus } from "../components/HandsfreeTypingStatus";
+import { HistorySheet, SHEET_HANDLE_HEIGHT, SHEET_SNAP_POINTS } from "../components/HistorySheet";
+import { HomeDock } from "../components/HomeDock";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { showToast } from "../components/Toast";
 import { TodosOverlay } from "../components/TodosOverlay";
-import { IconButton } from "../components/ui/IconButton";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
 import { XText } from "../components/ui/XText";
 import { HOME_SUBTITLE } from "../constants/copy";
-import { BRAND_MAX_FONT_SCALE, MIN_TOUCH_TARGET, xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
+import { MIN_TOUCH_TARGET, xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
 import { useLaunchShortcut } from "../hooks/useLaunchShortcut";
 import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
@@ -99,6 +100,7 @@ import {
 import { wordCount } from "../services/logging/redact";
 import { getGreetingFirstName } from "../services/sync/driveSync";
 import { getTimeBasedGreeting } from "../utils/greeting";
+import { emblemFit, FULL_EMBLEM_TIER, sameEmblemTier, type EmblemTier } from "../utils/emblemLayout";
 import { userFacingMessage } from "../services/errors/userMessage";
 
 /** Screen goes idle-with-mic-open for this long with zero detected speech
@@ -116,10 +118,17 @@ const CENTER_AREA_GAP_PX = 10;
  * shrinking. The actual size comes from the measured space (see zone0/zone1). */
 const EMBLEM_ZONE_MAX_REST = 248;
 const EMBLEM_ZONE_MAX_HALF = 168;
-const EMBLEM_ZONE_MIN = 72;
+const EMBLEM_ZONE_MIN = 64;
 /** Extra room, as a multiple of the zone, kept for the orbit rings that
- * reach beyond it. */
+ * reach beyond it — full orbit, and the reduced one (no dotted ring or teal
+ * arc) used first when space is short. */
 const ORBIT_ROOM = 1.22;
+const ORBIT_ROOM_REDUCED = 1.12;
+/** Responsive priority (approved): below these zone sizes, first the orbit
+ * is reduced, then the optional "Tap to …" cue goes, then the emblem
+ * shrinks to EMBLEM_ZONE_MIN; only if even that can't fit is it hidden. */
+const ORBIT_REDUCE_BELOW = 132;
+const CUE_DROP_BELOW = 96;
 /** Width of the outer orbit arcs relative to the zone (r 176 of 390 in a
  * box 1.5x the zone), and the side gutter they stay inside. */
 const ORBIT_SPAN = 1.36;
@@ -129,8 +138,6 @@ const MODE_SWITCH_BOTTOM_GAP = 12;
 /** Until the switch has been measured (first frame only). */
 const MODE_SWITCH_FALLBACK_HEIGHT = 50;
 
-/** Header corner buttons (visible size; touch area is 48dp). */
-const HEADER_BUTTON_SIZE = 44;
 /** Soft red on black for the inline error line (6.9:1). */
 const ERROR_TEXT = "#F2A5A5";
 
@@ -138,6 +145,23 @@ const MODE_SEGMENTS = [
   { key: "record", label: "Record" },
   { key: "ask", label: "Ask" },
 ] as const;
+
+/** Breathing room after the tray list's last item (the body already ends at
+ * the dock's top edge), and after the full-screen list's (plus the inset). */
+const TRAY_LIST_END_PADDING = 16;
+const OVERLAY_LIST_END_PADDING = 24;
+
+
+const QUICK_MENU_GUTTER = 12;
+/** The More menu opens toward the free side of its button and stays inside
+ * the screen's side gutter. */
+function quickMenuPosition(anchor: { x: number; y: number; width: number; height: number }) {
+  const { width, height } = Dimensions.get("window");
+  const right = Math.max(QUICK_MENU_GUTTER, width - (anchor.x + anchor.width));
+  return anchor.y > height / 2
+    ? { right, bottom: height - anchor.y + 8 }
+    : { right, top: anchor.y + anchor.height + 6 };
+}
 
 /** How long the launch greeting ("Good morning, ...") stays up before
  * cross-fading into the header's normal persistent subtitle. */
@@ -214,9 +238,17 @@ function todosOverlayPopIn() {
 // sheet's own real rendered height sitting on top of it in z-order, not
 // this padding value.
 const SCREEN_HEIGHT = Dimensions.get("window").height;
+/** The legacy 20%/50% heights — kept ONLY to derive EXPAND_DRAG_DISTANCE
+ * below, so the full-screen drag keeps exactly the travel it had (274dp on
+ * a 914dp screen). The tray's real rest height is measured (Option B). */
 const SHEET_HEIGHTS_PX = SHEET_SNAP_POINTS.map(
   (point) => (parseFloat(point) / 100) * SCREEN_HEIGHT
 ) as [number, number];
+/** Option B rest stage = handle + compose field + this gap + dock. */
+const REST_FIELD_DOCK_GAP = 12;
+/** First-frame estimates until the field and dock have been measured. */
+const COMPOSE_HEADER_FALLBACK = 48;
+const DOCK_ROW_FALLBACK = 74;
 /** Pixels of drag the tray's own "expand" handle and the full-screen
  * overlay's own "collapse" handle both map their full 0..1 progress across
  * — deliberately the SAME distance the real sheet travels between its two
@@ -374,6 +406,19 @@ export default function HomeScreen() {
   // own doc comment for why this is deliberately NOT done by changing which
   // index the sheet snaps to.
   const [isComposing, setIsComposing] = useState(false);
+  // Keyboard on screen — true also after a typed Record send, which keeps
+  // the keyboard up while `isComposing` clears. "Typing" for the dock and
+  // the Handsfree status means either.
+  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardDidShow", () => setIsKeyboardVisible(true));
+    const hide = Keyboard.addListener("keyboardDidHide", () => setIsKeyboardVisible(false));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, []);
+  const isTyping = isComposing || isKeyboardVisible;
   // Opens a note from either a chat citation chip (handleShowCitation below)
   // or a tap on a row in the Record-mode notes list (`notes` below) — same
   // modal either way.
@@ -461,6 +506,47 @@ export default function HomeScreen() {
     overshootClamping: false,
   });
 
+  // ---- Option B: the tray's rest height is its measured content ----------
+  // handle + compose field + gap + dock (the dock's height includes the
+  // bottom safe-area inset — counted once, there). Measurements that arrive
+  // while typing (a growing multiline field, keyboard animation) are held
+  // and applied once typing ends, so the rest snap point never moves under
+  // the keyboard or mid-animation.
+  const [composeHeaderHeight, setComposeHeaderHeight] = useState(COMPOSE_HEADER_FALLBACK);
+  const [dockHeight, setDockHeight] = useState(DOCK_ROW_FALLBACK + insets.bottom);
+  const isTypingRef = useRef(false);
+  isTypingRef.current = isTyping;
+  const pendingHeaderHeightRef = useRef<number | null>(null);
+  const handleComposeHeaderLayout = useCallback((height: number) => {
+    if (isTypingRef.current) {
+      pendingHeaderHeightRef.current = height;
+      return;
+    }
+    setComposeHeaderHeight(height);
+  }, []);
+  useEffect(() => {
+    if (!isTyping && pendingHeaderHeightRef.current !== null) {
+      setComposeHeaderHeight(pendingHeaderHeightRef.current);
+      pendingHeaderHeightRef.current = null;
+    }
+  }, [isTyping]);
+  const handleDockHeight = useCallback((height: number) => {
+    if (height > 0) setDockHeight(height);
+  }, []);
+  const restHeight = Math.round(SHEET_HANDLE_HEIGHT + composeHeaderHeight + REST_FIELD_DOCK_GAP + dockHeight);
+  // The 50% stage, unchanged — read from the live window (gorhom resolves
+  // "50%" against the live container, so a resize must move both together).
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const sheetHalfPx = windowHeight * 0.5;
+  const sheetHalfPxValue = useSharedValue(sheetHalfPx);
+  useEffect(() => {
+    sheetHalfPxValue.value = sheetHalfPx;
+  }, [sheetHalfPx, sheetHalfPxValue]);
+  const sheetRestPx = useSharedValue(restHeight);
+  useEffect(() => {
+    sheetRestPx.value = withTiming(restHeight, { duration: 220 });
+  }, [restHeight, sheetRestPx]);
+
   // Xayra 2.0: the Record/Ask switch sits centred just above the tray and
   // follows it (drawerFloatingStackAnimatedStyle below). Its measured height
   // feeds the centre area's clearance, so the emblem never runs into it.
@@ -480,7 +566,8 @@ export default function HomeScreen() {
   // the sheet auto-peeks to 50% during an ASK request.
   const centerAreaAnimatedStyle = useAnimatedStyle(() => ({
     paddingBottom:
-      interpolate(sheetAnimatedIndex.value, [0, 1], SHEET_HEIGHTS_PX, "clamp") + modeSwitchReserve.value,
+      interpolate(sheetAnimatedIndex.value, [0, 1], [sheetRestPx.value, sheetHalfPxValue.value], "clamp") +
+      modeSwitchReserve.value,
   }));
 
   // Build 23 POSITION FLOATING PILLS (live-tracked): found by testing on a
@@ -495,7 +582,9 @@ export default function HomeScreen() {
   // there's no text input or keyboard interaction in this stack at all, just
   // a plain shared-value interpolation against the sheet's own index.
   const drawerFloatingStackAnimatedStyle = useAnimatedStyle(() => ({
-    bottom: interpolate(sheetAnimatedIndex.value, [0, 1], SHEET_HEIGHTS_PX, "clamp") + MODE_SWITCH_BOTTOM_GAP,
+    bottom:
+      interpolate(sheetAnimatedIndex.value, [0, 1], [sheetRestPx.value, sheetHalfPxValue.value], "clamp") +
+      MODE_SWITCH_BOTTOM_GAP,
   }));
 
   // The emblem zone takes the space actually left between the header and
@@ -1375,29 +1464,47 @@ export default function HomeScreen() {
 
   // Emblem zone targets (see emblemZoneSize). Recomputed only when the
   // measured space or what sits under the emblem changes — never per frame.
-  // The orbit reaches past the zone, so the zone keeps ORBIT_ROOM of its
-  // size free for it rather than letting the rings run into the header.
+  // Responsive priority per tray stage: reduce the orbit, then drop the
+  // optional cue, then shrink the emblem, and hide it only when even the
+  // smallest emblem can't fit beside the essential controls.
   const isEmblemBusy = canvasState === "recording" || canvasState === "transcribing";
-  const { width: windowWidth } = useWindowDimensions();
+  const [emblemTiers, setEmblemTiers] = useState<{ rest: EmblemTier; half: EmblemTier }>({
+    rest: FULL_EMBLEM_TIER,
+    half: FULL_EMBLEM_TIER,
+  });
   useEffect(() => {
     if (centerRegionHeight === 0) return;
     const textLine = (xayraType.cue.lineHeight ?? 20) * PixelRatio.getFontScale();
-    const below =
-      CENTER_AREA_GAP_PX + textLine + (isEmblemBusy ? WAVEFORM_ROW_HEIGHT + CENTER_AREA_GAP_PX + MIN_TOUCH_TARGET : 0);
+    // Essential under the emblem: the status line, plus the waveform and
+    // Cancel while working. Optional: the idle "Tap to …" cue.
+    const essentialBelow = isEmblemBusy
+      ? CENTER_AREA_GAP_PX + textLine + WAVEFORM_ROW_HEIGHT + CENTER_AREA_GAP_PX + MIN_TOUCH_TARGET
+      : 0;
+    const cueBelow = isEmblemBusy ? 0 : CENTER_AREA_GAP_PX + textLine;
     const reserve = modeSwitchHeight + MODE_SWITCH_BOTTOM_GAP + CENTER_AREA_BREATHING_ROOM_PX;
     // The outer orbit arcs span ORBIT_SPAN x the zone; keep them inside the
     // screen's side gutters too.
     const widthCap = (windowWidth - 2 * ORBIT_SIDE_GUTTER) / ORBIT_SPAN;
     const fit = (sheetPx: number, max: number) =>
-      Math.round(
-        Math.max(
-          EMBLEM_ZONE_MIN,
-          Math.min(max, widthCap, (centerRegionHeight - sheetPx - reserve - below) / ORBIT_ROOM)
-        )
-      );
-    zoneRest.value = withTiming(fit(SHEET_HEIGHTS_PX[0], EMBLEM_ZONE_MAX_REST), { duration: 220 });
-    zoneHalf.value = withTiming(fit(SHEET_HEIGHTS_PX[1], EMBLEM_ZONE_MAX_HALF), { duration: 220 });
-  }, [centerRegionHeight, modeSwitchHeight, isEmblemBusy, windowWidth, zoneRest, zoneHalf]);
+      emblemFit({
+        available: centerRegionHeight - sheetPx - reserve - essentialBelow,
+        cueHeight: cueBelow,
+        maxZone: Math.min(max, widthCap),
+        minZone: EMBLEM_ZONE_MIN,
+        reduceOrbitBelow: ORBIT_REDUCE_BELOW,
+        dropCueBelow: CUE_DROP_BELOW,
+        orbitRoom: ORBIT_ROOM,
+        reducedOrbitRoom: ORBIT_ROOM_REDUCED,
+      });
+    const rest = fit(restHeight, EMBLEM_ZONE_MAX_REST);
+    const half = fit(sheetHalfPx, EMBLEM_ZONE_MAX_HALF);
+    zoneRest.value = withTiming(Math.round(rest.zone), { duration: 220 });
+    zoneHalf.value = withTiming(Math.round(half.zone), { duration: 220 });
+    setEmblemTiers((prev) =>
+      sameEmblemTier(prev.rest, rest.tier) && sameEmblemTier(prev.half, half.tier) ? prev : { rest: rest.tier, half: half.tier }
+    );
+  }, [centerRegionHeight, modeSwitchHeight, isEmblemBusy, windowWidth, restHeight, sheetHalfPx, zoneRest, zoneHalf]);
+  const emblemTier = sheetIndex === 0 ? emblemTiers.rest : emblemTiers.half;
 
   const emblemLabel = activeMode.isActive
     ? "Handsfree is on. Long-press to turn it off"
@@ -1406,6 +1513,31 @@ export default function HomeScreen() {
       : inputMode === "ask"
         ? "Tap to ask. Long-press for Handsfree"
         : "Tap to record. Long-press for Handsfree";
+
+  // Stop from the typing status: the existing controller's own stop.
+  const handleStopHandsfree = useCallback(() => {
+    void activeMode.stop();
+  }, [activeMode]);
+
+  // The dock element, memoised so it's only re-created when what it shows
+  // changes (HistorySheet hands it to the sheet's footer).
+  const handleOpenTodos = useCallback(() => setIsTodosVisible(true), []);
+  const dock = useMemo(
+    () => (
+      <HomeDock
+        ref={quickMenuButtonRef}
+        handsfreeActive={activeMode.isActive}
+        handsfreeState={activeMode.state}
+        pendingCount={pendingCount}
+        bottomInset={insets.bottom}
+        onHandsfree={handleToggleHandsfree}
+        onTodos={handleOpenTodos}
+        onMore={handleOpenQuickMenu}
+        onHeightChange={handleDockHeight}
+      />
+    ),
+    [activeMode.isActive, activeMode.state, pendingCount, insets.bottom, handleToggleHandsfree, handleOpenTodos, handleOpenQuickMenu, handleDockHeight]
+  );
 
   // Opens a note's detail modal — shared by a chat citation chip's tap AND
   // a row tap in the Record-mode notes list (ChatSheetContent's
@@ -1508,63 +1640,15 @@ export default function HomeScreen() {
         `pointerEvents="none"` blocked TodosOverlay's own subtree too,
         freezing the entire To-Dos screen (no scroll, no tap, nothing). */}
     <Pressable style={styles.canvas} onPress={handleBackdropPress} pointerEvents={isTodosVisible ? "none" : "auto"}>
-      {/* Xayra 2.0 header: centred mark and guidance. Handsfree, To-Dos and
-          More sit in its corners for now — a temporary arrangement until
-          the Stage 4 dock; behaviour is unchanged. */}
-      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
-        <View style={styles.headerRow}>
-          <View style={styles.headerSide}>
-            <Pressable
-              testID="handsfree-toggle"
-              onPress={handleToggleHandsfree}
-              hitSlop={(MIN_TOUCH_TARGET - HEADER_BUTTON_SIZE) / 2}
-              accessibilityRole="switch"
-              accessibilityLabel={activeMode.isActive ? `Handsfree, ${activeMode.state}` : "Handsfree"}
-              accessibilityState={{ checked: activeMode.isActive }}
-              style={({ pressed }) => [
-                styles.headerButton,
-                activeMode.isActive && styles.headerButtonActive,
-                pressed && styles.pressed,
-              ]}
-            >
-              <Feather name="headphones" size={19} color={activeMode.isActive ? xayraColors.teal : xayraColors.dockText} />
-            </Pressable>
-          </View>
-          <View style={styles.brandRow}>
-            {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
-            <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
-            <XText variant="wordmark" accessibilityRole="header">
-              Xayra
-            </XText>
-          </View>
-          <View style={[styles.headerSide, styles.headerSideEnd]}>
-            <Pressable
-              testID="todos-button"
-              onPress={() => setIsTodosVisible(true)}
-              hitSlop={(MIN_TOUCH_TARGET - HEADER_BUTTON_SIZE) / 2}
-              accessibilityRole="button"
-              accessibilityLabel={pendingCount > 0 ? `To-Dos, ${pendingCount} pending` : "To-Dos"}
-              style={({ pressed }) => [styles.headerButton, pressed && styles.pressed]}
-            >
-              <Feather name="check-circle" size={19} color={xayraColors.dockText} />
-              {pendingCount > 0 && (
-                <View style={styles.badge} pointerEvents="none">
-                  <Text style={styles.badgeText} maxFontSizeMultiplier={BRAND_MAX_FONT_SCALE}>
-                    {pendingCount > 99 ? "99+" : pendingCount}
-                  </Text>
-                </View>
-              )}
-            </Pressable>
-            <View ref={quickMenuButtonRef} collapsable={false}>
-              <IconButton
-                testID="more-button"
-                accessibilityLabel="More"
-                onPress={handleOpenQuickMenu}
-                size={HEADER_BUTTON_SIZE}
-                icon={<Feather name="more-horizontal" size={20} color={xayraColors.dockText} />}
-              />
-            </View>
-          </View>
+      {/* Xayra 2.0 header: centred mark and guidance only — Handsfree, To-Dos
+          and More live in the tray's dock (HomeDock). */}
+      <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
+        <View style={styles.brandRow}>
+          {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
+          <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
+          <XText variant="wordmark" accessibilityRole="header">
+            Xayra
+          </XText>
         </View>
         {showGreeting ? (
           <Animated.Text key="greeting" entering={FadeIn} exiting={FadeOut} style={styles.brandSubtitle}>
@@ -1581,6 +1665,8 @@ export default function HomeScreen() {
         <CentralRecorderCanvas
           state={canvasState}
           zoneSize={emblemZoneSize}
+          orbitDetail={emblemTier.orbit}
+          hidden={emblemTier.hidden}
           accessibilityLabel={emblemLabel}
           amplitude={recorder.amplitude}
           onPress={() => void handleRecordPress()}
@@ -1602,16 +1688,9 @@ export default function HomeScreen() {
           disabled={recorder.isTransitioning}
         />
         {recordingStatusText && <Text style={styles.statusText}>{recordingStatusText}</Text>}
-        {idleCue && (
+        {idleCue && emblemTier.cue && (
           <Text testID="idle-tap-cue" style={styles.statusText}>
             {idleCue}
-          </Text>
-        )}
-        {/* Handsfree's own state, shown where the old pill's label was read
-            ("Handsfree · listening"), while nothing else is being said here. */}
-        {activeMode.isActive && !recordingStatusText && (
-          <Text testID="handsfree-status" style={[styles.statusText, styles.handsfreeStatus]}>
-            {`Handsfree · ${activeMode.state}`}
           </Text>
         )}
         {canvasState === "recording" && <Text style={styles.statusHint}>Tap to finish</Text>}
@@ -1633,6 +1712,11 @@ export default function HomeScreen() {
           onLayout={handleModeSwitchLayout}
           style={[styles.modeSwitchRow, drawerFloatingStackAnimatedStyle]}
         >
+          {/* The dock is hidden while typing; an active Handsfree session
+              stays visible here — real state and a working Stop. */}
+          {activeMode.isActive && isTyping && (
+            <HandsfreeTypingStatus state={activeMode.state} onStop={handleStopHandsfree} />
+          )}
           <SegmentedControl
             segments={MODE_SEGMENTS}
             value={inputMode}
@@ -1651,6 +1735,10 @@ export default function HomeScreen() {
         onIndexChange={handleSheetIndexChange}
         modelDownload={chatSession.modelDownload}
         bottomInset={insets.bottom}
+        restHeight={restHeight}
+        footer={!isTyping && !isTextBoxExpanded ? dock : null}
+        footerHeight={dockHeight}
+        onHeaderLayout={handleComposeHeaderLayout}
         expandProgress={expandProgress}
         expandDragDistance={EXPAND_DRAG_DISTANCE}
         onExpandSettle={handleExpandSettle}
@@ -1664,6 +1752,7 @@ export default function HomeScreen() {
             onSubmit={handleSubmitText}
             placeholder={inputMode === "record" ? "Type your thoughts…" : "Search your thoughts…"}
             mode={inputMode}
+            sheetIndex={sheetIndex}
           />
         }
         // Record mode shows the notes list (newest first); Ask mode keeps
@@ -1687,7 +1776,7 @@ export default function HomeScreen() {
             onSubmitStarterPrompt={(prompt) => void chatSession.submitQuery(prompt, "text")}
             onToggleSpeech={chatSession.toggleSpeech}
             onShowCitation={handleShowCitation}
-            bottomInset={insets.bottom}
+            listBottomPadding={TRAY_LIST_END_PADDING}
           />
         }
       />
@@ -1744,7 +1833,7 @@ export default function HomeScreen() {
           onSubmitStarterPrompt={(prompt) => void chatSession.submitQuery(prompt, "text")}
           onToggleSpeech={chatSession.toggleSpeech}
           onShowCitation={handleShowCitation}
-          bottomInset={insets.bottom}
+          listBottomPadding={insets.bottom + OVERLAY_LIST_END_PADDING}
           usePlainList
         />
       </ExpandedTextOverlay>
@@ -1792,10 +1881,10 @@ export default function HomeScreen() {
       {isQuickMenuOpen && quickMenuAnchor && (
         <View style={styles.quickMenuBackdropView} pointerEvents="box-none">
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setIsQuickMenuOpen(false)} />
-          {/* Anchored to the icon's actual measured position (quickMenuAnchor),
-              not a fixed corner — grows DOWNWARD from the header's More
-              button, and right-aligns its own right edge to the icon's, so it
-              never spills off the right edge of the screen. */}
+          {/* Anchored to the More button's actual measured position
+              (quickMenuAnchor): opens upward from the dock (downward if the
+              button is ever in the top half), right-aligned to it and kept
+              inside the screen's side gutter. */}
           {/* Design-sandbox pass: this used to pop into existence with zero
               animation — the one overlay in this file with no entrance
               transition at all. Fluid pop-out spring (scale 0.95->1.0 +
@@ -1808,10 +1897,7 @@ export default function HomeScreen() {
             exiting={FadeOut.duration(120)}
             style={[
               styles.quickMenuPopover,
-              {
-                right: Dimensions.get("window").width - (quickMenuAnchor.x + quickMenuAnchor.width),
-                top: quickMenuAnchor.y + quickMenuAnchor.height + 6,
-              },
+              quickMenuPosition(quickMenuAnchor),
             ]}
           >
             <Pressable
@@ -1868,56 +1954,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 8,
   },
-  headerRow: {
-    alignSelf: "stretch",
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  // Equal-width sides keep the mark optically centred whatever sits in them.
-  headerSide: {
-    width: HEADER_BUTTON_SIZE * 2 + 8,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-  },
-  headerSideEnd: {
-    justifyContent: "flex-end",
-  },
-  headerButton: {
-    width: HEADER_BUTTON_SIZE,
-    height: HEADER_BUTTON_SIZE,
-    borderRadius: HEADER_BUTTON_SIZE / 2,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  headerButtonActive: {
-    backgroundColor: xayraColors.tealSoft,
-    borderWidth: 1,
-    borderColor: xayraColors.tealRing,
-  },
-  pressed: {
-    opacity: 0.7,
-  },
-  badge: {
-    position: "absolute",
-    top: 2,
-    right: 0,
-    minWidth: 18,
-    height: 18,
-    paddingHorizontal: 4,
-    borderRadius: 9,
-    backgroundColor: xayraColors.badge,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  badgeText: {
-    ...xayraType.badge,
-    fontSize: 11,
-    lineHeight: 14,
-    color: xayraColors.badgeText,
-  },
   brandRow: {
-    flex: 1,
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "center",
@@ -1940,6 +1977,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     alignItems: "center",
+    gap: 10,
     zIndex: 25,
     elevation: 25,
   },
@@ -1954,9 +1992,6 @@ const styles = StyleSheet.create({
     color: xayraColors.textMuted,
     textAlign: "center",
     paddingHorizontal: 24,
-  },
-  handsfreeStatus: {
-    color: xayraColors.teal,
   },
   statusHint: {
     ...xayraType.meta,
