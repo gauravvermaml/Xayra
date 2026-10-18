@@ -6,6 +6,7 @@ import type { SharedValue } from "react-native-reanimated";
 import { ModelDownloadCard } from "./ModelDownloadCard";
 import { createExpandOverdragGestureHandlersHook } from "./useExpandOverdragGestureHandlers";
 import { spacing } from "../constants/theme";
+import { xayraColors } from "../constants/xayraTheme";
 import type { ModelDownloadStatus } from "../services/ai/modelDownloadManager";
 import { devTiming } from "../services/ai/perf";
 
@@ -78,7 +79,13 @@ export const SHEET_SNAP_POINTS = ["20%", "50%"];
 const SheetDragHandle = forwardRef<View, { onPress: () => void }>(function SheetDragHandle({ onPress }, ref) {
   return (
     <View ref={ref} style={styles.handleWrap}>
-      <Pressable onPress={onPress} hitSlop={12} style={styles.dragHandleHitArea}>
+      <Pressable
+        onPress={onPress}
+        hitSlop={12}
+        accessibilityRole="button"
+        accessibilityLabel="Tray handle. Tap to open, drag to resize"
+        style={styles.dragHandleHitArea}
+      >
         <View style={styles.dragHandle} />
       </Pressable>
     </View>
@@ -348,25 +355,30 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
 });
 
 const styles = StyleSheet.create({
+  // Xayra 2.0: the reading tray is a quiet slate surface lifted off the
+  // black canvas by its colour and a faint top edge — no card, no shadow.
   background: {
-    // True jet black / matches the canvas exactly — deliberately NOT the
-    // app's usual slate `colors.background`.
-    backgroundColor: "#000000",
+    backgroundColor: xayraColors.surface,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    borderTopWidth: 1,
+    borderColor: xayraColors.lineStrong,
   },
   handleWrap: {
-    backgroundColor: "#000000",
     alignItems: "center",
   },
+  // 8 + 5 + 7 = 20dp, the same height as before, so the compose field (and
+  // with it the keyboard clearance) sits exactly where it did.
   dragHandleHitArea: {
     paddingTop: spacing.sm,
-    paddingBottom: spacing.sm,
+    paddingBottom: 7,
     paddingHorizontal: spacing.xl,
   },
   dragHandle: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: "rgba(255,255,255,0.3)",
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: xayraColors.handle,
   },
   // No vertical padding of its own — ComposeBar's row already has a fixed
   // 40dp height, and the drag handle above (handleComponent) already
@@ -387,19 +399,12 @@ const styles = StyleSheet.create({
   bodyHidden: {
     opacity: 0,
   },
-  // MONOCHROMATIC GLASS: a single translucent, subtly-bordered box wrapping
-  // the Q&A history list — `flex: 1` and `overflow: "hidden"` are additive
-  // to the requested spec (not part of it), needed for a real scrollable
-  // list to actually fill the box's height and for its content to respect
-  // the box's own rounded corners.
+  // Xayra 2.0: borderless — the list sits straight on the tray surface (the
+  // old translucent bordered "glass" box is gone). `flex: 1` and
+  // `overflow: "hidden"` keep the scrollable list filling and clipped.
   textContainerBox: {
     flex: 1,
     position: "relative",
-    backgroundColor: "rgba(18, 18, 26, 0.65)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.12)",
-    borderRadius: 18,
-    padding: 16,
     overflow: "hidden",
   },
 });

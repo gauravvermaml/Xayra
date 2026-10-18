@@ -1,6 +1,7 @@
 import { StyleSheet, Text, View } from "react-native";
 
-import { colors, radius, spacing } from "../constants/theme";
+import { spacing } from "../constants/theme";
+import { xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
 import type { ModelDownloadStatus } from "../services/ai/modelDownloadManager";
 
 export type ModelDownloadCardProps = {
@@ -51,37 +52,35 @@ const styles = StyleSheet.create({
   // nav-bar clearance (confirmed necessary on-device in Build 25 — this
   // fixed margin alone isn't tall enough for a 3-button nav bar).
   card: {
-    backgroundColor: "#1C1C1E",
-    borderRadius: radius.lg,
-    paddingHorizontal: spacing.sm + 2,
-    paddingTop: spacing.sm,
-    paddingBottom: 16,
+    backgroundColor: xayraColors.field,
+    borderRadius: xayraRadius.card,
+    paddingHorizontal: spacing.base,
+    paddingTop: spacing.md,
+    paddingBottom: spacing.base,
     marginHorizontal: spacing.base,
     marginBottom: 24,
+    gap: 6,
   },
   track: {
     height: 4,
     borderRadius: 2,
-    backgroundColor: "#2C2C2E",
+    backgroundColor: xayraColors.lineStrong,
     overflow: "hidden",
-    marginBottom: spacing.xs,
   },
   fill: {
     height: "100%",
-    backgroundColor: colors.accent,
+    backgroundColor: xayraColors.lilac,
     borderRadius: 2,
   },
   progressText: {
-    color: colors.textSecondary,
-    fontSize: 12,
-    fontWeight: "600",
+    ...xayraType.chip,
+    color: xayraColors.textSoft,
     textAlign: "center",
   },
   subtitleText: {
-    color: colors.textMuted,
-    fontSize: 11,
+    ...xayraType.meta,
+    color: xayraColors.textMuted,
     textAlign: "center",
-    marginTop: 2,
-    opacity: 0.85,
   },
+
 });

@@ -1,6 +1,7 @@
 import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { runOnJS, useSharedValue, withSpring, type SharedValue } from "react-native-reanimated";
+import { xayraColors } from "../constants/xayraTheme";
 
 /** Same feel as this app's other swipe-to-commit gestures (e.g. the
  * calendar's own swipe-to-navigate) — either threshold alone decides which
@@ -103,9 +104,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   pill: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: "rgba(255,255,255,0.3)",
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: xayraColors.handle,
   },
 });

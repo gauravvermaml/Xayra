@@ -3,6 +3,7 @@ import { StyleSheet, View } from "react-native";
 import Animated, { interpolate, runOnJS, useAnimatedReaction, useAnimatedStyle, type SharedValue } from "react-native-reanimated";
 
 import { SwipeableTrayHandle } from "./SwipeableTrayHandle";
+import { xayraColors } from "../constants/xayraTheme";
 
 export type ExpandedTextOverlayProps = {
   /** Device's safe-area top inset — pads the box's own top edge so it
@@ -122,7 +123,7 @@ export function ExpandedTextOverlay({ topInset, bottomInset, progress, dragDista
 
   return (
     <Animated.View pointerEvents={interactive ? "auto" : "none"} style={[styles.overlay, containerStyle]}>
-      <View style={[styles.box, { marginTop: topInset + 16, marginBottom: bottomInset + 16 }]}>
+      <View style={[styles.box, { marginTop: topInset + 8 }]}>
         {/* Same handle component as HistorySheet.tsx's own tray — dragging
             it down continuously drives the SAME `progress` value back
             toward 0, collapsing this box back into the tray. */}
@@ -151,15 +152,17 @@ const styles = StyleSheet.create({
     // distinct layer.
     backgroundColor: "#000000",
   },
+  // Xayra 2.0: the tray surface, grown to full height — same colour, top
+  // corners and edge as HistorySheet's sheet, so it reads as the tray
+  // itself, just taller. The list's own bottom padding clears the nav bar.
   box: {
     flex: 1,
-    marginHorizontal: 16,
     position: "relative",
-    backgroundColor: "rgba(18, 18, 26, 0.65)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.12)",
-    borderRadius: 18,
-    padding: 16,
+    backgroundColor: xayraColors.surface,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    borderTopWidth: 1,
+    borderColor: xayraColors.lineStrong,
     overflow: "hidden",
   },
   listClearance: {
@@ -167,7 +170,7 @@ const styles = StyleSheet.create({
     paddingTop: 4,
   },
   closeHandleRow: {
-    paddingTop: 4,
-    paddingBottom: 8,
+    paddingTop: 8,
+    paddingBottom: 12,
   },
 });
