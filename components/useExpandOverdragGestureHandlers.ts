@@ -39,6 +39,10 @@ const SETTLE_SPRING = { damping: 24, stiffness: 260, mass: 0.9, overshootClampin
  */
 const SNAP_VELOCITY_WEIGHT = 0.2;
 
+/** How close (px) the sheet must be to its 50% detent for a handle drag to
+ * count as starting there. */
+const HIGHEST_DETENT_TOLERANCE_PX = 4;
+
 export type ExpandOverdragGestureHandlersParams = {
   /** Shared 0..1 progress this drives — see SwipeableTrayHandle.tsx's own
    * doc comment for the full contract (this file drives the SAME value that
@@ -130,6 +134,12 @@ export function createExpandOverdragGestureHandlersHook({
     // `useBottomSheetInternal`) — duplicating just this one field is simpler
     // and safer than trying to reach into that private state.
     const dragStartPosition = useSharedValue(0);
+    // Full-screen expansion only continues a drag that BEGAN at the 50%
+    // stage (the highest detent) — a drag from the rest stage stops at 50%,
+    // exactly as before Option B. Made explicit in Xayra 2.0 Stage 4: with
+    // the measured (numeric) rest snap point, a fast flick from rest that
+    // overshot 50% started opening the full-screen view, which it never did.
+    const startedAtHighestDetent = useSharedValue(false);
 
     // The UNCLAMPED overdrag distance in pixels — `expandProgress` itself is
     // clamped to a max of 1 (see `handleOnChange` below), which loses exactly
@@ -146,17 +156,20 @@ export function createExpandOverdragGestureHandlersHook({
         "worklet";
         if (source === GESTURE_SOURCE.HANDLE) {
           dragStartPosition.value = animatedPosition.value;
+          const highest = animatedDetentsState.value.highestDetentPosition;
+          startedAtHighestDetent.value =
+            highest !== undefined && Math.abs(animatedPosition.value - highest) <= HIGHEST_DETENT_TOLERANCE_PX;
         }
         defaultOnStart(source, payload);
       },
-      [defaultOnStart, animatedPosition, dragStartPosition]
+      [defaultOnStart, animatedPosition, animatedDetentsState, dragStartPosition, startedAtHighestDetent]
     );
 
     const handleOnChange: GestureEventHandlerCallbackType = useCallback(
       (source, payload) => {
         "worklet";
         defaultOnChange(source, payload);
-        if (source === GESTURE_SOURCE.HANDLE) {
+        if (source === GESTURE_SOURCE.HANDLE && startedAtHighestDetent.value) {
           const highestSnapPoint = animatedDetentsState.value.highestDetentPosition;
           if (highestSnapPoint !== undefined) {
             const rawDraggedPosition = dragStartPosition.value + payload.translationY;
@@ -166,7 +179,7 @@ export function createExpandOverdragGestureHandlersHook({
           }
         }
       },
-      [defaultOnChange, animatedDetentsState, dragStartPosition, expandProgress, rawOverdragPx]
+      [defaultOnChange, animatedDetentsState, dragStartPosition, expandProgress, rawOverdragPx, startedAtHighestDetent]
     );
 
     const handleOnEnd: GestureEventHandlerCallbackType = useCallback(
