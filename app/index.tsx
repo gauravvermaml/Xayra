@@ -101,6 +101,7 @@ import { wordCount } from "../services/logging/redact";
 import { getGreetingFirstName } from "../services/sync/driveSync";
 import { getTimeBasedGreeting } from "../utils/greeting";
 import { emblemFit, FULL_EMBLEM_TIER, sameEmblemTier, type EmblemTier } from "../utils/emblemLayout";
+import { dockYieldsAtHalf as dockYieldsAtHalfFor } from "../utils/readingViewport";
 import { userFacingMessage } from "../services/errors/userMessage";
 
 /** Screen goes idle-with-mic-open for this long with zero detected speech
@@ -246,6 +247,9 @@ const SHEET_HEIGHTS_PX = SHEET_SNAP_POINTS.map(
 ) as [number, number];
 /** Option B rest stage = handle + compose field + this gap + dock. */
 const REST_FIELD_DOCK_GAP = 12;
+/** The sheet body's own top margin between the compose field and the list
+ * (HistorySheet) — part of the measured reading-viewport calculation. */
+const SHEET_BODY_MARGIN_TOP = 16;
 /** First-frame estimates until the field and dock have been measured. */
 const COMPOSE_HEADER_FALLBACK = 48;
 const DOCK_ROW_FALLBACK = 74;
@@ -538,6 +542,15 @@ export default function HomeScreen() {
   // "50%" against the live container, so a resize must move both together).
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const sheetHalfPx = windowHeight * 0.5;
+  // On constrained screens the dock yields at 50% (utils/readingViewport.ts):
+  // all measured — the 50% height, handle, compose field, body margin, dock.
+  const dockYieldsAtHalf = dockYieldsAtHalfFor({
+    halfHeight: sheetHalfPx,
+    handleHeight: SHEET_HANDLE_HEIGHT,
+    composeHeaderHeight,
+    bodyMarginTop: SHEET_BODY_MARGIN_TOP,
+    dockHeight,
+  });
   const sheetHalfPxValue = useSharedValue(sheetHalfPx);
   useEffect(() => {
     sheetHalfPxValue.value = sheetHalfPx;
@@ -1712,9 +1725,10 @@ export default function HomeScreen() {
           onLayout={handleModeSwitchLayout}
           style={[styles.modeSwitchRow, drawerFloatingStackAnimatedStyle]}
         >
-          {/* The dock is hidden while typing; an active Handsfree session
-              stays visible here — real state and a working Stop. */}
-          {activeMode.isActive && isTyping && (
+          {/* The dock is hidden while typing (and, on constrained screens,
+              at 50%); an active Handsfree session stays visible here — real
+              state and a working Stop. */}
+          {activeMode.isActive && (isTyping || (dockYieldsAtHalf && sheetIndex === 1)) && (
             <HandsfreeTypingStatus state={activeMode.state} onStop={handleStopHandsfree} />
           )}
           <SegmentedControl
@@ -1738,6 +1752,7 @@ export default function HomeScreen() {
         restHeight={restHeight}
         footer={!isTyping && !isTextBoxExpanded ? dock : null}
         footerHeight={dockHeight}
+        footerYieldsAtHalf={dockYieldsAtHalf}
         onHeaderLayout={handleComposeHeaderLayout}
         expandProgress={expandProgress}
         expandDragDistance={EXPAND_DRAG_DISTANCE}

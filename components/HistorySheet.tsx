@@ -1,7 +1,7 @@
 import { createContext, forwardRef, useCallback, useContext, useMemo } from "react";
 import { type LayoutChangeEvent, Pressable, StyleSheet, View } from "react-native";
 import BottomSheet, { BottomSheetFooter, type BottomSheetFooterProps, type BottomSheetProps } from "@gorhom/bottom-sheet";
-import type { SharedValue } from "react-native-reanimated";
+import Animated, { interpolate, type SharedValue, useAnimatedStyle } from "react-native-reanimated";
 
 import { ModelDownloadCard } from "./ModelDownloadCard";
 import { createExpandOverdragGestureHandlersHook } from "./useExpandOverdragGestureHandlers";
@@ -165,6 +165,11 @@ export type HistorySheetProps = {
   /** The footer's measured height (bottom inset included) — the body ends
    * above it, so the list and its last item never run under the dock. */
   footerHeight: number;
+  /** True on constrained screens (measured reading viewport at 50% below
+   * app/index.tsx's minimum): the dock fades out as the tray rises to 50%
+   * and the list takes its space, both tracking the tray's live position —
+   * no jump. Back at rest the dock is fully there again. */
+  footerYieldsAtHalf: boolean;
   /** The compose header's rendered height. */
   onHeaderLayout: (height: number) => void;
   /** Shared 0..1 progress this sheet's own handle drives once a drag
@@ -216,6 +221,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     restHeight,
     footer,
     footerHeight,
+    footerYieldsAtHalf,
     onHeaderLayout,
     expandProgress,
     expandDragDistance,
@@ -273,9 +279,33 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     [onHeaderLayout]
   );
   const footerVisible = footer !== null;
+  const footerHiddenAtHalf = footerYieldsAtHalf && sheetIndex === 1;
+  // Body bottom padding: the dock's height, or — when it yields at 50% —
+  // interpolated with the live tray position down to the inset alone.
+  const bodyPaddingStyle = useAnimatedStyle(() => {
+    if (!footerVisible) return { paddingBottom: bottomInset };
+    if (!footerYieldsAtHalf) return { paddingBottom: footerHeight };
+    return {
+      paddingBottom: interpolate(animatedIndex.value, [0, 1], [footerHeight, bottomInset], "clamp"),
+    };
+  });
+  const footerFadeStyle = useAnimatedStyle(() => ({
+    opacity: footerYieldsAtHalf ? interpolate(animatedIndex.value, [0.4, 1], [1, 0], "clamp") : 1,
+  }));
+
+  const footerContent = footerVisible ? (
+    <Animated.View
+      style={footerFadeStyle}
+      pointerEvents={footerHiddenAtHalf ? "none" : "auto"}
+      importantForAccessibility={footerHiddenAtHalf ? "no-hide-descendants" : "auto"}
+      accessibilityElementsHidden={footerHiddenAtHalf}
+    >
+      {footer}
+    </Animated.View>
+  ) : null;
 
   return (
-    <FooterContext.Provider value={footer}>
+    <FooterContext.Provider value={footerContent}>
     <BottomSheet
       ref={ref}
       index={0}
@@ -382,14 +412,14 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           functional bug. PADDING & CLEARANCE: `body`'s `marginTop` (16dp,
           below) is a real flex margin, not a clipping trick — the list can
           structurally never render behind the sticky header above it. */}
-      <View
+      <Animated.View
         style={[
           styles.body,
           // The body ends at the dock's top edge: the list's last item and
           // the download card stay above it. The bottom safe-area inset is
           // part of the dock's measured height — counted once, there. With
           // no dock (typing — the body is hidden then anyway) it's the inset.
-          { paddingBottom: footerVisible ? footerHeight : bottomInset },
+          bodyPaddingStyle,
           (sheetIndex === 0 || contentHidden) && styles.bodyHidden,
         ]}
         pointerEvents={sheetIndex === 0 || contentHidden ? "none" : undefined}
@@ -405,7 +435,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
         <View style={styles.textContainerBox}>{content}</View>
 
         <ModelDownloadCard modelDownload={modelDownload} />
-      </View>
+      </Animated.View>
     </BottomSheet>
     </FooterContext.Provider>
   );
