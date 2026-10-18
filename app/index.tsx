@@ -526,6 +526,11 @@ export default function HomeScreen() {
       pendingHeaderHeightRef.current = height;
       return;
     }
+    // A fresh measurement outside typing supersedes anything held from
+    // typing — otherwise the effect below could apply the stale value after
+    // it (the two arrive in either order once typing ends) and leave the
+    // rest tray shorter than its field.
+    pendingHeaderHeightRef.current = null;
     setComposeHeaderHeight(height);
   }, []);
   useEffect(() => {
