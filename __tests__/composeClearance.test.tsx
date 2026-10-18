@@ -5,7 +5,9 @@
  *
  * Geometry below is from the Pixel 6 API 34 emulator (dp): field container
  * top 477.1 / keyboard top 577.9 on 411 x 914, 400.2 / 461.0 on 360 x 760;
- * the input's one-line height is 41.1 / 44.6 / 55.2 at 100 / 130 / 200 % text.
+ * the pure-calculation cases use the 1.0.43 input (one line 41.1 / 44.6 /
+ * 55.2 dp at 100 / 130 / 200 % text). The ComposeBar cases use the Xayra 2.0
+ * input: 16/22 type with 5dp explicit padding, so one line is 32dp at 100 %.
  */
 import { act, create, type ReactTestRenderer } from "react-test-renderer";
 import { Keyboard, PixelRatio, TextInput, View } from "react-native";
@@ -150,16 +152,16 @@ describe("ComposeBar under the keyboard", () => {
     return { tree, onSubmit };
   }
 
-  it("defaults to 5 lines / 100 dp with no keyboard — one-line layout unchanged", async () => {
+  it("defaults to 5 lines (5 x 22 + padding = 120 dp) with no keyboard", async () => {
     const { tree } = await renderBar();
     expect(input(tree).props.numberOfLines).toBe(5);
-    expect(maxHeight(tree)).toBe(100);
+    expect(maxHeight(tree)).toBe(120);
     expect(input(tree).props.multiline).toBe(true);
     expect(input(tree).props.textAlignVertical).toBe("top");
     const bar = tree.root
       .findAllByType(View)
       .find((v) =>
-        [v.props.style].flat().some((s) => s?.minHeight === 40 && s?.paddingVertical === 4 && s?.alignItems === "center"),
+        [v.props.style].flat().some((s) => s?.minHeight === 48 && s?.paddingVertical === 4 && s?.alignItems === "center"),
       );
     expect(bar).toBeDefined();
   });
@@ -167,14 +169,15 @@ describe("ComposeBar under the keyboard", () => {
   it("lowers the cap to the measured space, then restores it when the keyboard closes", async () => {
     fieldTop = 477.1;
     const { tree } = await renderBar();
-    await layoutInput(tree, 41.1);
+    await layoutInput(tree, 32);
     await act(async () => show({ endCoordinates: { screenY: 577.9 } }));
+    // room 92.8 - 8 container padding - 10 input padding = 74.8 -> 3 lines of 22
     expect(input(tree).props.numberOfLines).toBe(3);
-    expect(maxHeight(tree)).toBeCloseTo(81.1, 5);
+    expect(maxHeight(tree)).toBeCloseTo(76, 5);
 
     await act(async () => hide({ endCoordinates: { screenY: 914 } }));
     expect(input(tree).props.numberOfLines).toBe(5);
-    expect(maxHeight(tree)).toBe(100);
+    expect(maxHeight(tree)).toBe(120);
   });
 
   it("uses the smallest laid-out height as the one-line height", async () => {
@@ -188,7 +191,7 @@ describe("ComposeBar under the keyboard", () => {
 
   it("re-measures once the focus snap settles", async () => {
     const { tree } = await renderBar();
-    await layoutInput(tree, 41.1);
+    await layoutInput(tree, 32);
     fieldTop = 520; // sheet still rising when the keyboard reports shown
     await act(async () => show({ endCoordinates: { screenY: 577.9 } }));
     expect(input(tree).props.numberOfLines).toBe(1);

@@ -1,9 +1,10 @@
 import { memo, useEffect, useRef, useState } from "react";
-import { Keyboard, type LayoutChangeEvent, PixelRatio, Platform, Pressable, StyleSheet, Text, View } from "react-native";
+import { Keyboard, type LayoutChangeEvent, PixelRatio, Platform, Pressable, StyleSheet, View } from "react-native";
 import { BottomSheetTextInput } from "@gorhom/bottom-sheet";
 import { Feather } from "@expo/vector-icons";
 
-import { colors, radius, spacing } from "../constants/theme";
+import { spacing } from "../constants/theme";
+import { MIN_TOUCH_TARGET, xayraColors, xayraType } from "../constants/xayraTheme";
 import { composeClearance } from "../utils/composeClearance";
 
 /** Live-requested cap: past this many lines, earlier lines scroll up out of
@@ -12,9 +13,16 @@ import { composeClearance } from "../utils/composeClearance";
  * `lineHeight` below — see `numberOfLines` on the TextInput itself for the
  * other half of this. */
 const MAX_INPUT_LINES = 5;
-const INPUT_LINE_HEIGHT = 20;
-const INPUT_MAX_HEIGHT = INPUT_LINE_HEIGHT * MAX_INPUT_LINES;
-const SEARCH_BAR_MIN_HEIGHT = 40;
+/** Xayra 2.0 compose type: DM Sans 16/22 (fixed size — never shrunk). */
+const INPUT_LINE_HEIGHT = 22;
+/** The input's own vertical padding, set explicitly so its one-line height
+ * is predictable (Android's default EditText padding was ~21dp and varied
+ * with font scale). Keeps the one-line field no taller than before at any
+ * text size, so keyboard clearance is never reduced by the restyle. */
+const INPUT_PADDING_VERTICAL = 5;
+const INPUT_MAX_HEIGHT = INPUT_LINE_HEIGHT * MAX_INPUT_LINES + 2 * INPUT_PADDING_VERTICAL;
+const SEARCH_BAR_MIN_HEIGHT = 48;
+const SEND_BUTTON_SIZE = 40;
 /** Kept between the field's bottom edge and the keyboard's top edge. */
 const KEYBOARD_MARGIN = 8;
 /** The 20% -> 50% focus snap can still be settling when the keyboard reports
@@ -117,6 +125,16 @@ export const ComposeBar = memo(function ComposeBar({
   mode,
 }: ComposeBarProps) {
   const canSubmit = inputText.trim().length > 0;
+  // Focus ring only — presentation; focus handling itself is the parent's.
+  const [isFocused, setIsFocused] = useState(false);
+  const handleFocus = () => {
+    setIsFocused(true);
+    onInputFocus();
+  };
+  const handleBlur = () => {
+    setIsFocused(false);
+    onInputBlur();
+  };
 
   // Build 22 FIX DUPLICATE SUBMISSIONS: guards the window between a submit
   // firing and the parent's cleared `inputText` prop actually landing back
@@ -222,21 +240,23 @@ export const ComposeBar = memo(function ComposeBar({
   return (
     <View style={styles.container}>
       <View style={styles.row}>
-        <View ref={searchBarRef} testID="compose-field" style={styles.searchBar}>
+        <View ref={searchBarRef} testID="compose-field" style={[styles.searchBar, isFocused && styles.searchBarFocused]}>
           <Feather
             testID="compose-mode-icon"
             name={mode === "record" ? "edit-3" : "search"}
-            size={16}
-            color="rgba(235,235,245,0.6)"
+            size={20}
+            color={xayraColors.textMuted}
             style={styles.searchIcon}
           />
           <BottomSheetTextInput
             value={inputText}
             onChangeText={onInputChange}
-            onFocus={onInputFocus}
-            onBlur={onInputBlur}
+            onFocus={handleFocus}
+            onBlur={handleBlur}
             placeholder={placeholder}
-            placeholderTextColor="rgba(235,235,245,0.45)"
+            placeholderTextColor={xayraColors.textMuted}
+            cursorColor={xayraColors.lilac}
+            selectionColor={xayraColors.lilacSoft}
             style={[styles.input, cap !== DEFAULT_CAP && { maxHeight: cap.maxHeight }]}
             onLayout={handleInputLayout}
             multiline
@@ -267,13 +287,18 @@ export const ComposeBar = memo(function ComposeBar({
           <Pressable
             onPress={handleSubmit}
             disabled={!canSubmit}
-            hitSlop={8}
+            hitSlop={(MIN_TOUCH_TARGET - SEND_BUTTON_SIZE) / 2}
             testID="compose-submit"
             accessibilityRole="button"
-            accessibilityLabel="Send"
-            style={[styles.submitButton, !canSubmit && styles.submitButtonDisabled]}
+            accessibilityLabel={mode === "ask" ? "Ask" : "Save note"}
+            accessibilityState={{ disabled: !canSubmit }}
+            style={({ pressed }) => [
+              styles.submitButton,
+              canSubmit ? styles.submitButtonReady : styles.submitButtonDisabled,
+              pressed && styles.submitButtonPressed,
+            ]}
           >
-            <Text style={styles.submitIcon}>↑</Text>
+            <Feather name="arrow-up" size={20} color={canSubmit ? "#000000" : xayraColors.teal} />
           </Pressable>
         </View>
       </View>
@@ -298,8 +323,10 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#1C1C1E",
-    borderRadius: radius.lg,
+    backgroundColor: xayraColors.field,
+    borderRadius: SEARCH_BAR_MIN_HEIGHT / 2,
+    borderWidth: 1,
+    borderColor: xayraColors.lineStrong,
     paddingLeft: spacing.base,
     paddingRight: spacing.xs,
     // `minHeight` (was a fixed `height: 40`) plus vertical padding, not a
@@ -309,35 +336,41 @@ const styles = StyleSheet.create({
     minHeight: SEARCH_BAR_MIN_HEIGHT,
     paddingVertical: spacing.xs,
   },
+  searchBarFocused: {
+    borderColor: "rgba(143,214,207,0.55)",
+  },
   searchIcon: {
-    marginRight: spacing.sm,
+    marginRight: 10,
   },
   input: {
     flex: 1,
-    color: colors.textPrimary,
-    fontSize: 15,
+    ...xayraType.input,
+    color: xayraColors.text,
+    paddingVertical: INPUT_PADDING_VERTICAL,
+    paddingHorizontal: 0,
     // Explicit, not left to the platform default — `numberOfLines` on the
-    // TextInput itself (the prop that actually enforces the 5-line cap on
+    // TextInput itself (the prop that actually enforces the line cap on
     // Android) needs to agree with this exactly, or the two disagree about
-    // where the 5th line ends.
+    // where the last line ends.
     lineHeight: INPUT_LINE_HEIGHT,
     // Lowered inline while the keyboard leaves less room (`cap`).
     maxHeight: INPUT_MAX_HEIGHT,
   },
   submitButton: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: colors.accent,
+    width: SEND_BUTTON_SIZE,
+    height: SEND_BUTTON_SIZE,
+    borderRadius: SEND_BUTTON_SIZE / 2,
     alignItems: "center",
     justifyContent: "center",
+    marginLeft: spacing.sm,
+  },
+  submitButtonReady: {
+    backgroundColor: xayraColors.teal,
   },
   submitButtonDisabled: {
-    backgroundColor: "rgba(99,102,241,0.35)",
+    backgroundColor: xayraColors.tealSoft,
   },
-  submitIcon: {
-    color: colors.onAccent,
-    fontSize: 16,
-    fontWeight: "700",
+  submitButtonPressed: {
+    opacity: 0.75,
   },
 });
