@@ -1,5 +1,5 @@
 import { createContext, forwardRef, useCallback, useContext, useMemo } from "react";
-import { type LayoutChangeEvent, Pressable, StyleSheet, View } from "react-native";
+import { type LayoutChangeEvent, Pressable, StyleSheet, useWindowDimensions, View } from "react-native";
 import BottomSheet, { BottomSheetFooter, type BottomSheetFooterProps, type BottomSheetProps } from "@gorhom/bottom-sheet";
 import Animated, { interpolate, type SharedValue, useAnimatedStyle } from "react-native-reanimated";
 
@@ -260,6 +260,21 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
 
   const snapPoints = useMemo(() => [restHeight, SHEET_HALF_SNAP_POINT], [restHeight]);
 
+  // TRAY SCROLL FIX (Xayra 2.0 Stage 4.2): gorhom bounds its content area
+  // only with a Reanimated-animated `height` style (sheet height minus the
+  // handle). On this stack (RN 0.86, Reanimated 4, New Architecture) that
+  // animated height never reaches layout: measured on-device, a flex:1 child
+  // of gorhom's content container laid out at 1318dp instead of ~437dp, so
+  // the list was laid out at its full content height (1154dp for nine notes)
+  // and had nothing to scroll — the sheet only clipped it. The full-screen
+  // overlay's list scrolled because its parent has a static, bounded height.
+  // This gives the sheet's own children that same static bound: the content
+  // height at the 50% (highest) stage — half the window, which is what gorhom
+  // resolves "50%" against, minus the handle. Snap points, gestures and the
+  // library are untouched; at the rest stage the body is hidden anyway.
+  const { height: windowHeight } = useWindowDimensions();
+  const contentAreaHeight = Math.max(0, windowHeight * 0.5 - SHEET_HANDLE_HEIGHT);
+
   // The dock as the sheet's footer: gorhom keeps it pinned to the bottom of
   // the visible sheet at every stage. Omitted entirely while typing.
   // gorhom treats `footerComponent` as a component type, so its identity
@@ -384,6 +399,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           above — see the long comment on that prop for the real root cause;
           this `onFocus` call only does anything useful once that prop stops
           the library's own keyboard math from overriding it. */}
+      <View style={{ height: contentAreaHeight }}>
       <View style={styles.header} onLayout={handleHeaderLayout}>
         {composeBarSlot}
       </View>
@@ -436,6 +452,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
 
         <ModelDownloadCard modelDownload={modelDownload} />
       </Animated.View>
+      </View>
     </BottomSheet>
     </FooterContext.Provider>
   );
