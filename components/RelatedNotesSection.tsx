@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { colors, spacing } from "../constants/theme";
+import { spacing } from "../constants/theme";
+import { MIN_TOUCH_TARGET, xayraColors, xayraType } from "../constants/xayraTheme";
 import type { RagCitation } from "../services/ai/rag";
 
 /** Same format as the note screen's own timestamp ("7 Oct 2026, 9:32 pm"). */
@@ -46,26 +47,28 @@ export function RelatedNotesSection({ notes, onOpen }: { notes: RagCitation[]; o
 
 const styles = StyleSheet.create({
   section: {
-    marginTop: spacing.sm + 2,
-    gap: spacing.xs,
+    marginTop: spacing.sm,
+    marginBottom: spacing.sm,
+    gap: 2,
   },
+  // Sentence case, like every other label in Xayra 2.0.
   label: {
-    color: colors.textMuted,
-    fontSize: 11,
-    fontWeight: "600",
-    letterSpacing: 0.4,
-    textTransform: "uppercase",
+    ...xayraType.roleLabel,
+    color: xayraColors.textFaint,
   },
   row: {
+    minHeight: MIN_TOUCH_TARGET,
+    justifyContent: "center",
     paddingVertical: spacing.xs,
   },
   date: {
-    color: colors.accent,
-    fontSize: 13,
-    fontWeight: "600",
+    ...xayraType.chip,
+    color: xayraColors.lilacText,
   },
   excerpt: {
-    color: colors.textMuted,
-    fontSize: 12,
+    ...xayraType.meta,
+    fontSize: 14,
+    lineHeight: 20,
+    color: xayraColors.textMuted,
   },
 });

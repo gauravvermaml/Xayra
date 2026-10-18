@@ -2,6 +2,7 @@ import { Fragment } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
+import { ANSWER_PARAGRAPH_GAP, xayraColors, xayraFonts, xayraType } from "../constants/xayraTheme";
 
 export type MarkdownTextProps = {
   text: string;
@@ -15,6 +16,9 @@ export type MarkdownTextProps = {
    * copy, so opting in per call site would just mean every real call site
    * remembering to pass it. */
   selectable?: boolean;
+  /** `answer`: Xayra 2.0 answer typography (DM Sans 17/26, 12dp between
+   * paragraphs). `default` keeps the original body style. */
+  variant?: "default" | "answer";
 };
 
 /**
@@ -24,7 +28,8 @@ export type MarkdownTextProps = {
  * actually produces to read noticeably better than a raw text dump, without
  * pulling in a Markdown rendering library.
  */
-function renderInline(line: string, keyPrefix: string, color: string, selectable: boolean) {
+function renderInline(line: string, keyPrefix: string, color: string, selectable: boolean, variant: "default" | "answer") {
+  const bold = variant === "answer" ? styles.answerBold : styles.bold;
   // Splits on **bold** and *italic* without consuming the other pattern —
   // simple alternation, good enough for single-level emphasis.
   const parts = line.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g).filter(Boolean);
@@ -32,7 +37,7 @@ function renderInline(line: string, keyPrefix: string, color: string, selectable
     const key = `${keyPrefix}-${i}`;
     if (part.startsWith("**") && part.endsWith("**")) {
       return (
-        <Text key={key} selectable={selectable} style={[styles.bold, { color }]}>
+        <Text key={key} selectable={selectable} style={[bold, { color }]}>
           {part.slice(2, -2)}
         </Text>
       );
@@ -52,7 +57,19 @@ function renderInline(line: string, keyPrefix: string, color: string, selectable
   });
 }
 
-export function MarkdownText({ text, color = colors.textPrimary, selectable = true }: MarkdownTextProps) {
+export function MarkdownText({ text, color = colors.textPrimary, selectable = true, variant = "default" }: MarkdownTextProps) {
+  const answer = variant === "answer";
+  const paragraphStyle = answer ? styles.answerParagraph : styles.paragraph;
+  const bulletTextStyle = answer ? styles.answerBulletText : styles.bulletText;
+  const bulletMarkerStyle = answer ? styles.answerBulletMarker : styles.bulletMarker;
+  const headingStyle = (level: number) =>
+    answer
+      ? [level === 1 ? styles.h1 : level === 2 ? styles.h2 : styles.h3, styles.answerHeading]
+      : level === 1
+        ? styles.h1
+        : level === 2
+          ? styles.h2
+          : styles.h3;
   const lines = text.split("\n");
   const blocks: React.ReactNode[] = [];
   let paragraphBuffer: string[] = [];
@@ -65,8 +82,8 @@ export function MarkdownText({ text, color = colors.textPrimary, selectable = tr
     }
     const joined = paragraphBuffer.join(" ");
     blocks.push(
-      <Text key={`p-${blockIndex++}`} selectable={selectable} style={[styles.paragraph, { color }]}>
-        {renderInline(joined, `p-${blockIndex}`, color, selectable)}
+      <Text key={`p-${blockIndex++}`} selectable={selectable} style={[paragraphStyle, { color }]}>
+        {renderInline(joined, `p-${blockIndex}`, color, selectable, variant)}
       </Text>
     );
     paragraphBuffer = [];
@@ -102,7 +119,7 @@ export function MarkdownText({ text, color = colors.textPrimary, selectable = tr
         <Text
           key={`h-${blockIndex++}`}
           selectable={selectable}
-          style={[level === 1 ? styles.h1 : level === 2 ? styles.h2 : styles.h3, { color }]}
+          style={[headingStyle(level), { color }]}
         >
           {headingMatch[2]}
         </Text>
@@ -115,9 +132,9 @@ export function MarkdownText({ text, color = colors.textPrimary, selectable = tr
       flushParagraph();
       blocks.push(
         <View key={`li-${blockIndex++}`} style={styles.bulletRow}>
-          <Text selectable={selectable} style={[styles.bulletMarker, { color }]}>{"•"}</Text>
-          <Text selectable={selectable} style={[styles.bulletText, { color }]}>
-            {renderInline(bulletMatch[1], `li-${blockIndex}`, color, selectable)}
+          <Text selectable={selectable} style={[bulletMarkerStyle, { color }]}>{"•"}</Text>
+          <Text selectable={selectable} style={[bulletTextStyle, { color }]}>
+            {renderInline(bulletMatch[1], `li-${blockIndex}`, color, selectable, variant)}
           </Text>
         </View>
       );
@@ -199,5 +216,29 @@ const styles = StyleSheet.create({
     color: colors.success,
     fontFamily: "monospace",
     fontSize: 13,
+  },
+  // Xayra 2.0 answer variant.
+  answerParagraph: {
+    ...xayraType.answer,
+    marginBottom: ANSWER_PARAGRAPH_GAP,
+  },
+  answerBold: {
+    fontFamily: xayraFonts.ui,
+    fontWeight: "600",
+  },
+  answerHeading: {
+    fontFamily: xayraFonts.ui,
+    fontWeight: "600",
+    marginTop: 0,
+    marginBottom: 6,
+  },
+  answerBulletMarker: {
+    ...xayraType.answer,
+    marginRight: spacing.sm,
+    color: xayraColors.lilac,
+  },
+  answerBulletText: {
+    flex: 1,
+    ...xayraType.answer,
   },
 });

@@ -1,6 +1,8 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
+import { Feather } from "@expo/vector-icons";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
+import { MIN_TOUCH_TARGET, xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
 import { copyTextWithFeedback } from "../utils/clipboard";
 import { AudioPlayerControls } from "./AudioPlayerControls";
 
@@ -14,6 +16,9 @@ export type NoteCardProps = {
   /** Opens the full note detail (transcript, timestamp, audio, delete) — omit to disable tap-to-open. */
   onPress?: () => void;
   onDelete: () => void;
+  /** `xayra`: the 2.0 home tray card (quiet slate card, icon delete).
+   * `classic` (default): the existing card Archive still uses. */
+  appearance?: "classic" | "xayra";
 };
 
 function formatTimestamp(createdAtUnixSeconds: number): string {
@@ -33,7 +38,49 @@ export function NoteCard({
   score,
   onPress,
   onDelete,
+  appearance = "classic",
 }: NoteCardProps) {
+  if (appearance === "xayra") {
+    return (
+      <Pressable
+        onPress={onPress}
+        onLongPress={() => void copyTextWithFeedback(content)}
+        disabled={!onPress}
+        accessibilityRole="button"
+        accessibilityHint="Opens the note. Long-press to copy."
+        style={({ pressed }) => [x.card, pressed && onPress && x.cardPressed]}
+      >
+        <View style={x.metaRow}>
+          {createdAt !== undefined ? (
+            <Text testID="note-card-date" style={x.metaText}>
+              {formatTimestamp(createdAt)}
+            </Text>
+          ) : (
+            <View />
+          )}
+          <Pressable
+            testID="note-card-delete"
+            onPress={onDelete}
+            hitSlop={(MIN_TOUCH_TARGET - DELETE_SIZE) / 2}
+            accessibilityRole="button"
+            accessibilityLabel="Delete note"
+            style={({ pressed }) => [x.deleteButton, pressed && x.deletePressed]}
+          >
+            <Feather name="trash-2" size={17} color={xayraColors.textMuted} />
+          </Pressable>
+        </View>
+        <Text style={x.content} numberOfLines={6}>
+          {content}
+        </Text>
+        {score !== undefined && <Text style={x.metaText}>match score {score.toFixed(3)}</Text>}
+        {!!audioUri && <AudioPlayerControls audioUri={audioUri} compact style={styles.player} />}
+        <View pointerEvents="none" style={x.copyHint}>
+          <Feather name="copy" size={13} color={xayraColors.textFaint} />
+        </View>
+      </Pressable>
+    );
+  }
+
   return (
     <Pressable
       onPress={onPress}
@@ -86,6 +133,54 @@ export function NoteCard({
     </Pressable>
   );
 }
+
+const DELETE_SIZE = 36;
+
+/** Xayra 2.0 card: one step lighter than the tray, no border, no shadow. */
+const x = StyleSheet.create({
+  card: {
+    backgroundColor: "#191B1F",
+    borderRadius: xayraRadius.card,
+    paddingTop: 8,
+    paddingBottom: 16,
+    paddingLeft: 16,
+    paddingRight: 8,
+    marginBottom: 10,
+  },
+  cardPressed: {
+    backgroundColor: "#202227",
+  },
+  metaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    minHeight: DELETE_SIZE,
+  },
+  metaText: {
+    ...xayraType.meta,
+    color: xayraColors.textFaint,
+  },
+  content: {
+    ...xayraType.question,
+    color: xayraColors.text,
+    paddingRight: 8,
+  },
+  deleteButton: {
+    width: DELETE_SIZE,
+    height: DELETE_SIZE,
+    borderRadius: DELETE_SIZE / 2,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  deletePressed: {
+    backgroundColor: xayraColors.line,
+  },
+  copyHint: {
+    position: "absolute",
+    bottom: 10,
+    right: 12,
+  },
+});
 
 const styles = StyleSheet.create({
   card: {

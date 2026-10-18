@@ -2,6 +2,8 @@ import { Pressable, StyleSheet, Text } from "react-native";
 import * as Haptics from "expo-haptics";
 import Animated, { Easing, useAnimatedStyle, useSharedValue, withSpring, withTiming } from "react-native-reanimated";
 
+import { MIN_TOUCH_TARGET, xayraColors, xayraType } from "../constants/xayraTheme";
+
 const PRESSED_SCALE = 0.9;
 
 /**
@@ -29,7 +31,7 @@ export function CancelProcessingButton({ onCancel }: { onCancel: () => void }) {
       onPress={onCancel}
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
-      hitSlop={12}
+      hitSlop={(MIN_TOUCH_TARGET - BUTTON_HEIGHT) / 2}
       accessibilityRole="button"
       accessibilityLabel="Cancel"
     >
@@ -42,20 +44,24 @@ export function CancelProcessingButton({ onCancel }: { onCancel: () => void }) {
   );
 }
 
+const BUTTON_HEIGHT = 40;
+
+/** Xayra 2.0: the same quiet outlined pill as Listen. */
 const styles = StyleSheet.create({
   button: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
+    minHeight: BUTTON_HEIGHT,
+    paddingHorizontal: 18,
     borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "rgba(255,255,255,0.35)",
+    borderWidth: 1,
+    borderColor: xayraColors.outline,
+    alignItems: "center",
+    justifyContent: "center",
   },
   buttonPressed: {
-    backgroundColor: "rgba(255,255,255,0.12)",
+    backgroundColor: xayraColors.line,
   },
   text: {
-    color: "rgba(255,255,255,0.8)",
-    fontSize: 12,
-    fontWeight: "600",
+    ...xayraType.chip,
+    color: xayraColors.text,
   },
 });

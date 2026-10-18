@@ -158,7 +158,10 @@ describe("empty states", () => {
     const { FlatList } = jest.requireActual("react-native");
     const list = tree.root.findByType(FlatList);
     expect(list.findByProps({ testID: "ask-starter-prompts" })).toBe(row);
-    const chips = row.findAll((node) => typeof node.props.onPress === "function" && node.props.disabled === false);
+    const chips = row.findAll(
+      (node) => node.props.accessibilityRole === "button" && typeof node.props.onPress === "function" && node.props.disabled === false,
+      { deep: false }
+    );
     expect(chips).toHaveLength(3);
     await act(async () => chips[2].props.onPress());
     expect(onSubmitStarterPrompt).toHaveBeenCalledWith("What reminders have I recorded recently?");

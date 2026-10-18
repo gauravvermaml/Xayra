@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, Animated, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
 import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
+import { Feather } from "@expo/vector-icons";
 
 import { MarkdownText } from "./MarkdownText";
 import { NoteCard } from "./NoteCard";
 import { RelatedNotesSection } from "./RelatedNotesSection";
+import { Chip } from "./ui/Chip";
+import { Pill } from "./ui/Pill";
+import { XText } from "./ui/XText";
 import { ASK_STARTER_PROMPTS, NOTES_EMPTY_TITLE, RECORD_EMPTY_SUBTEXT } from "../constants/copy";
-import { colors, radius, spacing, typography } from "../constants/theme";
+import { spacing } from "../constants/theme";
+import { MIN_TOUCH_TARGET, xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
 import { allowCellularDownloadAndResume, resumeDownloads, type ModelDownloadStatus } from "../services/ai/modelDownloadManager";
 import {
   getPipelineStage,
@@ -237,11 +242,16 @@ export function ChatSheetContent({
       // Archive.tsx still uses NotesSheetContent directly and keeps its own
       // copy of this same empty state in sync independently.
       <View style={styles.notesEmptyState}>
-        <Text style={styles.emptyText}>{NOTES_EMPTY_TITLE}</Text>
+        <Text style={styles.emptyTitle}>{NOTES_EMPTY_TITLE}</Text>
         <Text style={styles.notesEmptySubtext}>{RECORD_EMPTY_SUBTEXT}</Text>
-        <Pressable onPress={onRestoreFromDrive} disabled={isRestoring} style={styles.restoreLinkRow}>
+        <Pressable
+          onPress={onRestoreFromDrive}
+          disabled={isRestoring}
+          accessibilityRole="link"
+          style={({ pressed }) => [styles.restoreLinkRow, pressed && styles.pressed]}
+        >
           {isRestoring ? (
-            <ActivityIndicator color={colors.accent} size="small" />
+            <ActivityIndicator color={xayraColors.lilac} size="small" />
           ) : (
             <Text style={styles.restoreLinkText}>Already have a backup? Restore vault from Google Drive</Text>
           )}
@@ -258,25 +268,19 @@ export function ChatSheetContent({
         {isModelReady && (
           <View testID="ask-starter-prompts" style={styles.starterChipRow}>
             {ASK_STARTER_PROMPTS.map((prompt) => (
-              <Pressable
-                key={prompt}
-                onPress={() => onSubmitStarterPrompt(prompt)}
-                disabled={isSending}
-                style={({ pressed }) => [styles.starterChip, pressed && styles.starterChipPressed]}
-              >
-                <Text style={styles.starterChipText}>{prompt}</Text>
-              </Pressable>
+              <Chip key={prompt} label={prompt} onPress={() => onSubmitStarterPrompt(prompt)} disabled={isSending} />
             ))}
           </View>
         )}
       </View>
     );
 
-  const renderItem = ({ item }: { item: DrawerListItem }) => {
+  const renderItem = ({ item, index }: { item: DrawerListItem; index: number }) => {
     if (item.kind === "note") {
       const note = item.note;
       return (
         <NoteCard
+          appearance="xayra"
           content={note.content}
           audioUri={note.audioUri}
           createdAt={note.createdAt}
@@ -291,46 +295,59 @@ export function ChatSheetContent({
     // yet — show nothing rather than placeholder words; its answer bubble
     // (with the progress line) is already there.
     if (message.pending) return null;
+    const isUser = message.role === "user";
+    // Xayra 2.0: borderless turns — a sentence-case label over plain text,
+    // no bubbles. A hairline separates one exchange from the older one
+    // below it (exchanges are newest-first; each starts with its question).
     return (
       <Pressable
         onLongPress={() => void copyTextWithFeedback(message.text)}
         disabled={message.text.trim().length === 0}
-        style={[styles.bubble, message.role === "user" ? styles.bubbleUser : styles.bubbleAssistant]}
+        style={[styles.turn, isUser ? styles.turnUser : styles.turnAssistant]}
       >
-        <Text style={styles.roleLabel}>{message.role === "user" ? "You" : "Xayra"}</Text>
+        {isUser && index > 0 && <View style={styles.exchangeDivider} />}
+        <XText variant="roleLabel" color={isUser ? "textFaint" : "lilac"} style={styles.roleLabel}>
+          {isUser ? "You" : "Xayra"}
+        </XText>
         {message.isStreaming && message.text.length === 0 ? (
           <View style={styles.streamingStartRow}>
-            <StreamingStageLabel color={colors.textMuted} />
+            <StreamingStageLabel color={xayraColors.textMuted} />
           </View>
+        ) : isUser ? (
+          <XText variant="question">{message.text}</XText>
         ) : (
-          <View style={styles.bubbleTextWrap}>
+          <View>
             {/* Build 22: explicit selectable={false} — MarkdownText
                 defaults to true, which inside this BottomSheetFlatList
-                let a drag starting on a message bubble be captured as
+                let a drag starting on a message be captured as
                 text-selection instead of list scroll. */}
-            <MarkdownText
-              text={message.text}
-              color={message.role === "user" ? colors.onAccent : colors.textPrimary}
-              selectable={false}
-            />
-            {message.isStreaming && (
-              <StreamingCursor color={message.role === "user" ? colors.onAccent : colors.accent} />
-            )}
+            <MarkdownText text={message.text} color={xayraColors.text} selectable={false} variant="answer" />
+            {message.isStreaming && <StreamingCursor color={xayraColors.lilac} />}
           </View>
-        )}
-        {message.role === "assistant" && !message.isStreaming && message.text.length > 0 && (
-          <Pressable onPress={() => onToggleSpeech(message)} style={styles.speakerButton}>
-            <Text style={styles.speakerButtonText}>{speakingMessageId === message.id ? "⏹ Stop" : "🔊 Listen"}</Text>
-          </Pressable>
         )}
         {/* Shown only under the "couldn't verify" fallback — see RelatedNotesSection. */}
         <RelatedNotesSection notes={message.relatedNotes ?? []} onOpen={onShowCitation} />
-        {!!message.citations?.length && (
-          <View style={styles.citationRow}>
-            {message.citations.map((citation) => (
-              <Pressable key={citation.noteId} onPress={() => onShowCitation(citation.noteId)} style={styles.citationChip}>
-                <Text style={styles.citationChipText}>[Note {citation.index}]</Text>
-              </Pressable>
+        {!isUser && !message.isStreaming && message.text.length > 0 && (
+          <View style={styles.actionRow}>
+            <Pill
+              label={speakingMessageId === message.id ? "Stop" : "Listen"}
+              accessibilityLabel={speakingMessageId === message.id ? "Stop speaking" : "Listen to this answer"}
+              icon={
+                <Feather
+                  name={speakingMessageId === message.id ? "square" : "volume-2"}
+                  size={17}
+                  color={xayraColors.text}
+                />
+              }
+              onPress={() => onToggleSpeech(message)}
+            />
+            {message.citations?.map((citation) => (
+              <Chip
+                key={citation.noteId}
+                label={`[Note ${citation.index}]`}
+                accessibilityLabel={`Open source note ${citation.index}`}
+                onPress={() => onShowCitation(citation.noteId)}
+              />
             ))}
           </View>
         )}
@@ -377,7 +394,11 @@ export function ChatSheetContent({
             To chat with Xayra, you need to download the Xayra chat model (~{modelDownload.chatModelSizeLabel}). You're
             not on Wi-Fi right now — Xayra waits for Wi-Fi automatically, or you can use mobile data instead.
           </Text>
-          <Pressable onPress={handleAllowCellularDownload} style={styles.chatModelDownloadButton}>
+          <Pressable
+            onPress={handleAllowCellularDownload}
+            accessibilityRole="button"
+            style={({ pressed }) => [styles.chatModelDownloadButton, pressed && styles.pressed]}
+          >
             <Text style={styles.chatModelDownloadButtonText}>Download over Mobile Data</Text>
           </Pressable>
         </View>
@@ -391,7 +412,11 @@ export function ChatSheetContent({
           <Text style={styles.chatModelPromptBody}>
             {modelDownload.downloadedMB} MB of {modelDownload.totalMB} MB saved on disk.
           </Text>
-          <Pressable onPress={handleResumeDownload} style={styles.chatModelDownloadButton}>
+          <Pressable
+            onPress={handleResumeDownload}
+            accessibilityRole="button"
+            style={({ pressed }) => [styles.chatModelDownloadButton, pressed && styles.pressed]}
+          >
             <Text style={styles.chatModelDownloadButtonText}>Resume Download</Text>
           </Pressable>
         </View>
@@ -403,147 +428,117 @@ export function ChatSheetContent({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    paddingHorizontal: spacing.base,
+    paddingHorizontal: 20,
   },
   messageList: {
     flex: 1,
   },
-  // Styling pass, live feedback: this value used to be `spacing.xl` (24) —
-  // the tray's own handle-to-first-item clearance (HistorySheet.tsx's
-  // `listClearance`/`trayHandleRow`) was tightened to match the list's own
-  // ~12px inter-item rhythm earlier in this session, but this empty-state
-  // text's own top margin is a SEPARATE value that never got the same pass,
-  // so Ask's "Ask anything…" placeholder still sat noticeably further from
-  // the handle than a real first list item would. `spacing.sm` here, on top
-  // of `listClearance`'s own small top padding, lands the total gap back in
-  // that same ~12px rhythm.
+  pressed: {
+    opacity: 0.7,
+  },
+  // Empty states sit at the top of the tray, in the same rhythm as the list.
   emptyText: {
-    color: colors.textMuted,
-    fontSize: 14,
+    ...xayraType.guidance,
+    color: xayraColors.textMuted,
     marginTop: spacing.sm,
     textAlign: "center",
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: spacing.sm,
   },
-  // Record-mode empty state — same copy/shape as NotesSheetContent.tsx's own
-  // (Archive still uses that component directly and keeps this in sync
-  // independently; see this file's DrawerListItem/emptyComponent doc
-  // comments for why the two copies exist). Same spacing-pass fix as
-  // `emptyText` above — was `spacing.xxl` (32), even further off the tray's
-  // own tightened rhythm than Ask's copy was.
+  emptyTitle: {
+    ...xayraType.question,
+    color: xayraColors.textSoft,
+    textAlign: "center",
+  },
   notesEmptyState: {
     alignItems: "center",
     paddingTop: spacing.sm,
-    paddingHorizontal: spacing.lg,
+    paddingHorizontal: spacing.sm,
   },
   notesEmptySubtext: {
-    color: colors.textMuted,
-    fontSize: 13,
+    ...xayraType.meta,
+    fontSize: 14,
+    lineHeight: 20,
+    color: xayraColors.textMuted,
     marginTop: spacing.xs,
     textAlign: "center",
   },
   restoreLinkRow: {
-    marginTop: spacing.lg,
+    marginTop: spacing.md,
+    minHeight: MIN_TOUCH_TARGET,
+    justifyContent: "center",
     alignItems: "center",
   },
   restoreLinkText: {
-    color: colors.accent,
-    fontSize: 13,
-    fontWeight: "600",
+    ...xayraType.chip,
+    color: xayraColors.lilacText,
     textAlign: "center",
   },
-  bubble: {
-    borderRadius: radius.lg,
-    paddingHorizontal: spacing.base,
-    paddingVertical: spacing.sm + 2,
-    marginBottom: spacing.sm + 2,
-    maxWidth: "88%",
+  turn: {
+    paddingHorizontal: 4,
   },
-  bubbleUser: {
-    backgroundColor: colors.accent,
-    alignSelf: "flex-end",
-    borderBottomRightRadius: 4,
+  turnUser: {
+    marginBottom: 14,
   },
-  bubbleAssistant: {
-    backgroundColor: "#1C1C1E",
-    borderColor: "rgba(255,255,255,0.1)",
-    borderWidth: StyleSheet.hairlineWidth,
-    alignSelf: "flex-start",
-    borderBottomLeftRadius: 4,
+  turnAssistant: {
+    marginBottom: 4,
+  },
+  exchangeDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: xayraColors.line,
+    marginTop: 12,
+    marginBottom: 16,
   },
   roleLabel: {
-    color: colors.textMuted,
-    fontSize: 10,
-    fontWeight: "700",
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
-    marginBottom: 3,
+    marginBottom: 4,
   },
-  bubbleTextWrap: {},
   streamingStartRow: {
     flexDirection: "row",
     alignItems: "center",
     gap: spacing.sm,
+    minHeight: 26,
   },
   streamingStartText: {
-    color: colors.textMuted,
-    fontSize: 13,
-    fontStyle: "italic",
+    ...xayraType.cue,
+    color: xayraColors.textMuted,
   },
-  speakerButton: {
-    alignSelf: "flex-start",
-    marginTop: spacing.sm + 2,
-  },
-  speakerButtonText: {
-    color: colors.accent,
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  citationRow: {
+  actionRow: {
     flexDirection: "row",
     flexWrap: "wrap",
-    gap: spacing.xs + 2,
-    marginTop: spacing.sm + 2,
-  },
-  citationChip: {
-    backgroundColor: "#2C2C2E",
-    borderColor: "rgba(255,255,255,0.1)",
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 4,
-  },
-  citationChipText: {
-    color: colors.textSecondary,
-    fontSize: 12,
-    fontWeight: "600",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 4,
+    marginBottom: 8,
   },
   chatModelPrompt: {
-    backgroundColor: "#1C1C1E",
-    borderRadius: radius.lg,
+    backgroundColor: xayraColors.field,
+    borderRadius: xayraRadius.card,
     padding: spacing.base,
     marginBottom: spacing.sm,
+    gap: spacing.xs,
   },
   chatModelPromptTitle: {
-    color: colors.textPrimary,
-    ...typography.heading,
-    marginBottom: spacing.xs,
+    ...xayraType.question,
+    fontWeight: "600",
+    color: xayraColors.text,
   },
   chatModelPromptBody: {
-    color: colors.textMuted,
-    fontSize: 13,
-    marginBottom: spacing.md,
+    ...xayraType.meta,
+    fontSize: 14,
+    lineHeight: 20,
+    color: xayraColors.textMuted,
+    marginBottom: spacing.sm,
   },
   chatModelDownloadButton: {
-    backgroundColor: colors.accent,
-    borderRadius: radius.md,
-    paddingVertical: 11,
+    backgroundColor: xayraColors.teal,
+    borderRadius: xayraRadius.pill,
+    minHeight: MIN_TOUCH_TARGET,
     alignItems: "center",
     justifyContent: "center",
   },
   chatModelDownloadButtonText: {
-    color: colors.onAccent,
-    fontSize: 14,
-    fontWeight: "700",
+    ...xayraType.chip,
+    fontWeight: "600",
+    color: "#000000",
   },
   askEmptyState: {
     alignItems: "center",
@@ -554,19 +549,5 @@ const styles = StyleSheet.create({
     flexWrap: "wrap",
     justifyContent: "center",
     gap: spacing.sm,
-  },
-  starterChip: {
-    backgroundColor: "#1C1C1E",
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing.base,
-    paddingVertical: spacing.sm + 2,
-  },
-  starterChipPressed: {
-    backgroundColor: "#2C2C2E",
-  },
-  starterChipText: {
-    color: colors.textSecondary,
-    fontSize: 13,
-    fontWeight: "600",
   },
 });
