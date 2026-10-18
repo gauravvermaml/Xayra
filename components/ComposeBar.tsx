@@ -1,5 +1,16 @@
 import { memo, useEffect, useRef, useState } from "react";
-import { Keyboard, type LayoutChangeEvent, PixelRatio, Platform, Pressable, StyleSheet, View } from "react-native";
+import {
+  Keyboard,
+  type LayoutChangeEvent,
+  type NativeSyntheticEvent,
+  PixelRatio,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  type TextLayoutEventData,
+  View,
+} from "react-native";
 import { BottomSheetTextInput } from "@gorhom/bottom-sheet";
 import { Feather } from "@expo/vector-icons";
 
@@ -51,6 +62,9 @@ export type ComposeBarProps = {
   /** Picks the leading icon: a pencil for Record (writing a note), a
    * magnifier for Ask (searching your notes). Presentation only. */
   mode: "record" | "ask";
+  /** The tray's snap index. When it changes while the keyboard is open,
+   * the field has moved, so the clearance is measured again. */
+  sheetIndex?: number;
 };
 
 /**
@@ -123,6 +137,7 @@ export const ComposeBar = memo(function ComposeBar({
   onSubmit,
   placeholder,
   mode,
+  sheetIndex,
 }: ComposeBarProps) {
   const canSubmit = inputText.trim().length > 0;
   // Focus ring only — presentation; focus handling itself is the parent's.
@@ -177,6 +192,17 @@ export const ComposeBar = memo(function ComposeBar({
   // kept in a ref, so recording it never re-renders.
   const searchBarRef = useRef<View>(null);
   const oneLineRef = useRef<{ fontScale: number; height: number } | null>(null);
+  // The real rendered line height, from a hidden two-line probe in the
+  // input's own type style. Android 14+ scales large text non-linearly, so
+  // 22 x fontScale overstates it at 200% (one line capped where two fit).
+  const lineHeightRef = useRef<{ fontScale: number; height: number } | null>(null);
+  const handleProbeLayout = (e: NativeSyntheticEvent<TextLayoutEventData>) => {
+    const [first, second] = e.nativeEvent.lines;
+    const height = second ? second.y - first.y : first?.height;
+    if (height && height > 0) lineHeightRef.current = { fontScale: PixelRatio.getFontScale(), height };
+  };
+  // Re-measures while the keyboard is open (set inside the effect below).
+  const remeasureRef = useRef<() => void>(() => {});
   const [cap, setCap] = useState<InputCap>(DEFAULT_CAP);
   const handleInputLayout = (e: LayoutChangeEvent) => {
     const fontScale = PixelRatio.getFontScale();
@@ -198,7 +224,8 @@ export const ComposeBar = memo(function ComposeBar({
       node.measureInWindow((_x, y) => {
         if (keyboardTop !== top) return; // keyboard moved or closed since
         const fontScale = PixelRatio.getFontScale();
-        const lineHeight = INPUT_LINE_HEIGHT * fontScale;
+        const probed = lineHeightRef.current;
+        const lineHeight = probed && probed.fontScale === fontScale ? probed.height : INPUT_LINE_HEIGHT * fontScale;
         const known = oneLineRef.current;
         const { lines, maxHeight } = composeClearance({
           keyboardTop: top,
@@ -225,6 +252,11 @@ export const ComposeBar = memo(function ComposeBar({
       measure();
       settleTimer = setTimeout(measure, SETTLE_REMEASURE_MS);
     });
+    remeasureRef.current = () => {
+      if (keyboardTop === null) return;
+      clearTimer();
+      settleTimer = setTimeout(measure, SETTLE_REMEASURE_MS);
+    };
     const hideSub = Keyboard.addListener(hideEvent, () => {
       keyboardTop = null;
       clearTimer();
@@ -232,10 +264,16 @@ export const ComposeBar = memo(function ComposeBar({
     });
     return () => {
       clearTimer();
+      remeasureRef.current = () => {};
       showSub.remove();
       hideSub.remove();
     };
   }, []);
+  // The tray moved to another stage with the keyboard up (a drag while
+  // typing): measure again once it has settled. Never re-renders by itself.
+  useEffect(() => {
+    remeasureRef.current();
+  }, [sheetIndex]);
 
   return (
     <View style={styles.container}>
@@ -248,6 +286,15 @@ export const ComposeBar = memo(function ComposeBar({
             color={xayraColors.textMuted}
             style={styles.searchIcon}
           />
+          <Text
+            style={styles.lineProbe}
+            onTextLayout={handleProbeLayout}
+            accessible={false}
+            importantForAccessibility="no-hide-descendants"
+            pointerEvents="none"
+          >
+            {"Ag\nAg"}
+          </Text>
           <BottomSheetTextInput
             value={inputText}
             onChangeText={onInputChange}
@@ -355,6 +402,15 @@ const styles = StyleSheet.create({
     lineHeight: INPUT_LINE_HEIGHT,
     // Lowered inline while the keyboard leaves less room (`cap`).
     maxHeight: INPUT_MAX_HEIGHT,
+  },
+  // Invisible two-line sample in the input's type style (handleProbeLayout).
+  lineProbe: {
+    ...xayraType.input,
+    lineHeight: INPUT_LINE_HEIGHT,
+    position: "absolute",
+    left: 0,
+    top: 0,
+    opacity: 0,
   },
   submitButton: {
     width: SEND_BUTTON_SIZE,

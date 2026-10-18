@@ -220,6 +220,48 @@ describe("ComposeBar under the keyboard", () => {
     expect(maxHeight(tree)).toBeCloseTo(55.2, 5);
   });
 
+  it("uses the real rendered line height from the probe (Android's nonlinear font scaling)", async () => {
+    (PixelRatio.getFontScale as jest.Mock).mockReturnValue(2);
+    fieldTop = 477.1;
+    const { tree } = await renderBar();
+    await layoutInput(tree, 45.3);
+    // Without the probe, 22 x 2 = 44 per line leaves room for only one line.
+    await act(async () => show({ endCoordinates: { screenY: 577.9 } }));
+    expect(input(tree).props.numberOfLines).toBe(1);
+    // The probe reports what Android actually renders at 200 %: 35dp lines.
+    const probe = tree.root.findAll((n) => typeof n.props.onTextLayout === "function")[0];
+    await act(async () =>
+      probe.props.onTextLayout({ nativeEvent: { lines: [{ y: 0, height: 35 }, { y: 35, height: 35 }] } })
+    );
+    await act(async () => show({ endCoordinates: { screenY: 577.9 } }));
+    // room 92.8 - 8 - (45.3 - 35) = 74.5 -> 2 lines of 35
+    expect(input(tree).props.numberOfLines).toBe(2);
+    expect(maxHeight(tree)).toBeCloseTo(80.3, 5);
+  });
+
+  it("measures again when the tray moves to another stage with the keyboard up", async () => {
+    fieldTop = 477.1;
+    const props = {
+      inputText: "hello",
+      onInputChange: () => {},
+      onInputFocus: () => {},
+      onInputBlur: () => {},
+      onSubmit: jest.fn(),
+      placeholder: "Type your thoughts…",
+      mode: "record" as const,
+    };
+    const { tree } = await renderBar({ sheetIndex: 1 });
+    await layoutInput(tree, 32);
+    await act(async () => show({ endCoordinates: { screenY: 577.9 } }));
+    expect(input(tree).props.numberOfLines).toBe(3);
+    fieldTop = 520; // dragged lower while typing
+    await act(async () => tree.update(<ComposeBar {...props} sheetIndex={0} />));
+    await act(async () => {
+      jest.advanceTimersByTime(300);
+    });
+    expect(input(tree).props.numberOfLines).toBe(1);
+  });
+
   it("doesn't re-render for a repeat show event with the same result", async () => {
     const { tree } = await renderBar();
     await layoutInput(tree, 41.1);
