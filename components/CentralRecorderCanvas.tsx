@@ -34,6 +34,12 @@ export type CentralRecorderCanvasProps = {
   zoneSize: SharedValue<number>;
   /** Spoken name: what a tap and a long-press do in the current mode. */
   accessibilityLabel: string;
+  /** Responsive tiers (app/index.tsx): the decorative orbit is reduced
+   * first when space is short… */
+  orbitDetail?: "full" | "reduced";
+  /** …and the emblem is hidden only when even its smallest size can't fit
+   * beside the essential controls. Hidden = not rendered, not focusable. */
+  hidden?: boolean;
 };
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
@@ -213,6 +219,8 @@ export function CentralRecorderCanvas({
   disabled,
   zoneSize,
   accessibilityLabel,
+  orbitDetail = "full",
+  hidden = false,
 }: CentralRecorderCanvasProps) {
   // Looping motion (the Handsfree ring's breathing, the processing
   // waveform's pulse) holds still when the system asks for reduced motion.
@@ -351,6 +359,7 @@ export function CentralRecorderCanvas({
   return (
     <View style={styles.wrapper}>
       <Animated.View style={zoneStyle}>
+        {!hidden && (
         <Animated.View style={[styles.zoneContent, zoneContentStyle]}>
           <View pointerEvents="none" style={styles.glow}>
             <Svg width={GLOW_SIZE} height={GLOW_SIZE} accessible={false} importantForAccessibility="no-hide-descendants">
@@ -365,7 +374,7 @@ export function CentralRecorderCanvas({
             </Svg>
           </View>
           <View pointerEvents="none" style={styles.orbit}>
-            <Orbit size={ORBIT_SIZE} />
+            <Orbit size={ORBIT_SIZE} detail={orbitDetail} />
           </View>
           <Animated.View pointerEvents="none" style={[styles.handsfreeRing, handsfreeRingStyle]} />
           <Animated.View style={[styles.emblemWrap, buttonScaleStyle]}>
@@ -389,6 +398,7 @@ export function CentralRecorderCanvas({
             </Pressable>
           </Animated.View>
         </Animated.View>
+        )}
       </Animated.View>
 
       {/* Idle and Handsfree-listening show no bars: the waveform means "your
