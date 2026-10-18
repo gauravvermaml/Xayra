@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { LayoutChangeEvent } from "react-native";
-import { Alert, Dimensions, Image, Keyboard, PixelRatio, Pressable, StyleSheet, Text, View } from "react-native";
+import { Alert, Dimensions, Image, Keyboard, PixelRatio, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import { getRecordingPermissionsAsync } from "expo-audio";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -120,6 +120,10 @@ const EMBLEM_ZONE_MIN = 72;
 /** Extra room, as a multiple of the zone, kept for the orbit rings that
  * reach beyond it. */
 const ORBIT_ROOM = 1.22;
+/** Width of the outer orbit arcs relative to the zone (r 176 of 390 in a
+ * box 1.5x the zone), and the side gutter they stay inside. */
+const ORBIT_SPAN = 1.36;
+const ORBIT_SIDE_GUTTER = 16;
 /** Gap between the Record/Ask switch and the tray's top edge. */
 const MODE_SWITCH_BOTTOM_GAP = 12;
 /** Until the switch has been measured (first frame only). */
@@ -1374,19 +1378,26 @@ export default function HomeScreen() {
   // The orbit reaches past the zone, so the zone keeps ORBIT_ROOM of its
   // size free for it rather than letting the rings run into the header.
   const isEmblemBusy = canvasState === "recording" || canvasState === "transcribing";
+  const { width: windowWidth } = useWindowDimensions();
   useEffect(() => {
     if (centerRegionHeight === 0) return;
     const textLine = (xayraType.cue.lineHeight ?? 20) * PixelRatio.getFontScale();
     const below =
       CENTER_AREA_GAP_PX + textLine + (isEmblemBusy ? WAVEFORM_ROW_HEIGHT + CENTER_AREA_GAP_PX + MIN_TOUCH_TARGET : 0);
     const reserve = modeSwitchHeight + MODE_SWITCH_BOTTOM_GAP + CENTER_AREA_BREATHING_ROOM_PX;
+    // The outer orbit arcs span ORBIT_SPAN x the zone; keep them inside the
+    // screen's side gutters too.
+    const widthCap = (windowWidth - 2 * ORBIT_SIDE_GUTTER) / ORBIT_SPAN;
     const fit = (sheetPx: number, max: number) =>
       Math.round(
-        Math.max(EMBLEM_ZONE_MIN, Math.min(max, (centerRegionHeight - sheetPx - reserve - below) / ORBIT_ROOM))
+        Math.max(
+          EMBLEM_ZONE_MIN,
+          Math.min(max, widthCap, (centerRegionHeight - sheetPx - reserve - below) / ORBIT_ROOM)
+        )
       );
     zoneRest.value = withTiming(fit(SHEET_HEIGHTS_PX[0], EMBLEM_ZONE_MAX_REST), { duration: 220 });
     zoneHalf.value = withTiming(fit(SHEET_HEIGHTS_PX[1], EMBLEM_ZONE_MAX_HALF), { duration: 220 });
-  }, [centerRegionHeight, modeSwitchHeight, isEmblemBusy, zoneRest, zoneHalf]);
+  }, [centerRegionHeight, modeSwitchHeight, isEmblemBusy, windowWidth, zoneRest, zoneHalf]);
 
   const emblemLabel = activeMode.isActive
     ? "Handsfree is on. Long-press to turn it off"
