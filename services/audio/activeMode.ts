@@ -27,6 +27,9 @@ export type ActiveModeCallbacks = {
   onUtterance: ActiveModeUtteranceHandler;
   onStateChange?: (state: ActiveModeState) => void;
   onError?: (error: unknown) => void;
+  /** A stop that was shown as failed (release unconfirmed) is now confirmed:
+   * Handsfree is off (Gate B). */
+  onStopConfirmed?: () => void;
 };
 
 /**
@@ -414,6 +417,11 @@ export class ActiveModeManager {
       // (Stage 5b, Gate B).
       this.stopFailedFlag = true;
       if (result.kind === "stopFailed") throw result.error;
+      if (result.kind === "releaseUnconfirmed" && id !== null) {
+        // When the native side confirms later, the failed stop clears by
+        // itself — for this session only.
+        void result.eventual.then((final) => this.onLateRelease(id, final.kind === "released"));
+      }
       throw new MicBusyError(result.kind);
     }
     this.stopFailedFlag = false;
@@ -421,6 +429,18 @@ export class ActiveModeManager {
     this.micSessionId = null;
     await deactivateKeepAwake(KEEP_AWAKE_TAG);
     this.setState("idle");
+  }
+
+  /** A stop shown as failed because release was unconfirmed: confirmed
+   * now. Ignored if this session was stopped meanwhile or a newer one opened. */
+  private onLateRelease(id: number, released: boolean): void {
+    if (!released || this.micSessionId !== id || this.stopped || !this.stopFailedFlag) return;
+    this.stopFailedFlag = false;
+    this.stopped = true;
+    this.micSessionId = null;
+    void deactivateKeepAwake(KEEP_AWAKE_TAG);
+    this.setState("idle");
+    this.callbacks.onStopConfirmed?.();
   }
 
   /** The native "data" event handler — split out of `start()` so it reads
@@ -590,6 +610,12 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
       onUtterance: (uri, reportState) => onUtteranceRef.current(uri, reportState),
       onStateChange: setState,
       onError: (err) => console.error("[ActiveMode] error", err),
+      // The display catches up on its own — no second Stop needed.
+      onStopConfirmed: () => {
+        setStopFailed(false);
+        setIsActive(false);
+        releaseWakeChime();
+      },
     });
     managerRef.current = manager;
     return () => {

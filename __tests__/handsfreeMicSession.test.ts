@@ -72,10 +72,11 @@ describe("Handsfree on micSession", () => {
     expect(isMicInUse()).toBe(false);
   });
 
-  it("release unconfirmed: Handsfree shows a failed stop (not 'off'), the mic stays busy; Stop again retries", async () => {
+  it("release unconfirmed: shown as a failed stop (not 'off'), mic busy — and it clears by itself once native confirms", async () => {
     fakeMic.ackMode = "manual";
     fakeMic.stuck = true;
-    const manager = new ActiveModeManager({ onUtterance: jest.fn(() => Promise.resolve()) });
+    const onStopConfirmed = jest.fn();
+    const manager = new ActiveModeManager({ onUtterance: jest.fn(() => Promise.resolve()), onStopConfirmed });
     await manager.start();
     const first = await drive(manager.stop());
     expect(first.ok).toBe(false);
@@ -86,14 +87,54 @@ describe("Handsfree on micSession", () => {
     expect(isMicInUse()).toBe(true);
     // A manual recording can't start meanwhile.
     expect((await drive(openMicSession("manual", OPTIONS, {}, { collect: true }))).ok).toBe(false);
-    // The native side finally releases; Stop again confirms it.
+    // The native side finally releases — no second Stop needed.
     fakeMic.stuck = false;
     fakeMic.releaseNow();
-    const second = await drive(manager.stop());
-    expect(second.ok).toBe(true);
+    await flush();
+    expect(onStopConfirmed).toHaveBeenCalledTimes(1);
     expect(manager.stopFailed).toBe(false);
     expect(manager.isRunning).toBe(false);
+    expect(manager.state).toBe("idle");
     expect(isMicInUse()).toBe(false);
+  });
+
+  it("a retried Stop while unconfirmed: one consistent 'off', cleared at most once", async () => {
+    fakeMic.ackMode = "manual";
+    fakeMic.stuck = true;
+    const onStopConfirmed = jest.fn();
+    const manager = new ActiveModeManager({ onUtterance: jest.fn(() => Promise.resolve()), onStopConfirmed });
+    await manager.start();
+    await drive(manager.stop());
+    fakeMic.stuck = false;
+    fakeMic.ackMode = "auto";
+    const retry = await drive(manager.stop()); // the retry's force-release confirms
+    expect(retry.ok).toBe(true);
+    await flush();
+    expect(manager.isRunning).toBe(false);
+    expect(manager.stopFailed).toBe(false);
+    expect(manager.state).toBe("idle");
+    expect(onStopConfirmed.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(isMicInUse()).toBe(false);
+  });
+
+  it("the old session's confirmation can't touch a newer session", async () => {
+    fakeMic.ackMode = "manual";
+    fakeMic.stuck = true;
+    const onStopConfirmed = jest.fn();
+    const manager = new ActiveModeManager({ onUtterance: jest.fn(() => Promise.resolve()), onStopConfirmed });
+    await manager.start();
+    await drive(manager.stop());
+    fakeMic.stuck = false;
+    fakeMic.releaseNow(); // clears the old one
+    await flush();
+    fakeMic.ackMode = "auto";
+    expect((await drive(manager.start())).ok).toBe(true); // a newer session
+    fakeMic.fireReleased(1, 0); // a stray, late acknowledgement for session 1
+    await flush();
+    expect(manager.isRunning).toBe(true);
+    expect(manager.stopFailed).toBe(false);
+    expect(onStopConfirmed).toHaveBeenCalledTimes(1);
+    await drive(manager.stop());
   });
 
   it("a failed release: Handsfree stays shown as a failed stop; nothing else can open", async () => {
