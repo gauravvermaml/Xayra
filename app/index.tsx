@@ -1351,6 +1351,9 @@ export default function HomeScreen() {
   const handleCancelProcessing = useCallback(() => {
     const job = currentJobRef.current;
     if (!cancelProcessing(job)) return;
+    // A recognizer still waiting to be asked for this utterance's
+    // transcript never will be (Gate B).
+    asrRouter.cancelListening();
     currentJobRef.current = null;
     setCancellableJobId(null);
     setProcessingState("idle");
