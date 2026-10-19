@@ -1,7 +1,7 @@
 /**
- * Android Back on the home screen (Xayra 2.0 Stage 5c): the topmost thing
- * the user opened closes first, and only a home screen with nothing open
- * hands Back to the system.
+ * Android Back on the home screen (Xayra 2.0 Stages 5c–5d): the topmost
+ * thing the user opened closes first, then a raised tray settles to rest,
+ * and only the resting home screen hands Back to the system.
  *
  * Not listed because Android routes Back to them before any JS listener:
  * the keyboard (the IME consumes the first Back; the field keeps focus and
@@ -17,6 +17,8 @@ export type HomeBackState = {
   fullScreenOpen: boolean;
   /** The compose field still has focus (keyboard already dismissed). */
   composing: boolean;
+  /** The tray is at its 50% stage (or still settling from it). */
+  trayRaised: boolean;
 };
 
 export type HomeBackAction =
@@ -27,6 +29,9 @@ export type HomeBackAction =
   | "collapse-full-screen"
   /** Leave the field (blur) — the draft stays. */
   | "end-composing"
+  /** 50% tray: settle to the measured resting stage (Stage 5d). Mode,
+   * history and draft are untouched. */
+  | "collapse-tray"
   /** Nothing open: Android's own Back (Xayra goes to the background). */
   | "system";
 
@@ -35,5 +40,6 @@ export function decideHomeBack(state: HomeBackState): HomeBackAction {
   if (state.todosOpen) return "todos";
   if (state.fullScreenOpen) return "collapse-full-screen";
   if (state.composing) return "end-composing";
+  if (state.trayRaised) return "collapse-tray";
   return "system";
 }

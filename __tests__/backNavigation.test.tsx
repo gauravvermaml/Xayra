@@ -37,10 +37,16 @@ import { decideHomeBack, type HomeBackState } from "../utils/backNavigation";
 import { useHardwareBack } from "../hooks/useHardwareBack";
 import { ExpandedTextOverlay } from "../components/ExpandedTextOverlay";
 
-const none: HomeBackState = { quickMenuOpen: false, todosOpen: false, fullScreenOpen: false, composing: false };
+const none: HomeBackState = {
+  quickMenuOpen: false,
+  todosOpen: false,
+  fullScreenOpen: false,
+  composing: false,
+  trayRaised: false,
+};
 
 describe("Back precedence (decideHomeBack)", () => {
-  it("nothing open: Android's own Back (no trap)", () => {
+  it("resting home with nothing open: Android's own Back (no trap)", () => {
     expect(decideHomeBack(none)).toBe("system");
   });
 
@@ -49,27 +55,47 @@ describe("Back precedence (decideHomeBack)", () => {
     [{ todosOpen: true }, "todos"],
     [{ fullScreenOpen: true }, "collapse-full-screen"],
     [{ composing: true }, "end-composing"],
+    [{ trayRaised: true }, "collapse-tray"],
   ] as const)("%o alone → %s", (open, action) => {
     expect(decideHomeBack({ ...none, ...open })).toBe(action);
   });
 
   it("the topmost wins when several could be open", () => {
-    const all: HomeBackState = { quickMenuOpen: true, todosOpen: true, fullScreenOpen: true, composing: true };
+    const all: HomeBackState = {
+      quickMenuOpen: true,
+      todosOpen: true,
+      fullScreenOpen: true,
+      composing: true,
+      trayRaised: true,
+    };
     expect(decideHomeBack(all)).toBe("close-quick-menu");
     expect(decideHomeBack({ ...all, quickMenuOpen: false })).toBe("todos");
     expect(decideHomeBack({ ...all, quickMenuOpen: false, todosOpen: false })).toBe("collapse-full-screen");
+    expect(decideHomeBack({ ...all, quickMenuOpen: false, todosOpen: false, fullScreenOpen: false })).toBe(
+      "end-composing"
+    );
+    expect(decideHomeBack({ ...none, trayRaised: true, composing: true })).toBe("end-composing");
   });
 
-  it("repeated Back presses walk down the stack, then hand Back to Android", () => {
-    let state: HomeBackState = { ...none, fullScreenOpen: true, composing: true };
+  it("repeated Back presses walk down one level at a time, then hand Back to Android", () => {
+    // Full-screen sits over the 50% tray, with a still-focused field.
+    let state: HomeBackState = { ...none, fullScreenOpen: true, composing: true, trayRaised: true };
     const seen: string[] = [];
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 5; i++) {
       const action = decideHomeBack(state);
       seen.push(action);
       if (action === "collapse-full-screen") state = { ...state, fullScreenOpen: false };
       if (action === "end-composing") state = { ...state, composing: false };
+      if (action === "collapse-tray") state = { ...state, trayRaised: false };
     }
-    expect(seen).toEqual(["collapse-full-screen", "end-composing", "system", "system"]);
+    expect(seen).toEqual(["collapse-full-screen", "end-composing", "collapse-tray", "system", "system"]);
+  });
+
+  it("a Back while the tray is still settling to rest collapses again instead of leaving", () => {
+    // sheetIndex only changes when the snap settles: mid-animation it still reads raised.
+    const midSettle: HomeBackState = { ...none, trayRaised: true };
+    expect(decideHomeBack(midSettle)).toBe("collapse-tray");
+    expect(decideHomeBack(midSettle)).toBe("collapse-tray");
   });
 });
 

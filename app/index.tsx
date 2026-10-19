@@ -533,12 +533,17 @@ export default function HomeScreen() {
     todosOpen: false,
     fullScreenOpen: false,
     composing: false,
+    trayRaised: false,
   });
   backStateRef.current = {
     quickMenuOpen: isQuickMenuOpen,
     todosOpen: isTodosVisible,
     fullScreenOpen: isTextBoxExpanded,
     composing: isComposing,
+    // `sheetIndex` changes when a snap settles, so a Back pressed while the
+    // tray is still settling down to rest collapses it again (a no-op)
+    // rather than skipping straight to the system's Back.
+    trayRaised: sheetIndex > 0,
   };
   useHardwareBack(() => {
     switch (decideHomeBack(backStateRef.current)) {
@@ -554,6 +559,9 @@ export default function HomeScreen() {
       case "end-composing":
         // Blurs the field; the draft text is untouched.
         Keyboard.dismiss();
+        return true;
+      case "collapse-tray":
+        sheetRef.current?.snapToIndex(0);
         return true;
       case "system":
         return false;
