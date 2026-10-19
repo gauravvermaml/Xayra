@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { StyleSheet, View } from "react-native";
+import { PixelRatio, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { Feather } from "@expo/vector-icons";
 import Animated, { interpolate, runOnJS, useAnimatedReaction, useAnimatedStyle, type SharedValue } from "react-native-reanimated";
 
-import { SwipeableTrayHandle } from "./SwipeableTrayHandle";
-import { xayraColors } from "../constants/xayraTheme";
+import { settleExpandProgress, SwipeableTrayHandle } from "./SwipeableTrayHandle";
+import { MIN_TOUCH_TARGET, xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
 
 export type ExpandedTextOverlayProps = {
   /** Device's safe-area top inset — pads the box's own top edge so it
@@ -43,6 +44,13 @@ export type ExpandedTextOverlayProps = {
  * conditionally mounted outright, while still letting `progress` start
  * tracking a drag from its very first pixel of movement. */
 const INTERACTIVE_THRESHOLD = 0.01;
+/** The Collapse pill's visible height; hitSlop makes up the 48dp target. */
+const COLLAPSE_HEIGHT = 40;
+/** Narrow screens at large text: "Collapse" spelled out would run into the
+ * centred handle (seen at 360dp / 200%), so it's the chevron alone — same
+ * spoken label and hint, same 48dp target. */
+const COLLAPSE_COMPACT_BELOW_WIDTH = 400;
+const COLLAPSE_COMPACT_FROM_FONT_SCALE = 1.5;
 /** Opacity ramps in over just the first sliver of the drag, on top of the
  * continuous position tracking below — pure position alone (no fade) looks
  * acceptable by itself, since this box and the tray beneath it share the
@@ -105,6 +113,9 @@ const OPACITY_RAMP_END = 0.15;
  * approximating it with a tuned entrance animation.
  */
 export function ExpandedTextOverlay({ topInset, bottomInset, progress, dragDistance, onSettle, children }: ExpandedTextOverlayProps) {
+  const { width } = useWindowDimensions();
+  const compactCollapse =
+    width < COLLAPSE_COMPACT_BELOW_WIDTH && PixelRatio.getFontScale() + 0.01 >= COLLAPSE_COMPACT_FROM_FONT_SCALE;
   const [interactive, setInteractive] = useState(false);
 
   useAnimatedReaction(
@@ -122,12 +133,36 @@ export function ExpandedTextOverlay({ topInset, bottomInset, progress, dragDista
   }));
 
   return (
-    <Animated.View pointerEvents={interactive ? "auto" : "none"} style={[styles.overlay, containerStyle]}>
+    <Animated.View
+      pointerEvents={interactive ? "auto" : "none"}
+      // Collapsed, it's invisible — and must be invisible to TalkBack too
+      // (its Collapse button would otherwise be a focus stop nobody sees).
+      importantForAccessibility={interactive ? "auto" : "no-hide-descendants"}
+      accessibilityElementsHidden={!interactive}
+      style={[styles.overlay, containerStyle]}
+    >
       <View style={[styles.box, { marginTop: topInset + 8 }]}>
         {/* Same handle component as HistorySheet.tsx's own tray — dragging
             it down continuously drives the SAME `progress` value back
             toward 0, collapsing this box back into the tray. */}
-        <SwipeableTrayHandle progress={progress} dragDistance={dragDistance} onSettle={onSettle} style={styles.closeHandleRow} />
+        <View style={styles.headerRow}>
+          <SwipeableTrayHandle progress={progress} dragDistance={dragDistance} onSettle={onSettle} style={styles.closeHandleRow} />
+          {/* Stage 5c: Collapse, for anyone who doesn't drag — the same
+              settle the handle's release does, back to the 50% tray. Sits
+              in the handle row's right gutter, clear of the list. */}
+          <Pressable
+            testID="full-screen-collapse"
+            onPress={() => settleExpandProgress(progress, false, onSettle)}
+            hitSlop={(MIN_TOUCH_TARGET - COLLAPSE_HEIGHT) / 2}
+            accessibilityRole="button"
+            accessibilityLabel="Collapse"
+            accessibilityHint="Returns to the half-height tray"
+            style={({ pressed }) => [styles.collapse, compactCollapse && styles.collapseCompact, pressed && styles.collapsePressed]}
+          >
+            <Feather name="chevron-down" size={compactCollapse ? 20 : 16} color={xayraColors.textSoft} />
+            {!compactCollapse && <Text style={styles.collapseText}>Collapse</Text>}
+          </Pressable>
+        </View>
         {/* `listClearance`'s padding matches HistorySheet.tsx's own tray
             exactly — see that file's `listClearance`/`trayHandleRow` styles
             for the full reasoning. `children` only mounts once interactive
@@ -169,8 +204,44 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingTop: 4,
   },
+  // The handle spans the whole header row (its drag area unchanged, its
+  // pill centred); Collapse sits on top of it at the right.
   closeHandleRow: {
-    paddingTop: 8,
-    paddingBottom: 12,
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    justifyContent: "center",
+  },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    minHeight: COLLAPSE_HEIGHT + 12,
+    paddingHorizontal: 12,
+    paddingTop: 6,
+  },
+  collapse: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    minHeight: COLLAPSE_HEIGHT,
+    paddingHorizontal: 12,
+    borderRadius: xayraRadius.pill,
+    borderWidth: 1,
+    borderColor: xayraColors.outline,
+  },
+  collapseCompact: {
+    width: COLLAPSE_HEIGHT,
+    paddingHorizontal: 0,
+    justifyContent: "center",
+  },
+  collapsePressed: {
+    backgroundColor: xayraColors.line,
+  },
+  collapseText: {
+    ...xayraType.chip,
+    color: xayraColors.textSoft,
   },
 });

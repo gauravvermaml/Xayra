@@ -14,6 +14,21 @@ const SWIPE_VELOCITY_THRESHOLD = 500;
  * like the SAME gesture language as that native drag, not a different one. */
 const SETTLE_SPRING = { damping: 24, stiffness: 260, mass: 0.9, overshootClamping: false };
 
+/**
+ * Settles the full-screen reading view open (true) or closed (false) from
+ * JS — the Collapse button and Android Back — with exactly the spring the
+ * handle's own release uses, then reports it like a release does. Closing
+ * returns to the 50% tray (the sheet underneath never left it).
+ */
+export function settleExpandProgress(
+  progress: SharedValue<number>,
+  expanded: boolean,
+  onSettle: (expanded: boolean) => void
+): void {
+  progress.value = withSpring(expanded ? 1 : 0, SETTLE_SPRING);
+  onSettle(expanded);
+}
+
 function clamp01(value: number): number {
   "worklet";
   return Math.min(1, Math.max(0, value));
