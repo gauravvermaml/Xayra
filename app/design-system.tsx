@@ -19,6 +19,44 @@ import { Pill } from "../components/ui/Pill";
 import { SegmentedControl } from "../components/ui/SegmentedControl";
 import { Orbit } from "../components/ui/Orbit";
 import { isDevelopmentBuild } from "../services/ai/perf";
+import { useLocalSearchParams } from "expo-router";
+import { HomeDock, type HandsfreeDisplayState } from "../components/HomeDock";
+import { HandsfreeTypingStatus } from "../components/HandsfreeTypingStatus";
+import type { ActiveModeState } from "../services/audio/activeMode";
+
+/** Xayra 2.0 Stage 5b: the real dock and typing strip in each Handsfree
+ * state, at this device's actual width and text scale — processing and
+ * speaking can't be reached on an emulator without speech input. */
+const HANDSFREE_PREVIEW_STATES: (HandsfreeDisplayState | "off")[] = ["off", "starting", "listening", "processing", "speaking"];
+
+function HandsfreeStatesPreview({ topInset }: { topInset: number }) {
+  return (
+    <ScrollView style={styles.screen} contentContainerStyle={[styles.content, { paddingTop: topInset + 16 }]}>
+      <XText variant="meta">Handsfree states · font scale {PixelRatio.getFontScale().toFixed(2)}</XText>
+      {HANDSFREE_PREVIEW_STATES.map((state) => (
+        <View key={state} style={styles.previewBlock}>
+          <XText variant="roleLabel">{state}</XText>
+          {/* Full screen width, like the real dock (the sandbox pads 20dp). */}
+          <View style={styles.previewFullWidth}>
+          <HomeDock
+            handsfreeActive={state !== "off"}
+            handsfreeState={state === "off" ? "idle" : state}
+            pendingCount={2}
+            bottomInset={0}
+            onHandsfree={() => {}}
+            onTodos={() => {}}
+            onMore={() => {}}
+            onHeightChange={() => {}}
+          />
+          </View>
+          {state !== "off" && state !== "starting" && (
+            <HandsfreeTypingStatus state={state as ActiveModeState} onStop={() => {}} />
+          )}
+        </View>
+      ))}
+    </ScrollView>
+  );
+}
 
 type Mode = "record" | "ask";
 const MODES = [
@@ -30,6 +68,7 @@ export default function DesignSystemSandbox() {
   const insets = useSafeAreaInsets();
   const [mode, setMode] = useState<Mode>("record");
   const [handsfree, setHandsfree] = useState(false);
+  const { section } = useLocalSearchParams<{ section?: string }>();
 
   if (!isDevelopmentBuild()) {
     return (
@@ -37,6 +76,10 @@ export default function DesignSystemSandbox() {
         <Text style={styles.notice}>The design-system sandbox is only available in development builds.</Text>
       </View>
     );
+  }
+
+  if (section === "handsfree") {
+    return <HandsfreeStatesPreview topInset={insets.top} />;
   }
 
   return (
@@ -140,6 +183,12 @@ export default function DesignSystemSandbox() {
 }
 
 const styles = StyleSheet.create({
+  previewBlock: {
+    gap: 10,
+  },
+  previewFullWidth: {
+    marginHorizontal: -20,
+  },
   screen: { flex: 1, backgroundColor: c.background },
   center: { alignItems: "center", justifyContent: "center", padding: 24 },
   notice: { color: c.textMuted, fontSize: 15, textAlign: "center" },
