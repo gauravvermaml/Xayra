@@ -30,6 +30,9 @@ export type ASRTranscriptionResult = {
  * or the recognizer produces nothing. Every code path below is written to
  * fail into Tier 2, never to fail closed — a note is never lost because Tier
  * 1 didn't cooperate on a given device.
+ *
+ * Gate B: concurrent Tier 1 is now OFF by default (see tier1Config.ts) —
+ * PCM + Whisper is the primary path. The code stays for experiments.
  */
 let nativeAvailability: boolean | null = null;
 

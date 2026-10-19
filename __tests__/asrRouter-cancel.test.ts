@@ -20,6 +20,12 @@ jest.mock("../services/ai/modelDownloadManager", () => ({
   getCurrentModelDownloadStatus: jest.fn(() => ({ status: "ready" })),
 }));
 jest.mock("../components/Toast", () => ({ showToast: jest.fn() }));
+// These tests are about cancelling Tier 1, so it's switched on here (it is
+// off by default since Gate B — see tier1Config.test.ts).
+jest.mock("../services/ai/tier1Config", () => ({
+  loadTier1Config: jest.fn(() => Promise.resolve()),
+  isConcurrentTier1Enabled: jest.fn(() => true),
+}));
 
 type Router = typeof import("../services/ai/asrRouter");
 let cancelListening: Router["cancelListening"];

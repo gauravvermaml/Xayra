@@ -91,9 +91,10 @@ export function cancelActiveTranscription(): void {
  * in the background shortly after first launch (see
  * services/ai/modelDownloadManager.ts) rather than through any user-facing
  * picker. This still throws if a recording happens to be attempted before
- * that background download finishes; on most devices the native
- * (Tier 1) speech recognizer in asrRouter.ts covers that gap in the
- * meantime, same as it always has.
+ * that background download finishes (possible only after onboarding's
+ * "Continue anyway"). The concurrent on-device recognizer (Tier 1) is off by
+ * default since Gate B — and while the PCM recorder captured it was silenced
+ * by Android anyway — so such a recording fails to transcribe.
  */
 async function resolveModelPath(): Promise<{ path: string; modelId: WhisperModelId }> {
   if (!FileSystem.documentDirectory) {
