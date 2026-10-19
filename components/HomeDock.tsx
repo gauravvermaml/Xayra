@@ -21,10 +21,13 @@ export const HANDSFREE_STATE_LABEL: Record<HandsfreeDisplayState, string> = {
   speaking: "speaking",
 };
 
-/** The active Handsfree item widens so "Handsfree · listening" fits on one
- * line beside its dot on a ~390dp phone (canvas: 1.7 on a 390 artboard;
- * real DM Sans metrics need a little more). */
-const ACTIVE_HANDSFREE_FLEX = 2.2;
+/** The active Handsfree item widens for its longer label. 2.0, not 2.2
+ * (Stage 5b correction): at 2.2 To-Dos sat exactly on the width at which
+ * its label wraps — on a 411dp phone at 100% text it intermittently laid
+ * out as a raised two-line box beside its badge (seen live after the dock
+ * returned from typing). The Handsfree label may take two lines instead,
+ * which reads fine. A fixed ratio, never content-measured. */
+const ACTIVE_HANDSFREE_FLEX = 2.0;
 const ACTIVE_HANDSFREE_FLEX_STACKED = 1.5;
 
 export type HomeDockProps = {

@@ -27,7 +27,14 @@ import type { ActiveModeState } from "../services/audio/activeMode";
 /** Xayra 2.0 Stage 5b: the real dock and typing strip in each Handsfree
  * state, at this device's actual width and text scale — processing and
  * speaking can't be reached on an emulator without speech input. */
-const HANDSFREE_PREVIEW_STATES: (HandsfreeDisplayState | "off")[] = ["off", "starting", "listening", "processing", "speaking"];
+const HANDSFREE_PREVIEW_STATES: (HandsfreeDisplayState | "off")[] = [
+  "off",
+  "starting",
+  "listening",
+  "processing",
+  "speaking",
+  "stopFailed",
+];
 
 function HandsfreeStatesPreview({ topInset }: { topInset: number }) {
   return (
@@ -49,9 +56,7 @@ function HandsfreeStatesPreview({ topInset }: { topInset: number }) {
             onHeightChange={() => {}}
           />
           </View>
-          {state !== "off" && state !== "starting" && (
-            <HandsfreeTypingStatus state={state as ActiveModeState} onStop={() => {}} />
-          )}
+          {state !== "off" && state !== "starting" && <HandsfreeTypingStatus state={state} onStop={() => {}} />}
         </View>
       ))}
     </ScrollView>
