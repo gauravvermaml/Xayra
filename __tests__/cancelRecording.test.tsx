@@ -14,19 +14,8 @@ import { act, create } from "react-test-renderer";
 import { Alert, AppState, type AppStateStatus } from "react-native";
 import { QUIET, SPEECH, feedAudio } from "./support/pcm";
 
-let mockEmitData: (base64: string) => void = () => {};
-jest.mock("@fugood/react-native-audio-pcm-stream", () => ({
-  __esModule: true,
-  default: {
-    init: jest.fn(),
-    start: jest.fn(),
-    stop: jest.fn(),
-    on: jest.fn((event: string, handler: (data: string) => void) => {
-      if (event === "data") mockEmitData = handler;
-      return { remove: jest.fn() };
-    }),
-  },
-}));
+// Gate B: the shared fake native module (legacy + session API). MOCK ONLY.
+jest.mock("@fugood/react-native-audio-pcm-stream", () => require("./support/fakeMicNative").fakeMicModule);
 jest.mock("expo-audio", () => ({
   requestRecordingPermissionsAsync: jest.fn(() => Promise.resolve({ granted: true })),
   setAudioModeAsync: jest.fn(() => Promise.resolve()),
@@ -42,11 +31,13 @@ jest.mock("../services/audio/wav", () => ({
 }));
 jest.mock("../services/audio/player", () => ({ pausePlayback: jest.fn() }));
 jest.mock("../services/audio/tts", () => ({ stopSpeech: jest.fn(() => Promise.resolve()) }));
-jest.mock("../services/ai/perf", () => ({ logDuration: jest.fn(), nowMs: jest.fn(() => 0) }));
+jest.mock("../services/ai/perf", () => ({ logDuration: jest.fn(), nowMs: jest.fn(() => 0), devTiming: jest.fn() }));
 jest.mock("../services/ai/localWhisper", () => ({ cancelActiveTranscription: jest.fn() }));
 jest.mock("../services/ai/localLlama", () => ({ cancelActiveLlamaCompletion: jest.fn() }));
 
 import AudioRecord from "@fugood/react-native-audio-pcm-stream";
+import { fakeMic } from "./support/fakeMicNative";
+import { resetMicSessionForTests } from "../services/audio/micSession";
 import { isMicInUse } from "../services/audio/audioInputState";
 import { useVoiceRecorder, type VoiceRecorder } from "../services/audio/recorder";
 import { writePcmChunksAsWav } from "../services/audio/wav";
@@ -57,9 +48,9 @@ import {
   type UtteranceMode,
 } from "../services/audio/manualUtterance";
 
-const mockAudioRecord = AudioRecord as unknown as Record<"init" | "start" | "stop", jest.Mock>;
+const mockAudioRecord = AudioRecord as unknown as Record<"initSession" | "startSession" | "stopSession", jest.Mock>;
 const mockWrite = writePcmChunksAsWav as jest.Mock;
-const emit = (base64: string) => mockEmitData(base64);
+const emit = (base64: string) => fakeMic.emit(base64);
 
 async function flush() {
   for (let i = 0; i < 10; i++) await Promise.resolve();
@@ -76,14 +67,15 @@ async function feed(level: number, ms: number) {
     await flush();
   });
 }
-/** Runs a controller call to completion, draining the recorder's 200 ms
- * stop/discard drain on the fake clock. */
+/** Runs a controller call to completion on the fake clock, through the
+ * microphone release confirmation and the recorder's stop drain. */
 async function run<T>(fn: () => Promise<T>): Promise<T> {
   let result!: T;
   await act(async () => {
-    const p = fn();
-    for (let i = 0; i < 5; i++) {
-      jest.advanceTimersByTime(100);
+    let done = false;
+    const p = fn().finally(() => (done = true));
+    for (let t = 0; t < 10000 && !done; t += 25) {
+      jest.advanceTimersByTime(25);
       await flush();
     }
     result = await p;
@@ -128,6 +120,8 @@ const mounted: ReturnType<typeof create>[] = [];
 beforeEach(() => {
   jest.useFakeTimers();
   jest.clearAllMocks();
+  fakeMic.reset();
+  resetMicSessionForTests();
   mockWavCount = 0;
 });
 afterEach(() => {
@@ -148,7 +142,7 @@ describe("Cancel during recording discards the utterance", () => {
     await s.start("record");
     await feed(QUIET, 500);
     expect(await run(() => s.controller.cancel())).toBe(true);
-    expect(mockAudioRecord.stop).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.stopSession).toHaveBeenCalledTimes(1);
     expect(isMicInUse()).toBe(false);
     expect(s.controller.snapshot).toEqual({ phase: "idle", mode: null });
     await advance(5000);
@@ -233,7 +227,7 @@ describe("Cancel during recording discards the utterance", () => {
       results = await Promise.all([s.controller.cancel(), s.controller.cancel(), s.controller.cancel()]);
     });
     expect(results).toEqual([true, false, false]);
-    expect(mockAudioRecord.stop).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.stopSession).toHaveBeenCalledTimes(1);
     expect(s.phases.filter((p) => p === "cancelling")).toHaveLength(1);
   });
 
@@ -260,8 +254,10 @@ describe("Cancel during recording discards the utterance", () => {
     await feed(SPEECH, 500);
     await act(async () => {
       void controller.finish("tap");
-      jest.advanceTimersByTime(300);
-      await flush();
+      for (let i = 0; i < 12; i++) {
+        jest.advanceTimersByTime(25);
+        await flush();
+      }
     });
     expect(controller.snapshot.phase).toBe("processing");
     expect(await run(() => controller.cancel())).toBe(false);
@@ -274,9 +270,7 @@ describe("lifecycle and failures", () => {
   it("a native stop failure never reports the mic free: the recording continues and Cancel can be retried", async () => {
     const s = await setup();
     await s.start("record");
-    mockAudioRecord.stop.mockImplementationOnce(() => {
-      throw new Error("native stop failed");
-    });
+    fakeMic.failStopCount = 1; // the native stop request is rejected
     expect(await run(() => s.controller.cancel())).toBe(false);
     expect(s.cleanupErrors).toHaveLength(1);
     // The capture loop was never told to stop, so it still owns the mic.
@@ -309,7 +303,7 @@ describe("lifecycle and failures", () => {
       grant();
       await starting;
     });
-    expect(mockAudioRecord.start).not.toHaveBeenCalled();
+    expect(mockAudioRecord.startSession).not.toHaveBeenCalled();
     expect(isMicInUse()).toBe(false);
     expect(s.controller.snapshot).toEqual({ phase: "idle", mode: null });
     expectNothingKept(s);

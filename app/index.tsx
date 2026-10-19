@@ -97,6 +97,8 @@ import {
   type Note,
 } from "../services/notes/noteManager";
 import { isMicInUse } from "../services/audio/audioInputState";
+import { busyMessage } from "../services/audio/micSession";
+import { useMicSnapshot } from "../hooks/useMicSnapshot";
 import {
   canAdoptShortcutMode,
   decideShortcutLaunch,
@@ -1619,7 +1621,14 @@ export default function HomeScreen() {
 
   // Listening copy only while the mic is capturing; once capture ends,
   // "Got it", then the real pipeline stages (see centralStatusText).
-  const recordingStatusText = centralStatusText({
+  // While the microphone's native release is unconfirmed or failed, the
+  // status line says so rather than implying the microphone is off (Gate B).
+  const micSnapshot = useMicSnapshot();
+  const micNotice =
+    micSnapshot.phase === "releaseUnconfirmed" || micSnapshot.phase === "releaseFailed"
+      ? busyMessage(micSnapshot.phase)
+      : null;
+  const recordingStatusText = micNotice ?? centralStatusText({
     phase: isManualStopping
       ? "stopping"
       : canvasState === "recording"
@@ -1927,7 +1936,7 @@ export default function HomeScreen() {
             {recordingStatusText}
           </Text>
         )}
-        {idleCue && emblemTier.cue && (
+        {idleCue && !micNotice && emblemTier.cue && (
           <Text testID="idle-tap-cue" style={styles.statusText}>
             {idleCue}
           </Text>

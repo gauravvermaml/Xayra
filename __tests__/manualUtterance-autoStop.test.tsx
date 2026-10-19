@@ -10,19 +10,8 @@
 import { act, create } from "react-test-renderer";
 import { QUIET, SPEECH, feedAudio } from "./support/pcm";
 
-let mockEmitData: (base64: string) => void = () => {};
-jest.mock("@fugood/react-native-audio-pcm-stream", () => ({
-  __esModule: true,
-  default: {
-    init: jest.fn(),
-    start: jest.fn(),
-    stop: jest.fn(),
-    on: jest.fn((event: string, handler: (data: string) => void) => {
-      if (event === "data") mockEmitData = handler;
-      return { remove: jest.fn() };
-    }),
-  },
-}));
+// Gate B: the shared fake native module (legacy + session API). MOCK ONLY.
+jest.mock("@fugood/react-native-audio-pcm-stream", () => require("./support/fakeMicNative").fakeMicModule);
 jest.mock("expo-audio", () => ({
   requestRecordingPermissionsAsync: jest.fn(() => Promise.resolve({ granted: true })),
   setAudioModeAsync: jest.fn(() => Promise.resolve()),
@@ -38,13 +27,15 @@ jest.mock("../services/audio/wav", () => ({
 }));
 jest.mock("../services/audio/player", () => ({ pausePlayback: jest.fn() }));
 jest.mock("../services/audio/tts", () => ({ stopSpeech: jest.fn(() => Promise.resolve()) }));
-jest.mock("../services/ai/perf", () => ({ logDuration: jest.fn(), nowMs: jest.fn(() => 0) }));
+jest.mock("../services/ai/perf", () => ({ logDuration: jest.fn(), nowMs: jest.fn(() => 0), devTiming: jest.fn() }));
 const mockCancelTranscription = jest.fn();
 const mockCancelCompletion = jest.fn();
 jest.mock("../services/ai/localWhisper", () => ({ cancelActiveTranscription: () => mockCancelTranscription() }));
 jest.mock("../services/ai/localLlama", () => ({ cancelActiveLlamaCompletion: () => mockCancelCompletion() }));
 
 import AudioRecord from "@fugood/react-native-audio-pcm-stream";
+import { fakeMic } from "./support/fakeMicNative";
+import { resetMicSessionForTests } from "../services/audio/micSession";
 import { ProcessingJob } from "../services/ai/processingJob";
 import { useVoiceRecorder, type VoiceRecorder } from "../services/audio/recorder";
 import {
@@ -55,8 +46,8 @@ import {
   type UtteranceMode,
 } from "../services/audio/manualUtterance";
 
-const mockAudioRecord = AudioRecord as unknown as Record<"init" | "start" | "stop", jest.Mock>;
-const emit = (base64: string) => mockEmitData(base64);
+const mockAudioRecord = AudioRecord as unknown as Record<"initSession" | "startSession" | "stopSession", jest.Mock>;
+const emit = (base64: string) => fakeMic.emit(base64);
 
 /** Lets promise chains (stop → WAV write → process) settle. */
 async function flush() {
@@ -121,6 +112,8 @@ function tap(controller: ManualUtteranceController, extra?: { isProcessing?: boo
 beforeEach(() => {
   jest.useFakeTimers();
   jest.clearAllMocks();
+  fakeMic.reset();
+  resetMicSessionForTests();
   mockWavCount = 0;
 });
 afterEach(() => {
@@ -142,7 +135,7 @@ describe("auto-finish after trailing silence", () => {
     await feed(QUIET, 500);
     await advance(300); // recorder drain
     expect(processed).toEqual([expect.objectContaining({ mode: "ask", trigger: "silence" })]);
-    expect(mockAudioRecord.stop).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.stopSession).toHaveBeenCalledTimes(1);
     expect(controller.snapshot.phase).toBe("idle");
     await feed(QUIET, 5000);
     expect(processed).toHaveLength(1);
@@ -175,7 +168,7 @@ describe("auto-finish after trailing silence", () => {
     await feed(QUIET, 30_000);
     await advance(1000);
     expect(processed).toHaveLength(0);
-    expect(mockAudioRecord.stop).not.toHaveBeenCalled();
+    expect(mockAudioRecord.stopSession).not.toHaveBeenCalled();
     expect(controller.snapshot.phase).toBe("recording");
   });
 
@@ -234,7 +227,7 @@ describe("manual finish and the habitual second tap", () => {
     });
     await advance(300);
     expect(processed).toHaveLength(1);
-    expect(mockAudioRecord.stop).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.stopSession).toHaveBeenCalledTimes(1);
   });
 
   it("a habitual tap just after auto-stop does not cancel processing", async () => {
@@ -425,8 +418,8 @@ describe("recorder guards (unchanged)", () => {
     await act(async () => {
       await Promise.all([recorder().startRecording(), recorder().startRecording()]);
     });
-    expect(mockAudioRecord.init).toHaveBeenCalledTimes(1);
-    expect(mockAudioRecord.start).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.initSession).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.startSession).toHaveBeenCalledTimes(1);
   });
 
   it("a double stop returns one recording and stops the mic once", async () => {
@@ -438,11 +431,14 @@ describe("recorder guards (unchanged)", () => {
     let results: (string | null)[] = [];
     await act(async () => {
       const both = Promise.all([recorder().stopRecording(), recorder().stopRecording()]);
-      jest.advanceTimersByTime(300);
+      for (let i = 0; i < 12; i++) {
+        jest.advanceTimersByTime(25);
+        await flush();
+      }
       results = await both;
     });
     expect(results.filter(Boolean)).toHaveLength(1);
-    expect(mockAudioRecord.stop).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.stopSession).toHaveBeenCalledTimes(1);
   });
 
   it("the controller ignores a second start while one is in flight", async () => {
@@ -450,7 +446,7 @@ describe("recorder guards (unchanged)", () => {
     await act(async () => {
       await Promise.all([controller.start("record"), controller.start("ask")]);
     });
-    expect(mockAudioRecord.init).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.initSession).toHaveBeenCalledTimes(1);
     expect(controller.snapshot).toEqual({ phase: "recording", mode: "record" });
     await start("ask"); // still recording: no-op
     expect(controller.snapshot.mode).toBe("record");
@@ -466,7 +462,10 @@ describe("recorder guards (unchanged)", () => {
     await feed(SPEECH, 800);
     await act(async () => {
       const p = recorder().stopRecording();
-      jest.advanceTimersByTime(300);
+      for (let i = 0; i < 12; i++) {
+        jest.advanceTimersByTime(25);
+        await flush();
+      }
       await p;
     });
     await advance(5000);
@@ -526,7 +525,7 @@ describe("no orphaned capture (launcher-shortcut ghost recording)", () => {
       started = await p;
     });
     expect(started).toBe(false);
-    expect(mockAudioRecord.start).not.toHaveBeenCalled();
+    expect(mockAudioRecord.startSession).not.toHaveBeenCalled();
     expect(isMicInUse()).toBe(false);
   });
 
@@ -542,7 +541,7 @@ describe("no orphaned capture (launcher-shortcut ghost recording)", () => {
       release();
       expect(await p).toBe(false);
     });
-    expect(mockAudioRecord.start).not.toHaveBeenCalled();
+    expect(mockAudioRecord.startSession).not.toHaveBeenCalled();
   });
 
   it("a screen unmounting while recording closes the native session", async () => {
@@ -551,8 +550,14 @@ describe("no orphaned capture (launcher-shortcut ghost recording)", () => {
       await recorder().startRecording({ autoStopAfterSilenceMs: 1500, onAutoStop: jest.fn() });
     });
     expect(isMicInUse()).toBe(true);
+    fakeMic.ackMode = "manual";
     act(() => tree.unmount());
-    expect(mockAudioRecord.stop).toHaveBeenCalledTimes(1);
+    await advance(100);
+    expect(mockAudioRecord.stopSession).toHaveBeenCalledTimes(1);
+    // Gate B: free only once the native release is confirmed.
+    expect(isMicInUse()).toBe(true);
+    fakeMic.releaseNow();
+    await advance(100);
     expect(isMicInUse()).toBe(false);
   });
 
