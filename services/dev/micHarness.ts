@@ -545,6 +545,10 @@ const appFaults: Record<string, Record<string, unknown> | null> = {
   FAULT_DROP: { dropReleased: true },
   FAULT_DELAY: { delayReleasedMs: 1500 },
   FAULT_STUCK: { holdThreadMs: 9000 },
+  // Longer than the recorder's 20 s wait for confirmation.
+  FAULT_STUCK_LONG: { holdThreadMs: 30000 },
+  // A chunk that never arrives: an incomplete recording.
+  FAULT_DROPCHUNK: { dropChunkSeq: 5 },
   FAULT_FAILRELEASE: { failRelease: true },
   FAULT_STOPFAIL: { failStopCount: 1 },
   FAULT_CLEAR: null,
