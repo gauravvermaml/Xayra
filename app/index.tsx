@@ -1921,7 +1921,9 @@ export default function HomeScreen() {
           disabled={recorder.isTransitioning}
         />
         {recordingStatusText && (
-          <Text style={styles.statusText} onLayout={handleStatusTextLayout}>
+          // Polite live region: "Listening…", "Got it" and Record's real
+          // stages are announced as they change.
+          <Text style={styles.statusText} onLayout={handleStatusTextLayout} accessibilityLiveRegion="polite">
             {recordingStatusText}
           </Text>
         )}

@@ -157,6 +157,35 @@ describe("borderless Ask answers", () => {
   });
 });
 
+describe("Ask progress line accessibility (Stage 5d)", () => {
+  const { AccessibilityInfo, Animated } = jest.requireActual("react-native") as typeof import("react-native");
+  const streaming: ChatMessage[] = [exchange[0], { id: "a1", role: "assistant", text: "", isStreaming: true }];
+  const askProps = { ...baseProps, speakingMessageId: null, onToggleSpeech: jest.fn(), onShowCitation: jest.fn() };
+  const stageText = (tree: ReactTestRenderer) =>
+    tree.root.findAll((n) => n.props.accessibilityLiveRegion === "polite" && typeof n.props.children === "string");
+
+  it("is a polite live region, so TalkBack reads each real stage as it changes", async () => {
+    const tree = await render(<ChatSheetContent {...askProps} mode="ask" messages={streaming} />);
+    expect(stageText(tree).length).toBeGreaterThan(0);
+  });
+
+  it("with 'remove animations' on, the line stops pulsing once the setting is read, and never restarts", async () => {
+    const reduce = jest.spyOn(AccessibilityInfo, "isReduceMotionEnabled").mockResolvedValue(true);
+    const stop = jest.fn();
+    const loop = jest.spyOn(Animated, "loop").mockImplementation(() => ({ start: jest.fn(), stop, reset: jest.fn() }) as never);
+    const tree = await render(<ChatSheetContent {...askProps} mode="ask" messages={streaming} />);
+    await act(async () => {});
+    // One loop from the first frame (setting not read yet), stopped when it
+    // resolves; no loop starts after that.
+    expect(loop).toHaveBeenCalledTimes(1);
+    expect(stop).toHaveBeenCalledTimes(1);
+    await act(async () => tree.update(<ChatSheetContent {...askProps} mode="ask" messages={streaming} />));
+    expect(loop).toHaveBeenCalledTimes(1);
+    reduce.mockRestore();
+    loop.mockRestore();
+  });
+});
+
 describe("home note card (xayra appearance)", () => {
   it("keeps the date, open, copy and an accessible delete", async () => {
     const onPress = jest.fn();

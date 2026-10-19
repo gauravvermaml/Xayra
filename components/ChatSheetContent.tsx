@@ -4,6 +4,7 @@ import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
 import { Feather } from "@expo/vector-icons";
 
 import { MarkdownText } from "./MarkdownText";
+import { useReduceMotion } from "../hooks/useReduceMotion";
 import { NoteCard } from "./NoteCard";
 import { RelatedNotesSection } from "./RelatedNotesSection";
 import { Chip } from "./ui/Chip";
@@ -42,8 +43,14 @@ type DrawerListItem = { kind: "note"; note: Note } | { kind: "message"; message:
  * from local Llama — a quiet visual cue that generation is live, not stalled. */
 function StreamingCursor({ color }: { color: string }) {
   const opacity = useRef(new Animated.Value(1)).current;
+  const reduceMotion = useReduceMotion();
 
   useEffect(() => {
+    // "Remove animations": a steady cursor instead of a blink.
+    if (reduceMotion) {
+      opacity.setValue(1);
+      return;
+    }
     const loop = Animated.loop(
       Animated.sequence([
         Animated.timing(opacity, { toValue: 0, duration: 450, useNativeDriver: true }),
@@ -52,7 +59,7 @@ function StreamingCursor({ color }: { color: string }) {
     );
     loop.start();
     return () => loop.stop();
-  }, [opacity]);
+  }, [opacity, reduceMotion]);
 
   return <Animated.Text style={{ color, opacity }}>{"▋"}</Animated.Text>;
 }
@@ -73,6 +80,7 @@ function StreamingStageLabel({ color }: { color: string }) {
   // owns no timers.
   const [stage, setStage] = useState(currentAskProgressLabel);
   const opacity = useRef(new Animated.Value(1)).current;
+  const reduceMotion = useReduceMotion();
 
   useEffect(() => {
     // QA Phase 3, P2-2: this row only ever reflects the "chat" flow — a
@@ -86,6 +94,11 @@ function StreamingStageLabel({ color }: { color: string }) {
   }, []);
 
   useEffect(() => {
+    // "Remove animations": the words alone, no pulse.
+    if (reduceMotion) {
+      opacity.setValue(1);
+      return;
+    }
     const loop = Animated.loop(
       Animated.sequence([
         Animated.timing(opacity, { toValue: 0.4, duration: 700, useNativeDriver: true }),
@@ -94,9 +107,15 @@ function StreamingStageLabel({ color }: { color: string }) {
     );
     loop.start();
     return () => loop.stop();
-  }, [opacity]);
+  }, [opacity, reduceMotion]);
 
-  return <Animated.Text style={[styles.streamingStartText, { color, opacity }]}>{stage}</Animated.Text>;
+  // A polite live region: TalkBack reads each real stage as it changes
+  // (retrieving → "Found N related memories…" → answering), never per frame.
+  return (
+    <Animated.Text accessibilityLiveRegion="polite" style={[styles.streamingStartText, { color, opacity }]}>
+      {stage}
+    </Animated.Text>
+  );
 }
 
 /** Shown only before the first message of a session. Tapping one submits it
