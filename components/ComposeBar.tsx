@@ -65,12 +65,17 @@ export type ComposeBarProps = {
   /** The tray's snap index. When it changes while the keyboard is open,
    * the field has moved, so the clearance is measured again. */
   sheetIndex?: number;
-  /** A full-screen overlay (To-Dos) covers the home screen: the field is not
-   * editable, so Android can't move focus into it from beneath — when the
-   * To-Dos add sheet's own field blurred as its keyboard closed on Back,
-   * focus jumped here (Stage 5c, seen on the emulator) and the tray rose
-   * into compose mode underneath. It can't be touched there anyway. */
+  /** A full-screen overlay (To-Dos) covers the home screen, or has just
+   * closed by hardware Back: the field is not editable, so Android can't
+   * move focus into it from beneath — when the To-Dos add sheet's own field
+   * blurred as its keyboard closed on Back, focus jumped here (Stage 5c,
+   * seen on the emulator) and the tray rose into compose mode underneath. */
   covered?: boolean;
+  /** A real touch landed on the field while it was covered (the brief
+   * guard after a Back close): the parent ends the guard, and the field
+   * focuses as soon as it's editable again — the tap is never lost
+   * (Stage 5d). */
+  onCoveredTouch?: () => void;
 };
 
 /**
@@ -145,7 +150,21 @@ export const ComposeBar = memo(function ComposeBar({
   mode,
   sheetIndex,
   covered = false,
+  onCoveredTouch,
 }: ComposeBarProps) {
+  const inputRef = useRef<React.ElementRef<typeof BottomSheetTextInput>>(null);
+  const focusWhenUncoveredRef = useRef(false);
+  useEffect(() => {
+    if (!covered && focusWhenUncoveredRef.current) {
+      focusWhenUncoveredRef.current = false;
+      inputRef.current?.focus();
+    }
+  }, [covered]);
+  const handleFieldTouchStart = () => {
+    if (!covered) return;
+    focusWhenUncoveredRef.current = true;
+    onCoveredTouch?.();
+  };
   const canSubmit = inputText.trim().length > 0;
   // Focus ring only — presentation; focus handling itself is the parent's.
   const [isFocused, setIsFocused] = useState(false);
@@ -285,7 +304,12 @@ export const ComposeBar = memo(function ComposeBar({
   return (
     <View style={styles.container}>
       <View style={styles.row}>
-        <View ref={searchBarRef} testID="compose-field" style={[styles.searchBar, isFocused && styles.searchBarFocused]}>
+        <View
+          ref={searchBarRef}
+          testID="compose-field"
+          onTouchStart={handleFieldTouchStart}
+          style={[styles.searchBar, isFocused && styles.searchBarFocused]}
+        >
           <Feather
             testID="compose-mode-icon"
             name={mode === "record" ? "edit-3" : "search"}
@@ -303,6 +327,7 @@ export const ComposeBar = memo(function ComposeBar({
             {"Ag\nAg"}
           </Text>
           <BottomSheetTextInput
+            ref={inputRef}
             editable={!covered}
             value={inputText}
             onChangeText={onInputChange}

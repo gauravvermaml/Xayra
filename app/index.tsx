@@ -121,8 +121,8 @@ const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const CENTER_AREA_GAP_PX = 10;
 /** The "Tap to finish" hint sits this much closer to the status line. */
 const STATUS_HINT_OFFSET = -4;
-/** How long the compose field stays non-editable after To-Dos closes (see
- * `isComposeCovered`). */
+/** How long the compose field stays non-editable after To-Dos closes by
+ * hardware Back, unless touched first (see `isComposeGuarded`). */
 const COMPOSE_UNCOVER_DELAY_MS = 400;
 
 /** Emblem zone limits (canvas row P): full size at the tray's rest stage,
@@ -513,21 +513,21 @@ export default function HomeScreen() {
   // open hands Back to Android (see utils/backNavigation.ts). The keyboard
   // and native modals (NoteDetailModal) receive Back before this listener.
   const todosBackRef = useRef<(() => boolean) | null>(null);
-  // The compose field stays non-editable while To-Dos covers it AND for a
-  // moment after To-Dos closes: a hardware Back takes the window out of
-  // touch mode, and as To-Dos' focused field unmounts Android moves focus
-  // to the next editable field — the compose field — which raised the tray
-  // into compose mode (seen on the emulator). By the time it's editable
-  // again that focus search is over. Touch never triggers it.
-  const [isComposeCovered, setIsComposeCovered] = useState(false);
+  // The compose field is non-editable while To-Dos covers it, and — only
+  // when To-Dos was closed by hardware Back — for a moment after: Back takes
+  // the window out of touch mode, and as To-Dos' focused field unmounts
+  // Android moves focus to the next editable field, the compose field,
+  // which raised the tray into compose mode (seen on the emulator). A touch
+  // close never triggers that, so it never arms the guard; and a real touch
+  // on the field ends the guard at once and focuses it (Stage 5d — before,
+  // a quick tap right after closing was swallowed).
+  const [isComposeGuarded, setIsComposeGuarded] = useState(false);
+  const endComposeGuard = useCallback(() => setIsComposeGuarded(false), []);
   useEffect(() => {
-    if (isTodosVisible) {
-      setIsComposeCovered(true);
-      return;
-    }
-    const timer = setTimeout(() => setIsComposeCovered(false), COMPOSE_UNCOVER_DELAY_MS);
+    if (!isComposeGuarded) return;
+    const timer = setTimeout(() => setIsComposeGuarded(false), COMPOSE_UNCOVER_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [isTodosVisible]);
+  }, [isComposeGuarded]);
   const backStateRef = useRef<HomeBackState>({
     quickMenuOpen: false,
     todosOpen: false,
@@ -551,7 +551,10 @@ export default function HomeScreen() {
         setIsQuickMenuOpen(false);
         return true;
       case "todos":
-        if (!todosBackRef.current?.()) setIsTodosVisible(false);
+        if (!todosBackRef.current?.()) {
+          setIsComposeGuarded(true);
+          setIsTodosVisible(false);
+        }
         return true;
       case "collapse-full-screen":
         settleExpandProgress(expandProgress, false, handleExpandSettle);
@@ -1997,7 +2000,8 @@ export default function HomeScreen() {
             placeholder={inputMode === "record" ? "Type your thoughts…" : "Search your thoughts…"}
             mode={inputMode}
             sheetIndex={sheetIndex}
-            covered={isComposeCovered}
+            covered={isTodosVisible || isComposeGuarded}
+            onCoveredTouch={endComposeGuard}
           />
         }
         // Record mode shows the notes list (newest first); Ask mode keeps
