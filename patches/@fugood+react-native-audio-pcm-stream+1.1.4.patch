@@ -1,8 +1,643 @@
+diff --git a/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/MicSessionManager.java b/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/MicSessionManager.java
+new file mode 100644
+index 0000000..04a9d95
+--- /dev/null
++++ b/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/MicSessionManager.java
+@@ -0,0 +1,615 @@
++package com.imxiqi.rnliveaudiostream;
++
++import android.media.AudioFormat;
++import android.media.AudioRecord;
++import android.media.AudioRecordingConfiguration;
++import android.media.MediaRecorder.AudioSource;
++import android.os.Build;
++import android.util.Base64;
++import android.util.Log;
++
++import com.facebook.react.bridge.Arguments;
++import com.facebook.react.bridge.Promise;
++import com.facebook.react.bridge.ReactApplicationContext;
++import com.facebook.react.bridge.ReadableMap;
++import com.facebook.react.bridge.WritableMap;
++import com.facebook.react.modules.core.DeviceEventManagerModule;
++
++import org.json.JSONObject;
++
++import java.io.ByteArrayOutputStream;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.InputStream;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayDeque;
++import java.util.Iterator;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.atomic.AtomicLong;
++
++/**
++ * Xayra (Gate A, microphone reliability): microphone capture sessions with
++ * their own identity, an explicit lifecycle and a release acknowledgement.
++ *
++ * Ownership is process-wide (static), so a React teardown that recreates
++ * the module can never open a second capture while an older capture thread
++ * still holds its recorder. At most one session exists until it is
++ * RELEASED; `initSession` refuses while one does.
++ *
++ * Lifecycle (an AtomicInteger; every transition is a compare-and-set):
++ *
++ *   INITIALIZED --startSession--> CAPTURING --stop/force/invalidate/read error--> STOPPING
++ *        |                                                                      |
++ *        +--stop/invalidate/start failure (module thread)--> RELEASING <--------+ (capture thread,
++ *                                                               |                 after its loop)
++ *                                                  RELEASED | RELEASE_FAILED
++ *
++ * Only the actor that wins the CAS into RELEASING calls AudioRecord.release(),
++ * so each recorder is released exactly once. A started session is released
++ * only by its own capture thread, after the read loop has exited; the module
++ * thread only releases a session that never started. Stop, forceRelease and
++ * invalidate never release — they move CAPTURING to STOPPING and (force,
++ * invalidate) call AudioRecord.stop() to wake a blocked read. That stop and
++ * the release are serialised on the session's recordLock, so the recorder is
++ * never stopped after it has been released.
++ *
++ * `sessionReleased` is emitted only after release() has returned and the
++ * owner has been cleared; RELEASE_FAILED keeps the owner, so no new session
++ * can start over a recorder in an unknown state.
++ *
++ * Every event carries its session id; audio chunks carry a per-session
++ * sequence number and `sessionReleased` the last one, so a listener can
++ * check completeness by count rather than relying on delivery order.
++ */
++final class MicSessionManager {
++    private static final String TAG = "XayraMicSession";
++
++    static final int INITIALIZED = 0;
++    static final int CAPTURING = 1;
++    static final int STOPPING = 2;
++    static final int RELEASING = 3;
++    static final int RELEASED = 4;
++    static final int RELEASE_FAILED = 5;
++
++    private static final int HISTORY_SIZE = 16;
++    private static final long SILENCE_CHECK_INTERVAL_MS = 500;
++    private static final long INVALIDATE_JOIN_MS = 300;
++
++    private static final Object LOCK = new Object();
++    private static final AtomicLong NEXT_ID = new AtomicLong(1);
++    /** The one unreleased session, or null. Guarded by LOCK. */
++    private static Session owner;
++    /** Terminal records of recent sessions, newest last. Guarded by LOCK. */
++    private static final ArrayDeque<Terminal> history = new ArrayDeque<>();
++
++    private MicSessionManager() {}
++
++    static String stateName(int state) {
++        switch (state) {
++            case INITIALIZED: return "initialized";
++            case CAPTURING: return "capturing";
++            case STOPPING: return "stopping";
++            case RELEASING: return "releasing";
++            case RELEASED: return "released";
++            case RELEASE_FAILED: return "releaseFailed";
++            default: return "unknown";
++        }
++    }
++
++    private static final class Session {
++        final long id;
++        final AudioRecord record;
++        final int bufferSize;
++        final ReactApplicationContext ctx;
++        final Fault fault;
++        final AtomicInteger state = new AtomicInteger(INITIALIZED);
++        final Object recordLock = new Object();
++        volatile Thread thread;
++        volatile String endReason;
++        /** Written only by the capture thread; read after it finishes. */
++        int seq;
++
++        Session(long id, AudioRecord record, int bufferSize, ReactApplicationContext ctx, Fault fault) {
++            this.id = id;
++            this.record = record;
++            this.bufferSize = bufferSize;
++            this.ctx = ctx;
++            this.fault = fault;
++        }
++    }
++
++    private static final class Terminal {
++        final long id;
++        final int state;
++        final int lastSeq;
++        final String reason;
++
++        Terminal(long id, int state, int lastSeq, String reason) {
++            this.id = id;
++            this.state = state;
++            this.lastSeq = lastSeq;
++            this.reason = reason;
++        }
++    }
++
++    // ---- Public API (called from RNLiveAudioStreamModule) -----------------
++
++    static boolean hasOwner() {
++        synchronized (LOCK) {
++            return owner != null;
++        }
++    }
++
++    static void initSession(ReactApplicationContext ctx, ReadableMap options, boolean legacyActive, Promise promise) {
++        Fault fault = Fault.load(ctx);
++
++        int sampleRateInHz = options.hasKey("sampleRate") ? options.getInt("sampleRate") : 44100;
++        int channelConfig = options.hasKey("channels") && options.getInt("channels") == 2
++                ? AudioFormat.CHANNEL_IN_STEREO : AudioFormat.CHANNEL_IN_MONO;
++        int audioFormat = options.hasKey("bitsPerSample") && options.getInt("bitsPerSample") == 8
++                ? AudioFormat.ENCODING_PCM_8BIT : AudioFormat.ENCODING_PCM_16BIT;
++        int audioSource = options.hasKey("audioSource") ? options.getInt("audioSource") : AudioSource.VOICE_RECOGNITION;
++        int bufferSize = AudioRecord.getMinBufferSize(sampleRateInHz, channelConfig, audioFormat);
++        if (options.hasKey("bufferSize")) {
++            bufferSize = Math.max(bufferSize, options.getInt("bufferSize"));
++        }
++
++        Session session;
++        synchronized (LOCK) {
++            if (owner != null) {
++                promise.reject("busy", "Session " + owner.id + " is " + stateName(owner.state.get()));
++                return;
++            }
++            if (legacyActive) {
++                promise.reject("busy", "The legacy recorder is active");
++                return;
++            }
++            AudioRecord record;
++            try {
++                record = new AudioRecord(audioSource, sampleRateInHz, channelConfig, audioFormat, bufferSize * 3);
++            } catch (Throwable t) {
++                promise.reject("initFailed", t);
++                return;
++            }
++            if (record.getState() != AudioRecord.STATE_INITIALIZED) {
++                try {
++                    record.release();
++                } catch (Throwable ignored) {
++                    // Never initialised.
++                }
++                promise.reject("initFailed", "AudioRecord initialization failed");
++                return;
++            }
++            session = new Session(NEXT_ID.getAndIncrement(), record, bufferSize, ctx, fault);
++            owner = session;
++        }
++        promise.resolve((double) session.id);
++    }
++
++    static void startSession(long id, Promise promise) {
++        Session s = currentOwner(id);
++        if (s == null) {
++            promise.reject("notOwner", "Session " + id + " is not the current session");
++            return;
++        }
++        if (!s.state.compareAndSet(INITIALIZED, CAPTURING)) {
++            promise.reject("badState", "Session " + id + " is " + stateName(s.state.get()));
++            return;
++        }
++        try {
++            if (s.fault.failStartSession) {
++                throw new IllegalStateException("Injected start failure");
++            }
++            s.record.startRecording();
++        } catch (Throwable t) {
++            // No capture thread exists, so this thread is the only possible
++            // releaser (an invalidate may have moved it to STOPPING already).
++            if (casToReleasing(s, CAPTURING) || casToReleasing(s, STOPPING)) {
++                releaseAndFinish(s, "startFailed");
++            }
++            promise.reject("startFailed", t);
++            return;
++        }
++        Thread thread = new Thread(() -> runCapture(s), "XayraMicSession-" + id);
++        s.thread = thread;
++        thread.start();
++        promise.resolve(null);
++    }
++
++    static void stopSession(long id, Promise promise) {
++        Session s = currentOwner(id);
++        if (s == null) {
++            resolveFromHistory(id, promise, "unknownSession");
++            return;
++        }
++        if (s.fault.takeStopFailure()) {
++            // The stop is NOT applied: the session keeps capturing.
++            promise.reject("stopFailed", "Injected stop failure");
++            return;
++        }
++        if (s.state.compareAndSet(INITIALIZED, RELEASING)) {
++            releaseAndFinish(s, "stoppedBeforeStart");
++        } else {
++            s.state.compareAndSet(CAPTURING, STOPPING);
++        }
++        promise.resolve(statusMap(s.id, s.state.get(), -1, null));
++    }
++
++    static void forceRelease(long id, Promise promise) {
++        Session s = currentOwner(id);
++        if (s == null) {
++            resolveFromHistory(id, promise, null);
++            return;
++        }
++        if (s.state.compareAndSet(INITIALIZED, RELEASING)) {
++            releaseAndFinish(s, "forcedBeforeStart");
++        } else {
++            s.state.compareAndSet(CAPTURING, STOPPING);
++            wakeCaptureThread(s);
++        }
++        promise.resolve(statusMap(s.id, s.state.get(), -1, null));
++    }
++
++    /** id <= 0: the current owner, if any. */
++    static void sessionStatus(long id, Promise promise) {
++        Session s;
++        synchronized (LOCK) {
++            s = owner;
++        }
++        if (id <= 0) {
++            if (s == null) {
++                WritableMap none = Arguments.createMap();
++                none.putDouble("sessionId", 0);
++                none.putString("status", "none");
++                promise.resolve(none);
++            } else {
++                promise.resolve(statusMap(s.id, s.state.get(), -1, null));
++            }
++            return;
++        }
++        if (s != null && s.id == id) {
++            promise.resolve(statusMap(s.id, s.state.get(), -1, null));
++            return;
++        }
++        resolveFromHistory(id, promise, null);
++    }
++
++    /** React teardown of the module instance that created the session. */
++    static void invalidate(ReactApplicationContext ctx) {
++        Session s;
++        synchronized (LOCK) {
++            s = owner;
++        }
++        if (s == null || s.ctx != ctx) {
++            return;
++        }
++        s.endReason = "invalidated";
++        if (s.state.compareAndSet(INITIALIZED, RELEASING)) {
++            releaseAndFinish(s, "invalidated");
++            return;
++        }
++        s.state.compareAndSet(CAPTURING, STOPPING);
++        wakeCaptureThread(s);
++        Thread thread = s.thread;
++        if (thread != null) {
++            try {
++                thread.join(INVALIDATE_JOIN_MS);
++            } catch (InterruptedException e) {
++                Thread.currentThread().interrupt();
++            }
++        }
++        // If the thread hasn't finished yet it still releases on its own
++        // once its read returns; it is never released from here.
++    }
++
++    // ---- Capture thread ---------------------------------------------------
++
++    private static void runCapture(Session s) {
++        final AudioRecord record = s.record;
++        String reason = "stopped";
++        try {
++            byte[] buffer = new byte[s.bufferSize];
++            int count = 0;
++            boolean silenceSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q;
++            Boolean lastSilenced = null;
++            long nextSilenceCheck = 0;
++            if (!silenceSupported) {
++                emitSilenced(s, false, false);
++            }
++            while (s.state.get() == CAPTURING) {
++                int bytesRead = record.read(buffer, 0, buffer.length);
++                if (bytesRead < 0) {
++                    if (s.state.get() != CAPTURING) {
++                        break; // Woken by a stop.
++                    }
++                    throw new IllegalStateException("AudioRecord.read returned " + bytesRead);
++                }
++                // Skip the first two buffers, as the legacy path does ("click").
++                if (bytesRead > 0 && ++count > 2) {
++                    int seq = ++s.seq;
++                    String data = Base64.encodeToString(buffer, 0, bytesRead, Base64.NO_WRAP);
++                    emitData(s, seq, data);
++                }
++                if (silenceSupported) {
++                    long now = System.currentTimeMillis();
++                    if (now >= nextSilenceCheck) {
++                        nextSilenceCheck = now + SILENCE_CHECK_INTERVAL_MS;
++                        Boolean silenced = readSilenced(record);
++                        if (silenced != null && !silenced.equals(lastSilenced)) {
++                            lastSilenced = silenced;
++                            emitSilenced(s, true, silenced);
++                        }
++                    }
++                }
++            }
++        } catch (Throwable t) {
++            reason = "readError";
++            String message = t.getMessage();
++            WritableMap map = Arguments.createMap();
++            map.putDouble("sessionId", s.id);
++            map.putString("message", message != null ? message : "Unknown recording error");
++            emit(s.ctx, "sessionError", map);
++        } finally {
++            // An error exit leaves CAPTURING: it becomes a stop.
++            s.state.compareAndSet(CAPTURING, STOPPING);
++            if (s.fault.holdThreadMs > 0) {
++                // Fault injection: a capture thread that doesn't reach its
++                // release for a while (status stays "stopping").
++                sleepQuietly(s.fault.holdThreadMs);
++            }
++            if (casToReleasing(s, STOPPING)) {
++                releaseAndFinish(s, s.endReason != null ? s.endReason : reason);
++            }
++        }
++    }
++
++    private static Boolean readSilenced(AudioRecord record) {
++        try {
++            AudioRecordingConfiguration config = record.getActiveRecordingConfiguration();
++            return config != null ? config.isClientSilenced() : null;
++        } catch (Throwable t) {
++            return null;
++        }
++    }
++
++    // ---- Release ----------------------------------------------------------
++
++    private static boolean casToReleasing(Session s, int from) {
++        return s.state.compareAndSet(from, RELEASING);
++    }
++
++    /** Called only by the winner of the CAS into RELEASING. */
++    private static void releaseAndFinish(Session s, String reason) {
++        boolean ok;
++        synchronized (s.recordLock) {
++            try {
++                try {
++                    s.record.stop();
++                } catch (Throwable ignored) {
++                    // Not recording (never started, or already stopped).
++                }
++                if (s.fault.failRelease) {
++                    throw new IllegalStateException("Injected release failure");
++                }
++                s.record.release();
++                ok = true;
++            } catch (Throwable t) {
++                Log.e(TAG, "release failed for session " + s.id, t);
++                ok = false;
++            }
++        }
++        int finalState = ok ? RELEASED : RELEASE_FAILED;
++        int lastSeq = s.seq;
++        synchronized (LOCK) {
++            s.state.set(finalState);
++            // A failed release keeps ownership: nothing new may open over a
++            // recorder in an unknown state.
++            if (ok && owner == s) {
++                owner = null;
++            }
++            history.addLast(new Terminal(s.id, finalState, lastSeq, reason));
++            while (history.size() > HISTORY_SIZE) {
++                history.removeFirst();
++            }
++        }
++        WritableMap map = statusMap(s.id, finalState, lastSeq, reason);
++        map.putBoolean("ok", ok);
++        emitReleased(s, map);
++    }
++
++    /** Wakes a capture thread blocked in read(). Never releases. */
++    private static void wakeCaptureThread(Session s) {
++        synchronized (s.recordLock) {
++            int state = s.state.get();
++            if (state == CAPTURING || state == STOPPING) {
++                try {
++                    s.record.stop();
++                } catch (Throwable t) {
++                    Log.w(TAG, "stop() while waking session " + s.id + " threw", t);
++                }
++            }
++        }
++    }
++
++    // ---- Helpers ----------------------------------------------------------
++
++    private static Session currentOwner(long id) {
++        synchronized (LOCK) {
++            return owner != null && owner.id == id ? owner : null;
++        }
++    }
++
++    private static void resolveFromHistory(long id, Promise promise, String rejectCodeIfUnknown) {
++        Terminal found = null;
++        synchronized (LOCK) {
++            Iterator<Terminal> it = history.descendingIterator();
++            while (it.hasNext()) {
++                Terminal t = it.next();
++                if (t.id == id) {
++                    found = t;
++                    break;
++                }
++            }
++        }
++        if (found != null) {
++            promise.resolve(statusMap(found.id, found.state, found.lastSeq, found.reason));
++        } else if (rejectCodeIfUnknown != null) {
++            promise.reject(rejectCodeIfUnknown, "No session " + id);
++        } else {
++            promise.resolve(statusMap(id, -1, -1, null));
++        }
++    }
++
++    private static WritableMap statusMap(long id, int state, int lastSeq, String reason) {
++        WritableMap map = Arguments.createMap();
++        map.putDouble("sessionId", id);
++        map.putString("status", stateName(state));
++        if (lastSeq >= 0) {
++            map.putInt("lastSeq", lastSeq);
++        }
++        if (reason != null) {
++            map.putString("reason", reason);
++        }
++        return map;
++    }
++
++    private static void emitData(Session s, int seq, String data) {
++        if (seq == s.fault.dropChunkSeq) {
++            return; // Fault injection: a chunk that never arrives.
++        }
++        WritableMap map = Arguments.createMap();
++        map.putDouble("sessionId", s.id);
++        map.putInt("seq", seq);
++        map.putString("data", data);
++        if (seq == s.fault.deferChunkSeq && s.fault.deferChunkMs > 0) {
++            // Fault injection: a chunk delivered late, out of order.
++            new Thread(() -> {
++                sleepQuietly(s.fault.deferChunkMs);
++                emit(s.ctx, "sessionData", map);
++            }, "XayraMicSession-defer").start();
++            return;
++        }
++        emit(s.ctx, "sessionData", map);
++    }
++
++    private static void emitSilenced(Session s, boolean supported, boolean silenced) {
++        WritableMap map = Arguments.createMap();
++        map.putDouble("sessionId", s.id);
++        map.putBoolean("supported", supported);
++        map.putBoolean("silenced", silenced);
++        emit(s.ctx, "sessionSilenced", map);
++    }
++
++    private static void emitReleased(Session s, WritableMap map) {
++        if (s.fault.dropReleased) {
++            return; // Fault injection: the acknowledgement is lost.
++        }
++        if (s.fault.delayReleasedMs > 0) {
++            new Thread(() -> {
++                sleepQuietly(s.fault.delayReleasedMs);
++                emit(s.ctx, "sessionReleased", map);
++            }, "XayraMicSession-ack").start();
++            return;
++        }
++        emit(s.ctx, "sessionReleased", map);
++    }
++
++    private static void emit(ReactApplicationContext ctx, String event, WritableMap map) {
++        try {
++            if (ctx == null || !ctx.hasActiveReactInstance()) {
++                return;
++            }
++            ctx.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class).emit(event, map);
++        } catch (Throwable t) {
++            Log.w(TAG, "emit " + event + " failed", t);
++        }
++    }
++
++    private static void sleepQuietly(long ms) {
++        try {
++            Thread.sleep(ms);
++        } catch (InterruptedException e) {
++            Thread.currentThread().interrupt();
++        }
++    }
++
++    /**
++     * Development-only fault injection for emulator tests. Active only in the
++     * emulator-only Xayra Test package (`.devtest`) running on an emulator,
++     * and only while `files/dev-mic-fault.json` exists. Every other build and
++     * device gets the inert default.
++     */
++    static final class Fault {
++        static final Fault NONE = new Fault();
++
++        long delayReleasedMs;
++        boolean dropReleased;
++        final AtomicInteger stopFailures = new AtomicInteger();
++        boolean failStartSession;
++        long holdThreadMs;
++        boolean failRelease;
++        int dropChunkSeq = -1;
++        int deferChunkSeq = -1;
++        long deferChunkMs;
++
++        boolean takeStopFailure() {
++            while (true) {
++                int n = stopFailures.get();
++                if (n <= 0) {
++                    return false;
++                }
++                if (stopFailures.compareAndSet(n, n - 1)) {
++                    return true;
++                }
++            }
++        }
++
++        private static String readText(File file) throws java.io.IOException {
++            try (InputStream in = new FileInputStream(file)) {
++                ByteArrayOutputStream out = new ByteArrayOutputStream();
++                byte[] buf = new byte[1024];
++                int n;
++                while ((n = in.read(buf)) > 0) {
++                    out.write(buf, 0, n);
++                }
++                return new String(out.toByteArray(), StandardCharsets.UTF_8);
++            }
++        }
++
++        static Fault load(ReactApplicationContext ctx) {
++            try {
++                if (!ctx.getPackageName().endsWith(".devtest") || !isEmulator()) {
++                    return NONE;
++                }
++                File file = new File(ctx.getFilesDir(), "dev-mic-fault.json");
++                if (!file.isFile()) {
++                    return NONE;
++                }
++                JSONObject json = new JSONObject(readText(file));
++                Fault f = new Fault();
++                f.delayReleasedMs = json.optLong("delayReleasedMs", 0);
++                f.dropReleased = json.optBoolean("dropReleased", false);
++                f.stopFailures.set(json.optInt("failStopCount", 0));
++                f.failStartSession = json.optBoolean("failStartSession", false);
++                f.holdThreadMs = json.optLong("holdThreadMs", 0);
++                f.failRelease = json.optBoolean("failRelease", false);
++                f.dropChunkSeq = json.optInt("dropChunkSeq", -1);
++                f.deferChunkSeq = json.optInt("deferChunkSeq", -1);
++                f.deferChunkMs = json.optLong("deferChunkMs", 0);
++                Log.w(TAG, "Fault injection active: " + json);
++                return f;
++            } catch (Throwable t) {
++                Log.w(TAG, "Fault file ignored", t);
++                return NONE;
++            }
++        }
++
++        private static boolean isEmulator() {
++            return Build.FINGERPRINT.startsWith("generic")
++                    || Build.FINGERPRINT.contains("emulator")
++                    || Build.HARDWARE.contains("goldfish")
++                    || Build.HARDWARE.contains("ranchu")
++                    || Build.PRODUCT.contains("sdk_gphone");
++        }
++    }
++}
 diff --git a/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java b/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java
-index 6d7d17d..f537044 100644
+index 6d7d17d..ecc351e 100644
 --- a/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java
 +++ b/node_modules/@fugood/react-native-audio-pcm-stream/android/src/main/java/com/imxiqi/rnliveaudiostream/RNLiveAudioStreamModule.java
-@@ -79,6 +79,16 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+@@ -41,6 +41,13 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+ 
+     @ReactMethod
+     public void init(ReadableMap options, Promise promise) {
++        // Xayra Gate A: the legacy path and the session API never capture at
++        // the same time (see MicSessionManager). With only the legacy API in
++        // use this never refuses.
++        if (MicSessionManager.hasOwner()) {
++            promise.reject("busy", "A microphone session is active");
++            return;
++        }
+         sampleRateInHz = 44100;
+         if (options.hasKey("sampleRate")) {
+             sampleRateInHz = options.getInt("sampleRate");
+@@ -79,6 +86,16 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
  
          if (recorder.getState() != AudioRecord.STATE_INITIALIZED) {
              promise.reject("AudioRecord initialization failed");
@@ -19,7 +654,7 @@ index 6d7d17d..f537044 100644
              recorder = null;
          } else {
              promise.resolve(null);
-@@ -93,6 +103,19 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+@@ -93,6 +110,19 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
  
          Thread recordingThread = new Thread(new Runnable() {
              public void run() {
@@ -39,7 +674,7 @@ index 6d7d17d..f537044 100644
                  try {
                      int bytesRead;
                      int count = 0;
-@@ -100,7 +123,7 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+@@ -100,7 +130,7 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
                      byte[] buffer = new byte[bufferSize];
  
                      while (isRecording) {
@@ -48,7 +683,7 @@ index 6d7d17d..f537044 100644
  
                          // skip first 2 buffers to eliminate "click sound"
                          if (bytesRead > 0 && ++count > 2) {
-@@ -108,12 +131,31 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+@@ -108,12 +138,31 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
                              eventEmitter.emit("data", base64Data);
                          }
                      }
@@ -83,8 +718,46 @@ index 6d7d17d..f537044 100644
                  }
              }
          });
+@@ -125,4 +174,37 @@ public class RNLiveAudioStreamModule extends ReactContextBaseJavaModule {
+     public void stop() {
+         isRecording = false;
+     }
++
++    // ---- Xayra Gate A: microphone sessions (MicSessionManager) ------------
++
++    @ReactMethod
++    public void initSession(ReadableMap options, Promise promise) {
++        MicSessionManager.initSession(reactContext, options, recorder != null || isRecording, promise);
++    }
++
++    @ReactMethod
++    public void startSession(double id, Promise promise) {
++        MicSessionManager.startSession((long) id, promise);
++    }
++
++    @ReactMethod
++    public void stopSession(double id, Promise promise) {
++        MicSessionManager.stopSession((long) id, promise);
++    }
++
++    @ReactMethod
++    public void forceRelease(double id, Promise promise) {
++        MicSessionManager.forceRelease((long) id, promise);
++    }
++
++    @ReactMethod
++    public void sessionStatus(double id, Promise promise) {
++        MicSessionManager.sessionStatus((long) id, promise);
++    }
++
++    @Override
++    public void invalidate() {
++        MicSessionManager.invalidate(reactContext);
++        super.invalidate();
++    }
+ }
 diff --git a/node_modules/@fugood/react-native-audio-pcm-stream/index.js b/node_modules/@fugood/react-native-audio-pcm-stream/index.js
-index d11088e..362f73e 100644
+index d11088e..26305bd 100644
 --- a/node_modules/@fugood/react-native-audio-pcm-stream/index.js
 +++ b/node_modules/@fugood/react-native-audio-pcm-stream/index.js
 @@ -9,7 +9,14 @@ AudioRecord.start = () => RNLiveAudioStream.start();
@@ -103,3 +776,27 @@ index d11088e..362f73e 100644
  };
  
  AudioRecord.on = (event, callback) => {
+@@ -21,4 +28,23 @@ AudioRecord.on = (event, callback) => {
+   return EventEmitter.addListener(nativeEvent, callback);
+ };
+ 
++// Xayra Gate A: microphone sessions (see MicSessionManager.java). Every
++// event carries `sessionId`; `sessionData` also a per-session `seq`, and
++// `sessionReleased` the session's `lastSeq`. Unlike `on()` above, `onSession`
++// never removes other listeners.
++AudioRecord.initSession = options => RNLiveAudioStream.initSession(options);
++AudioRecord.startSession = id => RNLiveAudioStream.startSession(id);
++AudioRecord.stopSession = id => RNLiveAudioStream.stopSession(id);
++AudioRecord.forceRelease = id => RNLiveAudioStream.forceRelease(id);
++AudioRecord.sessionStatus = id => RNLiveAudioStream.sessionStatus(id);
++
++const sessionEvents = ['sessionData', 'sessionError', 'sessionReleased', 'sessionSilenced'];
++
++AudioRecord.onSession = (event, callback) => {
++  if (!sessionEvents.includes(event)) {
++    throw new Error('Invalid session event');
++  }
++  return EventEmitter.addListener(event, callback);
++};
++
+ export default AudioRecord;
