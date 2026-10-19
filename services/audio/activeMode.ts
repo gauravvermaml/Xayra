@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, type AppStateStatus } from "react-native";
 import { Buffer } from "buffer";
-import { requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
+import { getRecordingPermissionsAsync, requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
 import AudioRecord from "@fugood/react-native-audio-pcm-stream";
 
@@ -266,6 +266,26 @@ export class ActiveModeManager {
     return this._state;
   }
 
+  /** The session is open (the microphone belongs to Handsfree). */
+  get isRunning(): boolean {
+    return !this.stopped;
+  }
+
+  /** Open, or opening: a start is in flight. What a toggle must treat as
+   * "on", so a second tap during the start turns Handsfree off rather than
+   * starting it twice. */
+  get isEngaged(): boolean {
+    return !this.stopped || this.startInFlight !== null;
+  }
+
+  /** Increments per start. A state report from an utterance of an earlier
+   * (stopped) session is ignored, so a late "speaking" can't relight a
+   * session the user already stopped — or a newer one. */
+  private session = 0;
+  private startInFlight: Promise<void> | null = null;
+  /** Stop was requested while the start was still opening the microphone. */
+  private stopRequestedDuringStart = false;
+
   private setState(next: ActiveModeState): void {
     this._state = next;
     this.callbacks.onStateChange?.(next);
@@ -277,7 +297,32 @@ export class ActiveModeManager {
     if (!this.stopped) {
       return;
     }
-    const { granted } = await requestRecordingPermissionsAsync();
+    // One start at a time: a second call while the first is still opening
+    // the microphone joins it instead of opening a second native session.
+    if (this.startInFlight) {
+      return this.startInFlight;
+    }
+    this.stopRequestedDuringStart = false;
+    this.startInFlight = this.open().finally(() => {
+      this.startInFlight = null;
+    });
+    return this.startInFlight;
+  }
+
+  private async open(): Promise<void> {
+    // Check before asking, as the manual recorder does: requesting launches
+    // the system permission activity even when permission is already
+    // granted, which pauses the app — mid-start, that "background" was
+    // stopping the session it was starting (Stage 5b, seen on the emulator).
+    let granted = false;
+    try {
+      granted = (await getRecordingPermissionsAsync()).granted;
+    } catch {
+      // Unknown — fall through to the normal request.
+    }
+    if (!granted) {
+      granted = (await requestRecordingPermissionsAsync()).granted;
+    }
     if (!granted) {
       throw new Error("Microphone permission was not granted.");
     }
@@ -302,7 +347,13 @@ export class ActiveModeManager {
     // recording; a true background foreground-service is a separate,
     // materially larger native undertaking not implemented here.
     await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
+    // Stopped while opening: never open the microphone.
+    if (this.stopRequestedDuringStart) {
+      await deactivateKeepAwake(KEEP_AWAKE_TAG);
+      return;
+    }
     this.stopped = false;
+    this.session += 1;
     setMicInUse(true);
 
     // The ONE native session for this entire Handsfree engagement — see
@@ -325,6 +376,12 @@ export class ActiveModeManager {
   }
 
   async stop(): Promise<void> {
+    if (this.startInFlight) {
+      // Let the start finish its own async steps, then close whatever it
+      // opened (it opens nothing once this flag is seen).
+      this.stopRequestedDuringStart = true;
+      await this.startInFlight.catch(() => {});
+    }
     if (this.stopped) {
       return;
     }
@@ -453,13 +510,19 @@ export class ActiveModeManager {
     }
 
     this.setState("processing");
+    const session = this.session;
+    const isCurrent = () => !this.stopped && this.session === session;
     try {
       const uri = await writePcmChunksAsWav(chunks, "active-mode");
-      await this.callbacks.onUtterance(uri, (state) => this.setState(state));
+      // Reports from this utterance only count while its session is still
+      // the open one.
+      await this.callbacks.onUtterance(uri, (state) => {
+        if (isCurrent()) this.setState(state);
+      });
     } catch (err) {
       this.callbacks.onError?.(err);
     } finally {
-      if (!this.stopped) {
+      if (isCurrent()) {
         this.armListening();
       }
     }
@@ -468,6 +531,10 @@ export class ActiveModeManager {
 
 export type UseActiveMode = {
   isActive: boolean;
+  /** A start is opening the microphone (not yet listening). Shown as
+   * "starting", and it already counts as Handsfree for microphone
+   * ownership — a second tap now turns Handsfree off. */
+  isStarting: boolean;
   state: ActiveModeState;
   toggle: () => Promise<void>;
   stop: () => Promise<void>;
@@ -484,6 +551,7 @@ export type UseActiveMode = {
 export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiveMode {
   const [isActive, setIsActive] = useState(false);
   const [state, setState] = useState<ActiveModeState>("idle");
+  const [isStarting, setIsStarting] = useState(false);
   const managerRef = useRef<ActiveModeManager | null>(null);
   const onUtteranceRef = useRef(onUtterance);
   onUtteranceRef.current = onUtterance;
@@ -513,39 +581,59 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
    */
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState: AppStateStatus) => {
-      if (nextState === "background") {
-        void managerRef.current?.stop().then(() => setIsActive(false));
+      // Only an open session is stopped here. Engaging Handsfree itself
+      // passes through "background" for a moment (the microphone-permission
+      // check pauses the activity — confirmed on the emulator: background
+      // then active, mid-start), so a start in flight is left to finish and
+      // re-check the app state itself (see `start` below).
+      if (nextState === "background" && managerRef.current?.isRunning) {
+        void managerRef.current.stop().then(() => setIsActive(managerRef.current?.isRunning ?? false));
       }
     });
     return () => subscription.remove();
   }, []);
 
+  // `isActive` always mirrors the controller (its session is open) — never
+  // assumed from which call returned last, so a Stop during a start can't
+  // leave the UI showing "on".
   const start = useCallback(async () => {
     // Fire-and-forget, not awaited: loading a ~10KB local asset is fast, but
     // there's no reason to make engaging Handsfree wait on it, and a chime
     // that's still loading the first time is a cosmetic miss, not a bug.
     preloadWakeChime();
-    await managerRef.current?.start();
-    setIsActive(true);
+    setIsStarting(true);
+    try {
+      await managerRef.current?.start();
+      // Left the app while the start was opening the microphone: leaving
+      // the app turns Handsfree off, as it always has.
+      if (AppState.currentState === "background") {
+        await managerRef.current?.stop();
+      }
+    } finally {
+      setIsStarting(false);
+      setIsActive(managerRef.current?.isRunning ?? false);
+    }
   }, []);
 
   const stop = useCallback(async () => {
     await managerRef.current?.stop();
-    setIsActive(false);
+    setIsActive(managerRef.current?.isRunning ?? false);
     releaseWakeChime();
   }, []);
 
+  // Decided by the controller, not the last render: a second tap while the
+  // first start is still opening the microphone turns Handsfree off.
   const toggle = useCallback(async () => {
-    if (isActive) {
+    if (managerRef.current?.isEngaged) {
       await stop();
     } else {
       await start();
     }
-  }, [isActive, start, stop]);
+  }, [start, stop]);
 
   const cancelCurrentUtterance = useCallback(() => {
     return managerRef.current?.cancelCurrentUtterance() ?? false;
   }, []);
 
-  return { isActive, state, toggle, stop, cancelCurrentUtterance };
+  return { isActive, isStarting, state, toggle, stop, cancelCurrentUtterance };
 }

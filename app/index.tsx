@@ -1009,15 +1009,18 @@ export default function HomeScreen() {
         // manual utterance open.
         options?.onRouted?.();
 
-        reportState?.("speaking");
+        // "speaking" is reported only when something is actually about to be
+        // spoken — Handsfree's status must never say "speaking" in silence.
         if (intent === "RECORD") {
           // Spoken only when a note was really written (it used to be said
           // even when the recording was discarded as empty/silent).
           const completion = recordCompletionSpeech(saved);
           if (completion) {
+            reportState?.("speaking");
             await speakTextAndWait(completion);
           }
         } else if (answerText && assistantId) {
+          reportState?.("speaking");
           // `chatSession.speakMessageAndWait` — not chatSession's other
           // (fire-and-forget) speech path, and not a raw `speakTextAndWait`
           // call either. Handsfree Mode needs to actually wait for playback
@@ -1320,7 +1323,8 @@ export default function HomeScreen() {
     const action = decideCentralTap({
       manualPhase: manualController.snapshot.phase,
       isProcessing: processingState === "processing",
-      isHandsfreeActive: activeMode.isActive,
+      // A Handsfree start in flight already owns the microphone.
+      isHandsfreeActive: activeMode.isActive || activeMode.isStarting,
       isRecorderTransitioning: recorder.isTransitioning,
     });
     switch (action) {
@@ -1627,8 +1631,8 @@ export default function HomeScreen() {
     () => (
       <HomeDock
         ref={quickMenuButtonRef}
-        handsfreeActive={activeMode.isActive}
-        handsfreeState={activeMode.state}
+        handsfreeActive={activeMode.isActive || activeMode.isStarting}
+        handsfreeState={activeMode.isStarting ? "starting" : activeMode.state}
         pendingCount={pendingCount}
         bottomInset={insets.bottom}
         onHandsfree={handleToggleHandsfree}
@@ -1637,7 +1641,7 @@ export default function HomeScreen() {
         onHeightChange={handleDockHeight}
       />
     ),
-    [activeMode.isActive, activeMode.state, pendingCount, insets.bottom, handleToggleHandsfree, handleOpenTodos, handleOpenQuickMenu, handleDockHeight]
+    [activeMode.isActive, activeMode.isStarting, activeMode.state, pendingCount, insets.bottom, handleToggleHandsfree, handleOpenTodos, handleOpenQuickMenu, handleDockHeight]
   );
 
   // Opens a note's detail modal — shared by a chat citation chip's tap AND

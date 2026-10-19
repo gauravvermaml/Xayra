@@ -128,3 +128,49 @@ describe("HandsfreeTypingStatus", () => {
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("Handsfree status is the controller's real state (Stage 5b)", () => {
+  const states = [
+    ["starting", "Handsfree · starting"],
+    ["listening", "Handsfree · listening"],
+    ["processing", "Handsfree · processing"],
+    ["speaking", "Handsfree · speaking"],
+  ] as const;
+
+  it.each(states)("dock: %s is shown in words, as a checked switch that says it turns Handsfree off", async (state, label) => {
+    const tree = await render(<HomeDock {...dockProps({ handsfreeActive: true, handsfreeState: state })} />);
+    expect(texts(tree)).toContain(label);
+    const toggle = byTestId(tree, "dock-handsfree");
+    expect(toggle.props.accessibilityRole).toBe("switch");
+    expect(toggle.props.accessibilityState).toEqual({ checked: true });
+    expect(toggle.props.accessibilityLabel).toBe(`Handsfree, ${state}`);
+    expect(toggle.props.accessibilityHint).toBe("Turns Handsfree off");
+    expect(toggle.props.accessibilityLiveRegion).toBe("polite");
+  });
+
+  it("dock: off is plain 'Handsfree', unchecked, and says it turns Handsfree on", async () => {
+    const tree = await render(<HomeDock {...dockProps()} />);
+    const toggle = byTestId(tree, "dock-handsfree");
+    expect(texts(tree)).toContain("Handsfree");
+    expect(texts(tree).some((t) => t.startsWith("Handsfree ·"))).toBe(false);
+    expect(toggle.props.accessibilityState).toEqual({ checked: false });
+    expect(toggle.props.accessibilityHint).toBe("Turns Handsfree on");
+  });
+
+  const stripStates = [
+    ["listening", "Handsfree · listening"],
+    ["processing", "Handsfree · processing"],
+    ["speaking", "Handsfree · speaking"],
+  ] as const;
+
+  it.each(stripStates)("typing strip: %s in words, with a Stop that calls the controller's stop", async (state, label) => {
+    const onStop = jest.fn();
+    const tree = await render(<HandsfreeTypingStatus state={state} onStop={onStop} />);
+    expect(texts(tree)).toContain(label);
+    const stop = byTestId(tree, "handsfree-typing-stop");
+    expect(stop.props.accessibilityLabel).toBe("Stop Handsfree");
+    expect(40 + 2 * stop.props.hitSlop).toBeGreaterThanOrEqual(48);
+    act(() => stop.props.onPress());
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+});

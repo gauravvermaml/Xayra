@@ -6,7 +6,12 @@ import { xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
 import type { ActiveModeState } from "../services/audio/activeMode";
 
 /** Spoken/visible Handsfree states. `idle` never shows while active. */
-export const HANDSFREE_STATE_LABEL: Record<ActiveModeState, string> = {
+/** What the dock and typing strip show: the controller's state, plus
+ * "starting" while a start is opening the microphone. */
+export type HandsfreeDisplayState = ActiveModeState | "starting";
+
+export const HANDSFREE_STATE_LABEL: Record<HandsfreeDisplayState, string> = {
+  starting: "starting",
   idle: "on",
   listening: "listening",
   processing: "processing",
@@ -21,7 +26,7 @@ const ACTIVE_HANDSFREE_FLEX_STACKED = 1.5;
 
 export type HomeDockProps = {
   handsfreeActive: boolean;
-  handsfreeState: ActiveModeState;
+  handsfreeState: HandsfreeDisplayState;
   pendingCount: number;
   /** Bottom safe-area inset — the dock is the one place it's added. */
   bottomInset: number;
@@ -91,7 +96,10 @@ export const HomeDock = forwardRef<View, HomeDockProps>(function HomeDock(
           onPress={onHandsfree}
           accessibilityRole="switch"
           accessibilityLabel={handsfreeActive ? `Handsfree, ${HANDSFREE_STATE_LABEL[handsfreeState]}` : "Handsfree"}
+          accessibilityHint={handsfreeActive ? "Turns Handsfree off" : "Turns Handsfree on"}
           accessibilityState={{ checked: handsfreeActive }}
+          // Listening → processing → speaking is announced as it changes.
+          accessibilityLiveRegion={handsfreeActive ? "polite" : "none"}
           style={({ pressed }) => [
             itemStyle,
             handsfreeSize,
