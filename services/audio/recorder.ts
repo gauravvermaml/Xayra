@@ -42,13 +42,6 @@ export type VoiceRecorder = {
   discardRecording: () => Promise<void>;
 };
 
-/**
- * Kept from the legacy path until the release acknowledgement's own drain
- * (micSession: every chunk up to the native lastSeq) has been validated on
- * the emulator; removed in Gate B step 5.
- */
-const STOP_DRAIN_MS = 200;
-
 /** Shown when a recording's audio may be missing a part (Gate B). */
 function warnIfIncomplete(audio: CapturedAudio | null): void {
   if (!audio || audio.complete) return;
@@ -294,8 +287,10 @@ export function useVoiceRecorder(): VoiceRecorder {
         // The capture was never told to stop: still recording.
         throw new MicBusyError("stopFailed");
       }
+      // No fixed wait: the tail of the recording is every chunk up to the
+      // native lastSeq, already drained by micSession (Gate B step 5 — this
+      // used to be a 200 ms guess).
       sessionIdRef.current = null;
-      await new Promise((resolve) => setTimeout(resolve, STOP_DRAIN_MS));
       isRecordingRef.current = false;
       setIsRecording(false);
       setAmplitude(0);

@@ -538,6 +538,25 @@ const scenarios: Record<string, Scenario> = {
   },
 };
 
+// Gate B: faults for the app's own recordings. Each only writes the fault
+// file (applied to every native session opened after it, in Xayra Test on
+// an emulator) and leaves it in place until FAULT_CLEAR.
+const appFaults: Record<string, Record<string, unknown> | null> = {
+  FAULT_DROP: { dropReleased: true },
+  FAULT_DELAY: { delayReleasedMs: 1500 },
+  FAULT_STUCK: { holdThreadMs: 9000 },
+  FAULT_FAILRELEASE: { failRelease: true },
+  FAULT_STOPFAIL: { failStopCount: 1 },
+  FAULT_CLEAR: null,
+};
+for (const [name, fault] of Object.entries(appFaults)) {
+  scenarios[name] = async (log) => {
+    await writeFault(fault);
+    log("result", { fault });
+    return true;
+  };
+}
+
 export const MIC_HARNESS_SCENARIOS = Object.keys(scenarios);
 
 export async function runMicHarness(name: string, log: Log): Promise<void> {
@@ -562,7 +581,8 @@ export async function runMicHarness(name: string, log: Log): Promise<void> {
   } catch (err) {
     log("threw", { message: err instanceof Error ? err.message : String(err), code: (err as { code?: string }).code ?? null });
   } finally {
-    await writeFault(null).catch(() => {});
+    // App-level faults stay until FAULT_CLEAR; scenario faults never do.
+    if (!name.startsWith("FAULT_")) await writeFault(null).catch(() => {});
   }
   log(passed ? "PASS" : "FAIL", { name, durationMs: Date.now() - startedAt });
 }
