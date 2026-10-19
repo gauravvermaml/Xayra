@@ -3,9 +3,7 @@ import { AppState, type AppStateStatus } from "react-native";
 import { Buffer } from "buffer";
 import { getRecordingPermissionsAsync, requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
-import AudioRecord from "@fugood/react-native-audio-pcm-stream";
-
-import { setMicInUse } from "./audioInputState";
+import { MicBusyError, openMicSession, stopMicSession } from "./micSession";
 import { pausePlayback } from "./player";
 import { stopSpeech } from "./tts";
 import { TrailingSilenceDetector } from "./silenceDetector";
@@ -218,7 +216,8 @@ export class ActiveModeManager {
   private stopped = true;
 
   private chunks: Buffer[] = [];
-  private subscription: { remove: () => void } | null = null;
+  /** The native microphone session of this engagement (micSession). */
+  private micSessionId: number | null = null;
   private silenceCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   // Speech / trailing-silence state for the current listen cycle — reset
@@ -301,8 +300,6 @@ export class ActiveModeManager {
     this.callbacks.onStateChange?.(next);
   }
 
-  private errorSubscription: { remove: () => void } | null = null;
-
   async start(): Promise<void> {
     if (!this.stopped) {
       return;
@@ -362,25 +359,33 @@ export class ActiveModeManager {
       await deactivateKeepAwake(KEEP_AWAKE_TAG);
       return;
     }
-    this.stopped = false;
-    this.session += 1;
-    setMicInUse(true);
 
     // The ONE native session for this entire Handsfree engagement — see
     // `capturing`'s own doc comment for why this is deliberately not
-    // repeated in `armListening()` anymore.
-    AudioRecord.init({ sampleRate: SAMPLE_RATE, channels: CHANNELS, bitsPerSample: BITS_PER_SAMPLE });
-    this.subscription?.remove();
-    this.subscription = AudioRecord.on("data", (base64Chunk: string) => this.handleAudioChunk(base64Chunk));
-    // Build 42 P1-5 fix — see recorder.ts's identical fix/doc comment.
-    // Requires the native patch adding this event; see
-    // patches/@fugood+react-native-audio-pcm-stream+1.1.4.patch.
-    this.errorSubscription?.remove();
-    this.errorSubscription = AudioRecord.on("error", (message: string) => {
-      console.error("[ActiveMode] Native recording error:", message);
-      this.callbacks.onError?.(new Error(`Native recording error: ${message}`));
-    });
-    AudioRecord.start();
+    // repeated in `armListening()` anymore. Through micSession (Gate B):
+    // the microphone is reported free only after its native release.
+    let id: number;
+    try {
+      id = await openMicSession(
+        "handsfree",
+        { sampleRate: SAMPLE_RATE, channels: CHANNELS, bitsPerSample: BITS_PER_SAMPLE },
+        {
+          onChunk: (base64Chunk) => this.handleAudioChunk(base64Chunk),
+          // Build 42 P1-5 fix — see recorder.ts's identical fix.
+          onError: (message) => {
+            console.error("[ActiveMode] Native recording error:", message);
+            this.callbacks.onError?.(new Error(`Native recording error: ${message}`));
+          },
+        },
+        { collect: false }
+      );
+    } catch (err) {
+      await deactivateKeepAwake(KEEP_AWAKE_TAG);
+      throw err;
+    }
+    this.micSessionId = id;
+    this.stopped = false;
+    this.session += 1;
 
     this.armListening();
   }
@@ -399,24 +404,21 @@ export class ActiveModeManager {
     // or not the native stop below succeeds.
     this.capturing = false;
     this.clearSilenceCheck();
-    try {
-      AudioRecord.stop();
-    } catch (err) {
-      // The native call never ran, so the capture loop is still running:
-      // the microphone is NOT reported free and the session stays open.
-      // Stage 5b correction — this used to be swallowed as "already
-      // stopped" and the microphone marked free regardless.
+    this.chunks = [];
+    const id = this.micSessionId;
+    const result = id !== null ? await stopMicSession(id, { discard: true }) : null;
+    if (result && result.kind !== "released") {
+      // Stop request failed (still capturing), or the native release is
+      // unconfirmed / failed: the microphone is NOT reported free and the
+      // session stays open, shown as a failed stop; the next stop() retries
+      // (Stage 5b, Gate B).
       this.stopFailedFlag = true;
-      throw err;
+      if (result.kind === "stopFailed") throw result.error;
+      throw new MicBusyError(result.kind);
     }
     this.stopFailedFlag = false;
     this.stopped = true;
-    this.subscription?.remove();
-    this.subscription = null;
-    this.errorSubscription?.remove();
-    this.errorSubscription = null;
-    this.chunks = [];
-    setMicInUse(false);
+    this.micSessionId = null;
     await deactivateKeepAwake(KEEP_AWAKE_TAG);
     this.setState("idle");
   }

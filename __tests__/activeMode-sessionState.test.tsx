@@ -9,19 +9,8 @@ import { act, create } from "react-test-renderer";
 import { AppState, type AppStateStatus } from "react-native";
 import { QUIET, SPEECH, feedAudio } from "./support/pcm";
 
-let mockEmitData: (base64: string) => void = () => {};
-jest.mock("@fugood/react-native-audio-pcm-stream", () => ({
-  __esModule: true,
-  default: {
-    init: jest.fn(),
-    start: jest.fn(),
-    stop: jest.fn(),
-    on: jest.fn((event: string, handler: (data: string) => void) => {
-      if (event === "data") mockEmitData = handler;
-      return { remove: jest.fn() };
-    }),
-  },
-}));
+// Gate B: the shared fake native module (legacy + session API). MOCK ONLY.
+jest.mock("@fugood/react-native-audio-pcm-stream", () => require("./support/fakeMicNative").fakeMicModule);
 jest.mock("expo-audio", () => ({
   requestRecordingPermissionsAsync: jest.fn(() => Promise.resolve({ granted: true })),
   setAudioModeAsync: jest.fn(() => Promise.resolve()),
@@ -43,11 +32,13 @@ jest.mock("../services/audio/tts", () => ({ stopSpeech: jest.fn(() => Promise.re
 jest.mock("../services/audio/wakeChime", () => ({ preloadWakeChime: jest.fn(), releaseWakeChime: jest.fn() }));
 
 import AudioRecord from "@fugood/react-native-audio-pcm-stream";
+import { fakeMic } from "./support/fakeMicNative";
+import { resetMicSessionForTests } from "../services/audio/micSession";
 import { ActiveModeManager, type ActiveModeState, type UseActiveMode, useActiveMode } from "../services/audio/activeMode";
 import { isMicInUse } from "../services/audio/audioInputState";
 
-const mockAudioRecord = AudioRecord as unknown as Record<"init" | "start" | "stop", jest.Mock>;
-const emit = (base64: string) => mockEmitData(base64);
+const mockAudioRecord = AudioRecord as unknown as Record<"initSession" | "startSession" | "stopSession", jest.Mock>;
+const emit = (base64: string) => fakeMic.emit(base64);
 
 async function flush() {
   for (let i = 0; i < 8; i++) await Promise.resolve();
@@ -83,6 +74,8 @@ async function speakOnce() {
 beforeEach(() => {
   jest.useFakeTimers();
   jest.clearAllMocks();
+  fakeMic.reset();
+  resetMicSessionForTests();
 });
 afterEach(() => {
   jest.useRealTimers();
@@ -113,7 +106,7 @@ describe("Stop ends the session in every phase", () => {
     await h.manager.stop();
     expect(h.manager.state).toBe("idle");
     expect(h.manager.isRunning).toBe(false);
-    expect(mockAudioRecord.stop).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.stopSession).toHaveBeenCalledTimes(1);
     expect(isMicInUse()).toBe(false);
   });
 
@@ -179,8 +172,8 @@ describe("starts and stops that overlap", () => {
   it("two starts at once open one microphone session", async () => {
     const h = heldManager();
     await Promise.all([h.manager.start(), h.manager.start()]);
-    expect(mockAudioRecord.init).toHaveBeenCalledTimes(1);
-    expect(mockAudioRecord.start).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.initSession).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.startSession).toHaveBeenCalledTimes(1);
     await h.manager.stop();
   });
 
@@ -191,8 +184,8 @@ describe("starts and stops that overlap", () => {
     expect(h.manager.isRunning).toBe(false);
     await h.manager.stop();
     await starting;
-    expect(mockAudioRecord.init).not.toHaveBeenCalled();
-    expect(mockAudioRecord.start).not.toHaveBeenCalled();
+    expect(mockAudioRecord.initSession).not.toHaveBeenCalled();
+    expect(mockAudioRecord.startSession).not.toHaveBeenCalled();
     expect(h.manager.isEngaged).toBe(false);
     expect(isMicInUse()).toBe(false);
   });
@@ -220,7 +213,7 @@ describe("useActiveMode mirrors the controller", () => {
       await Promise.all([first, second]);
     });
     expect(hf().isActive).toBe(false);
-    expect(mockAudioRecord.start).not.toHaveBeenCalled();
+    expect(mockAudioRecord.startSession).not.toHaveBeenCalled();
     expect(isMicInUse()).toBe(false);
     act(() => tree.unmount());
   });
@@ -287,7 +280,7 @@ describe("useActiveMode mirrors the controller", () => {
     });
     expect(hf().isStarting).toBe(false);
     expect(hf().isActive).toBe(false);
-    expect(mockAudioRecord.start).not.toHaveBeenCalled();
+    expect(mockAudioRecord.startSession).not.toHaveBeenCalled();
     act(() => tree.unmount());
   });
 
@@ -306,7 +299,7 @@ describe("useActiveMode mirrors the controller", () => {
     });
     expect(hf().isActive).toBe(true);
     expect(hf().state).toBe("listening");
-    expect(mockAudioRecord.start).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.startSession).toHaveBeenCalledTimes(1);
     act(() => tree.unmount());
   });
 
@@ -346,17 +339,17 @@ describe("useActiveMode mirrors the controller", () => {
 });
 
 describe("a native stop failure never reports the microphone free (mocked native module)", () => {
-  const failNextStop = () =>
-    mockAudioRecord.stop.mockImplementationOnce(() => {
-      throw new Error("native stop failed");
-    });
+  // The native stop request is rejected (fake native module).
+  const failNextStop = () => {
+    fakeMic.failStopCount = 1;
+  };
 
   it("controller: stays open and owning the mic, captures and re-arms nothing, and a retry stops it", async () => {
     const h = heldManager();
     await h.manager.start();
     await speakOnce();
     failNextStop();
-    await expect(h.manager.stop()).rejects.toThrow("native stop failed");
+    await expect(h.manager.stop()).rejects.toThrow("stopFailed");
     expect(h.manager.isRunning).toBe(true);
     expect(h.manager.stopFailed).toBe(true);
     expect(isMicInUse()).toBe(true);
@@ -415,7 +408,7 @@ describe("a native stop failure never reports the microphone free (mocked native
     await h.manager.stop().catch(() => {});
     expect(h.manager.isEngaged).toBe(true);
     await h.manager.start();
-    expect(mockAudioRecord.init).toHaveBeenCalledTimes(1);
+    expect(mockAudioRecord.initSession).toHaveBeenCalledTimes(1);
     await h.manager.stop();
     expect(isMicInUse()).toBe(false);
   });

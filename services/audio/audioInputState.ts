@@ -18,15 +18,9 @@
  */
 import { isMicSessionBusy } from "./micSession";
 
-let micInUse = false;
-
-/** Legacy capture path only (until it moves onto micSession). */
-export function setMicInUse(inUse: boolean): void {
-  micInUse = inUse;
-}
-
-/** Gate B: a capture session counts as in use until its native release is
- * confirmed (services/audio/micSession.ts). */
+/** Gate B: manual recording and Handsfree both capture through
+ * services/audio/micSession.ts, and a session counts as in use until its
+ * native release is confirmed. */
 export function isMicInUse(): boolean {
-  return micInUse || isMicSessionBusy();
+  return isMicSessionBusy();
 }

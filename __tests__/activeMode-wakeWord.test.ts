@@ -14,10 +14,8 @@ jest.mock("expo-keep-awake", () => ({
   activateKeepAwakeAsync: jest.fn(),
   deactivateKeepAwake: jest.fn(),
 }));
-jest.mock("@fugood/react-native-audio-pcm-stream", () => ({
-  __esModule: true,
-  default: { init: jest.fn(), start: jest.fn(), stop: jest.fn(), on: jest.fn() },
-}));
+// Gate B: the shared fake native module (legacy + session API). MOCK ONLY.
+jest.mock("@fugood/react-native-audio-pcm-stream", () => require("./support/fakeMicNative").fakeMicModule);
 jest.mock("expo-file-system/legacy", () => ({
   documentDirectory: "file:///fake-doc-dir/",
 }));
