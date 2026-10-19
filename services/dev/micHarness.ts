@@ -8,6 +8,7 @@ import AudioRecord, {
 import { ExpoSpeechRecognitionModule } from "expo-speech-recognition";
 
 import { isMicInUse } from "../audio/audioInputState";
+import { isConcurrentTier1Enabled, setConcurrentTier1ForXayraTest } from "../ai/tier1Config";
 import { BITS_PER_SAMPLE, CHANNELS, SAMPLE_RATE } from "../audio/wav";
 
 /**
@@ -166,6 +167,19 @@ function releaseSummary(id: number) {
 type Scenario = (log: Log) => Promise<boolean>;
 
 const scenarios: Record<string, Scenario> = {
+  // Gate B: switch concurrent Tier 1 (the on-device recognizer started
+  // beside each manual recording) for the on/off comparison.
+  TIER1_OFF: async (log) => {
+    const ok = await setConcurrentTier1ForXayraTest(false);
+    log("result", { concurrentTier1: isConcurrentTier1Enabled() });
+    return ok && !isConcurrentTier1Enabled();
+  },
+  TIER1_ON: async (log) => {
+    const ok = await setConcurrentTier1ForXayraTest(true);
+    log("result", { concurrentTier1: isConcurrentTier1Enabled() });
+    return ok && isConcurrentTier1Enabled();
+  },
+
   // A1: normal start/stop; the acknowledgement follows native cleanup
   // (the host correlates releasedAt with dumpsys audio's "rec stop").
   A1: async (log) => {
