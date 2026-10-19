@@ -25,6 +25,12 @@ const UNDO_WINDOW_MS = 3000;
 
 export type TodosOverlayProps = {
   onClose: () => void;
+  /** Android Back (Stage 5c): set to a handler that closes this overlay's
+   * topmost own sheet — add/edit, then the task preview, then the calendar's
+   * day preview — and returns true, or returns false when none is open (the
+   * caller then closes To-Dos itself). Native modals (the source note) get
+   * Back before this. */
+  backRef?: React.MutableRefObject<(() => boolean) | null>;
 };
 
 /**
@@ -55,8 +61,9 @@ export type TodosOverlayProps = {
  * app briefly used) is deliberately restored to plain local state for the
  * same reason — it's exactly as safe here as it already is on `/index`.
  */
-export function TodosOverlay({ onClose }: TodosOverlayProps) {
+export function TodosOverlay({ onClose, backRef }: TodosOverlayProps) {
   const insets = useSafeAreaInsets();
+  const calendarBackRef = useRef<(() => boolean) | null>(null);
   const {
     todos,
     allTodos,
@@ -233,6 +240,20 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
   // TaskPreviewSheet.tsx's own doc comment). The check/delete actions below
   // close the preview too, rather than leaving it open over a task that's
   // about to disappear or change state out from under it.
+  if (backRef) {
+    backRef.current = () => {
+      if (isAddVisible || editingTodo !== null) {
+        handleSheetClose();
+        return true;
+      }
+      if (previewTodo !== null) {
+        setPreviewTodo(null);
+        return true;
+      }
+      return calendarBackRef.current?.() ?? false;
+    };
+  }
+
   const handleOpenFromPreview = useCallback(
     (item: ToDo) => {
       setPreviewTodo(null);
@@ -374,6 +395,7 @@ export function TodosOverlay({ onClose }: TodosOverlayProps) {
         </View>
 
         <CalendarBody
+          backRef={calendarBackRef}
           mode={layoutMode}
           selectedDate={selectedDate}
           onSelectDate={setSelectedDate}

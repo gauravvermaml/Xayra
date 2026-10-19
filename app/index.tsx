@@ -31,6 +31,9 @@ import { ExpandedTextOverlay } from "../components/ExpandedTextOverlay";
 import { HandsfreeTypingStatus } from "../components/HandsfreeTypingStatus";
 import { HistorySheet, SHEET_HANDLE_HEIGHT, SHEET_SNAP_POINTS } from "../components/HistorySheet";
 import { HomeDock, type HandsfreeDisplayState } from "../components/HomeDock";
+import { settleExpandProgress } from "../components/SwipeableTrayHandle";
+import { useHardwareBack } from "../hooks/useHardwareBack";
+import { decideHomeBack, type HomeBackState } from "../utils/backNavigation";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { showToast } from "../components/Toast";
 import { TodosOverlay } from "../components/TodosOverlay";
@@ -118,6 +121,9 @@ const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 const CENTER_AREA_GAP_PX = 10;
 /** The "Tap to finish" hint sits this much closer to the status line. */
 const STATUS_HINT_OFFSET = -4;
+/** How long the compose field stays non-editable after To-Dos closes (see
+ * `isComposeCovered`). */
+const COMPOSE_UNCOVER_DELAY_MS = 400;
 
 /** Emblem zone limits (canvas row P): full size at the tray's rest stage,
  * the compact answer-ready size at 50%, and a floor below which it stops
@@ -501,6 +507,58 @@ export default function HomeScreen() {
   const [isTextBoxExpanded, setIsTextBoxExpanded] = useState(false);
   const expandProgress = useSharedValue(0);
   const handleExpandSettle = useCallback((expanded: boolean) => setIsTextBoxExpanded(expanded), []);
+
+  // ---- Android Back (Stage 5c) ---------------------------------------------
+  // The topmost thing open closes first; only a home screen with nothing
+  // open hands Back to Android (see utils/backNavigation.ts). The keyboard
+  // and native modals (NoteDetailModal) receive Back before this listener.
+  const todosBackRef = useRef<(() => boolean) | null>(null);
+  // The compose field stays non-editable while To-Dos covers it AND for a
+  // moment after To-Dos closes: a hardware Back takes the window out of
+  // touch mode, and as To-Dos' focused field unmounts Android moves focus
+  // to the next editable field — the compose field — which raised the tray
+  // into compose mode (seen on the emulator). By the time it's editable
+  // again that focus search is over. Touch never triggers it.
+  const [isComposeCovered, setIsComposeCovered] = useState(false);
+  useEffect(() => {
+    if (isTodosVisible) {
+      setIsComposeCovered(true);
+      return;
+    }
+    const timer = setTimeout(() => setIsComposeCovered(false), COMPOSE_UNCOVER_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [isTodosVisible]);
+  const backStateRef = useRef<HomeBackState>({
+    quickMenuOpen: false,
+    todosOpen: false,
+    fullScreenOpen: false,
+    composing: false,
+  });
+  backStateRef.current = {
+    quickMenuOpen: isQuickMenuOpen,
+    todosOpen: isTodosVisible,
+    fullScreenOpen: isTextBoxExpanded,
+    composing: isComposing,
+  };
+  useHardwareBack(() => {
+    switch (decideHomeBack(backStateRef.current)) {
+      case "close-quick-menu":
+        setIsQuickMenuOpen(false);
+        return true;
+      case "todos":
+        if (!todosBackRef.current?.()) setIsTodosVisible(false);
+        return true;
+      case "collapse-full-screen":
+        settleExpandProgress(expandProgress, false, handleExpandSettle);
+        return true;
+      case "end-composing":
+        // Blurs the field; the draft text is untouched.
+        Keyboard.dismiss();
+        return true;
+      case "system":
+        return false;
+    }
+  });
 
   // Shared spring physics for every snapToIndex call this sheet makes
   // (`@gorhom/bottom-sheet`'s own `animationConfigs` prop, applied uniformly
@@ -1931,6 +1989,7 @@ export default function HomeScreen() {
             placeholder={inputMode === "record" ? "Type your thoughts…" : "Search your thoughts…"}
             mode={inputMode}
             sheetIndex={sheetIndex}
+            covered={isComposeCovered}
           />
         }
         // Record mode shows the notes list (newest first); Ask mode keeps
@@ -2036,7 +2095,7 @@ export default function HomeScreen() {
           subtree too, freezing To-Dos completely). */}
       {isTodosVisible && (
         <Animated.View entering={todosOverlayPopIn} exiting={FadeOut.duration(150)} style={styles.todosOverlayWrap}>
-          <TodosOverlay onClose={() => setIsTodosVisible(false)} />
+          <TodosOverlay onClose={() => setIsTodosVisible(false)} backRef={todosBackRef} />
         </Animated.View>
       )}
 

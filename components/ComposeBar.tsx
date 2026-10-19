@@ -65,6 +65,12 @@ export type ComposeBarProps = {
   /** The tray's snap index. When it changes while the keyboard is open,
    * the field has moved, so the clearance is measured again. */
   sheetIndex?: number;
+  /** A full-screen overlay (To-Dos) covers the home screen: the field is not
+   * editable, so Android can't move focus into it from beneath — when the
+   * To-Dos add sheet's own field blurred as its keyboard closed on Back,
+   * focus jumped here (Stage 5c, seen on the emulator) and the tray rose
+   * into compose mode underneath. It can't be touched there anyway. */
+  covered?: boolean;
 };
 
 /**
@@ -138,6 +144,7 @@ export const ComposeBar = memo(function ComposeBar({
   placeholder,
   mode,
   sheetIndex,
+  covered = false,
 }: ComposeBarProps) {
   const canSubmit = inputText.trim().length > 0;
   // Focus ring only — presentation; focus handling itself is the parent's.
@@ -296,6 +303,7 @@ export const ComposeBar = memo(function ComposeBar({
             {"Ag\nAg"}
           </Text>
           <BottomSheetTextInput
+            editable={!covered}
             value={inputText}
             onChangeText={onInputChange}
             onFocus={handleFocus}

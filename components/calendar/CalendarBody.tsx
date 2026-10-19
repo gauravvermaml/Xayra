@@ -19,6 +19,9 @@ import { WeekLayout } from "./views/WeekLayout";
 import { WorkWeekLayout } from "./views/WorkWeekLayout";
 
 export type CalendarBodyProps = {
+  /** Android Back (Stage 5c): set to a handler that closes the open day
+   * preview and returns true, or returns false when none is open. */
+  backRef?: React.MutableRefObject<(() => boolean) | null>;
   mode: CalendarLayoutMode;
   selectedDate: string;
   onSelectDate: (date: string) => void;
@@ -91,6 +94,7 @@ export type CalendarBodyProps = {
  * of approximating them).
  */
 export function CalendarBody({
+  backRef,
   mode,
   selectedDate,
   onSelectDate,
@@ -139,6 +143,13 @@ export function CalendarBody({
   // shouldn't resurrect a sheet left open from a previous visit to this mode.
   const [dayPreviewDate, setDayPreviewDate] = useState<string | null>(null);
   useEffect(() => setDayPreviewDate(null), [mode]);
+  if (backRef) {
+    backRef.current = () => {
+      if (dayPreviewDate === null) return false;
+      setDayPreviewDate(null);
+      return true;
+    };
+  }
   const handleOpenDayPreview = useCallback(
     (date: string) => {
       onSelectDate(date);
