@@ -10,6 +10,7 @@ import AudioRecord from "@fugood/react-native-audio-pcm-stream";
 
 import { fakeMic } from "./support/fakeMicNative";
 import {
+  abandonMicAudio,
   FORCE_RELEASE_WAIT_MS,
   getMicSnapshot,
   isMicSessionBusy,
@@ -103,7 +104,7 @@ describe("micSession", () => {
     expect(AudioRecord.forceRelease).toHaveBeenCalledWith(id);
     expect(result.kind).toBe("releaseUnconfirmed");
     if (result.kind !== "releaseUnconfirmed") throw new Error();
-    expect(result.audio?.complete).toBe(false); // completeness unknown
+    expect(result.audio).toBeNull(); // nothing handed out while unconfirmed
     expect(getMicSnapshot().phase).toBe("releaseUnconfirmed");
     expect(isMicInUse()).toBe(true);
 
@@ -117,9 +118,65 @@ describe("micSession", () => {
 
     // The thread finally finishes: the periodic re-check sees it.
     fakeMic.stuck = false;
+    fakeMic.ackMode = "drop"; // only the status can tell
     fakeMic.releaseNow();
     await advance(UNCONFIRMED_POLL_MS + 100);
     expect(getMicSnapshot().phase).toBe("idle");
+    expect(isMicInUse()).toBe(false);
+  });
+
+  it("unconfirmed, then a delayed acknowledgement: the held audio is handed out complete, once", async () => {
+    fakeMic.ackMode = "manual";
+    fakeMic.stuck = true;
+    const id = await open();
+    [1, 2].forEach((n) => fakeMic.emit(chunk(n)));
+    const result = await settle(stopMicSession(id));
+    if (result.kind !== "releaseUnconfirmed") throw new Error(result.kind);
+    let final: Awaited<typeof result.eventual> | null = null;
+    void result.eventual.then((r) => (final = r));
+    await advance(1000);
+    expect(final).toBeNull(); // still waiting
+    fakeMic.stuck = false;
+    fakeMic.releaseNow(); // the late acknowledgement
+    await advance(100);
+    const settled = final as unknown as { kind: string; audio: { complete: boolean; chunks: Buffer[] } };
+    expect(settled.kind).toBe("released");
+    expect(settled.audio.complete).toBe(true);
+    expect(settled.audio.chunks.map((b) => b[0])).toEqual([1, 2]);
+    expect(isMicInUse()).toBe(false);
+  });
+
+  it("unconfirmed, then the release fails: no audio is handed out; the microphone stays busy", async () => {
+    fakeMic.ackMode = "manual";
+    fakeMic.stuck = true;
+    const id = await open();
+    fakeMic.emit(chunk(1));
+    const result = await settle(stopMicSession(id));
+    if (result.kind !== "releaseUnconfirmed") throw new Error(result.kind);
+    let final: { kind: string; audio: unknown } | null = null;
+    void result.eventual.then((r) => (final = r));
+    fakeMic.stuck = false;
+    fakeMic.releaseNow(false); // release threw
+    await advance(100);
+    expect(final).toEqual({ kind: "releaseFailed", audio: null });
+    expect(getMicSnapshot().phase).toBe("releaseFailed");
+    expect(isMicInUse()).toBe(true);
+  });
+
+  it("abandoned while unconfirmed: a later confirmation frees the microphone but hands out no audio", async () => {
+    fakeMic.ackMode = "manual";
+    fakeMic.stuck = true;
+    const id = await open();
+    fakeMic.emit(chunk(1));
+    const result = await settle(stopMicSession(id));
+    if (result.kind !== "releaseUnconfirmed") throw new Error(result.kind);
+    abandonMicAudio(id);
+    let final: { kind: string; audio: unknown } | null = null;
+    void result.eventual.then((r) => (final = r));
+    fakeMic.stuck = false;
+    fakeMic.releaseNow();
+    await advance(100);
+    expect(final).toEqual({ kind: "released", audio: null });
     expect(isMicInUse()).toBe(false);
   });
 
@@ -127,7 +184,7 @@ describe("micSession", () => {
     fakeMic.failRelease = true;
     const id = await open();
     const result = await settle(stopMicSession(id));
-    expect(result.kind).toBe("releaseFailed");
+    expect(result).toEqual({ kind: "releaseFailed", audio: null }); // never processed
     expect(getMicSnapshot().phase).toBe("releaseFailed");
     await expect(open()).rejects.toBeInstanceOf(MicBusyError);
     await advance(UNCONFIRMED_POLL_MS * 2);

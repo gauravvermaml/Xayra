@@ -109,8 +109,15 @@ export type StopResult =
   | { kind: "released"; audio: CapturedAudio | null }
   /** The stop request failed; the session is still capturing. */
   | { kind: "stopFailed"; error: unknown }
-  | { kind: "releaseUnconfirmed"; audio: CapturedAudio | null }
-  | { kind: "releaseFailed"; audio: CapturedAudio | null };
+  /** Capture stopped, but the native release isn't confirmed yet. No audio
+   * is handed out meanwhile (it is held in memory, never written); `eventual`
+   * settles once the native side confirms — "released" with the audio and
+   * its completeness, or "releaseFailed" without it. */
+  | { kind: "releaseUnconfirmed"; audio: null; eventual: Promise<FinalStopResult> }
+  /** The native release threw: no audio is handed out. */
+  | { kind: "releaseFailed"; audio: null };
+
+export type FinalStopResult = Extract<StopResult, { kind: "released" } | { kind: "releaseFailed" }>;
 
 type Tracked = {
   id: number;
@@ -130,6 +137,10 @@ type Tracked = {
   stopRequested: boolean;
   /** The native stop request in flight: concurrent stops join it. */
   stopRequest: Promise<unknown> | null;
+  /** The audio isn't wanted (Cancel, or abandoned while unconfirmed). */
+  discard: boolean;
+  /** Waiting for an unconfirmed release to settle. */
+  settleWaiters: Array<(result: FinalStopResult) => void>;
 };
 
 let phase: MicPhase = "idle";
@@ -188,6 +199,7 @@ function ensureSubscribed(): void {
     }
     if (!t.release) t.release = e;
     t.waiters.splice(0).forEach((resolve) => resolve());
+    if (phase === "releaseUnconfirmed") void settleLater(t, e.ok === false ? "releaseFailed" : "released");
   });
   AudioRecord.onSession("sessionError", (e) => {
     const t = current;
@@ -261,6 +273,25 @@ function stopPolling(): void {
   }
 }
 
+/** An unconfirmed release finally answered: hand the held audio (now with
+ * a known lastSeq) to whoever is waiting, or drop it if release failed. */
+async function settleLater(t: Tracked, outcome: "released" | "releaseFailed"): Promise<void> {
+  if (current !== t || getPhase() !== "releaseUnconfirmed") return;
+  stopPolling();
+  let result: FinalStopResult;
+  if (outcome === "released") {
+    const audio = t.collect && !t.discard && !t.finalized ? await drain(t) : null;
+    finishReleased(t);
+    result = { kind: "released", audio };
+  } else {
+    t.finalized = true;
+    t.chunks.clear();
+    setPhase("releaseFailed");
+    result = { kind: "releaseFailed", audio: null };
+  }
+  t.settleWaiters.splice(0).forEach((resolve) => resolve(result));
+}
+
 /** While unconfirmed: keep asking the native side until it answers. */
 function startPolling(t: Tracked): void {
   stopPolling();
@@ -269,8 +300,7 @@ function startPolling(t: Tracked): void {
     if (current !== t || getPhase() !== "releaseUnconfirmed") return;
     const outcome = t.release ? (t.release.ok ? "released" : "releaseFailed") : terminalFromStatus(t, await nativeStatus(t.id));
     if (current !== t || getPhase() !== "releaseUnconfirmed") return;
-    if (outcome === "released") finishReleased(t);
-    else if (outcome === "releaseFailed") setPhase("releaseFailed");
+    if (outcome) await settleLater(t, outcome);
     else startPolling(t);
   }, UNCONFIRMED_POLL_MS);
 }
@@ -359,6 +389,8 @@ async function adoptOrphan(): Promise<void> {
     confirming: null,
     stopRequested: true,
     stopRequest: null,
+    discard: true,
+    settleWaiters: [],
   };
   current = t;
   setPhase("releasing");
@@ -426,6 +458,8 @@ export async function openMicSession(
     confirming: null,
     stopRequested: false,
     stopRequest: null,
+    discard: false,
+    settleWaiters: [],
   };
   current = t;
   openingOwner = null;
@@ -480,22 +514,42 @@ async function stop(id: number, discard = false): Promise<StopResult> {
   } else if (phase === "releaseUnconfirmed") {
     await retryMicRelease();
   }
-  const now = getPhase();
-  const outcome = now === "releaseUnconfirmed" || now === "releaseFailed" ? now : await confirmRelease(t);
-  const audio = t.collect && !discard && !t.finalized ? await drain(t) : null;
   if (discard) {
+    t.discard = true;
     t.finalized = true;
     t.chunks.clear();
   }
+  const now = getPhase();
+  const outcome = now === "releaseUnconfirmed" || now === "releaseFailed" ? now : await confirmRelease(t);
   if (outcome === "released") {
+    const audio = t.collect && !t.discard && !t.finalized ? await drain(t) : null;
     if (current === t) finishReleased(t);
     return { kind: "released", audio };
   }
-  if (current === t) {
-    setPhase(outcome);
-    if (outcome === "releaseUnconfirmed") startPolling(t);
+  if (outcome === "releaseFailed") {
+    // Never processed: the recorder's state is unknown.
+    t.finalized = true;
+    t.chunks.clear();
+    if (current === t) setPhase("releaseFailed");
+    return { kind: "releaseFailed", audio: null };
   }
-  return { kind: outcome, audio };
+  // Unconfirmed: hold the audio (in memory) until the native side answers.
+  const eventual = new Promise<FinalStopResult>((resolve) => t.settleWaiters.push(resolve));
+  if (current === t) {
+    setPhase("releaseUnconfirmed");
+    startPolling(t);
+  }
+  return { kind: "releaseUnconfirmed", audio: null, eventual };
+}
+
+/** Drops audio held for session `id` while its release is unconfirmed (the
+ * caller gave up waiting). The microphone stays busy until confirmed. */
+export function abandonMicAudio(id: number): void {
+  const t = current;
+  if (!t || t.id !== id) return;
+  t.discard = true;
+  t.finalized = true;
+  t.chunks.clear();
 }
 
 /** The user's retry while unconfirmed: force, then ask again. A failed
@@ -511,14 +565,15 @@ export async function retryMicRelease(): Promise<MicPhase> {
   }
   if (!(await waitForRelease(t, FORCE_RELEASE_WAIT_MS))) {
     const outcome = terminalFromStatus(t, await nativeStatus(t.id));
-    if (outcome === "released") finishReleased(t);
-    else if (outcome === "releaseFailed") setPhase("releaseFailed");
+    if (outcome) await settleLater(t, outcome);
     else startPolling(t);
-    return phase;
+    return getPhase();
   }
-  if (t.release?.ok === false) setPhase("releaseFailed");
-  else finishReleased(t);
-  return phase;
+  // The acknowledgement handler may already have settled it.
+  if (current === t && getPhase() === "releaseUnconfirmed") {
+    await settleLater(t, t.release?.ok === false ? "releaseFailed" : "released");
+  }
+  return getPhase();
 }
 
 /** Tests only: forget all state (the native fake is reset separately). */

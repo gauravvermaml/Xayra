@@ -121,20 +121,71 @@ describe("manual recording on micSession", () => {
     expect(incompleteAlerts()).toHaveLength(1);
   });
 
-  it("release never confirmed: the captured audio is kept (with a warning), the microphone stays busy and nothing opens", async () => {
+  it("release unconfirmed, then confirmed within the wait: processed only after confirmation, audio complete", async () => {
+    fakeMic.ackMode = "manual";
+    fakeMic.stuck = true;
+    const { recorder } = await mount();
+    [1, 2].forEach((n) => fakeMic.emit(chunk(n)));
+    let uri: string | null | undefined;
+    void recorder().stopRecording().then((u) => (uri = u));
+    // Past the forced-stop checks: unconfirmed. Nothing written or processed.
+    for (let i = 0; i < 160; i++) {
+      await act(async () => {
+        jest.advanceTimersByTime(25);
+        await flush();
+      });
+    }
+    expect(getMicSnapshot().phase).toBe("releaseUnconfirmed");
+    expect(recorder().isRecording).toBe(false); // capture stopped
+    expect(mockWrite).not.toHaveBeenCalled();
+    expect(uri).toBeUndefined();
+    // The native side finally confirms.
+    fakeMic.stuck = false;
+    fakeMic.releaseNow();
+    for (let i = 0; i < 20 && uri === undefined; i++) {
+      await act(async () => {
+        jest.advanceTimersByTime(25);
+        await flush();
+      });
+    }
+    expect(uri).toBe("file:///fake-cache/recordings/note-1.wav");
+    expect(writtenChunks()).toEqual([1, 2]);
+    expect(incompleteAlerts()).toHaveLength(0);
+    expect(isMicInUse()).toBe(false);
+  });
+
+  it("release fails permanently: nothing processed, no audio file, a clear failure; the microphone stays busy", async () => {
+    fakeMic.failRelease = true;
+    const { recorder } = await mount();
+    fakeMic.emit(chunk(1));
+    const uri = await drive(recorder().stopRecording());
+    expect(uri).toBeNull();
+    expect(mockWrite).not.toHaveBeenCalled();
+    expect(alertSpy.mock.calls.filter((c) => c[0] === "Recording Not Saved")).toHaveLength(1);
+    expect(getMicSnapshot().phase).toBe("releaseFailed");
+    expect(isMicInUse()).toBe(true);
+    await expect(drive(recorder().startRecording())).rejects.toBeInstanceOf(MicBusyError);
+    expect(fakeMic.owner?.id).toBe(1); // no second native session
+  });
+
+  it("acknowledgement delayed past the wait: given up (not processed, held audio dropped); busy until native confirms; no late processing", async () => {
     fakeMic.ackMode = "manual";
     fakeMic.stuck = true;
     const { recorder } = await mount();
     fakeMic.emit(chunk(1));
-    const uri = await drive(recorder().stopRecording());
-    expect(uri).not.toBeNull();
-    expect(writtenChunks()).toEqual([1]);
-    expect(incompleteAlerts()).toHaveLength(1);
-    expect(recorder().isRecording).toBe(false);
-    expect(getMicSnapshot().phase).toBe("releaseUnconfirmed");
+    const uri = await drive(recorder().stopRecording(), 40000);
+    expect(uri).toBeNull();
+    expect(mockWrite).not.toHaveBeenCalled();
+    expect(alertSpy.mock.calls.filter((c) => c[0] === "Recording Not Saved")).toHaveLength(1);
     expect(isMicInUse()).toBe(true);
-    await expect(drive(recorder().startRecording())).rejects.toBeInstanceOf(MicBusyError);
-    expect(fakeMic.owner?.id).toBe(1); // no second native session
+    // Confirmed much later: the microphone frees; the recording stays unprocessed.
+    fakeMic.stuck = false;
+    fakeMic.releaseNow();
+    await act(async () => {
+      await flush();
+    });
+    expect(isMicInUse()).toBe(false);
+    expect(mockWrite).not.toHaveBeenCalled();
   });
 
   it("a failed stop request: still recording, mic busy; the next tap to record closes it first", async () => {

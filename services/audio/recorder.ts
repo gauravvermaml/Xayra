@@ -3,7 +3,15 @@ import { Alert, AppState, type AppStateStatus } from "react-native";
 import { Buffer } from "buffer";
 import { getRecordingPermissionsAsync, requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
 import { logDuration, nowMs } from "../ai/perf";
-import { getMicSnapshot, MicBusyError, openMicSession, stopMicSession, type CapturedAudio } from "./micSession";
+import {
+  abandonMicAudio,
+  getMicSnapshot,
+  MicBusyError,
+  openMicSession,
+  stopMicSession,
+  type CapturedAudio,
+  type FinalStopResult,
+} from "./micSession";
 import { pausePlayback } from "./player";
 import { TrailingSilenceDetector } from "./silenceDetector";
 import { stopSpeech } from "./tts";
@@ -41,6 +49,13 @@ export type VoiceRecorder = {
    * is recording or a stop is in flight. */
   discardRecording: () => Promise<void>;
 };
+
+/**
+ * How long a finished recording waits for the microphone's native release to
+ * be confirmed before it is given up (micSession re-checks every 5 s). Until
+ * then nothing is transcribed, saved or asked.
+ */
+const RELEASE_CONFIRM_WAIT_MS = 20000;
 
 /** Shown when a recording's audio may be missing a part (Gate B). */
 function warnIfIncomplete(audio: CapturedAudio | null): void {
@@ -282,23 +297,47 @@ export function useVoiceRecorder(): VoiceRecorder {
       const id = sessionIdRef.current;
       // Resolves once the native release is confirmed (or reports why it
       // couldn't be): the audio comes back complete, or marked incomplete.
-      const result = id !== null ? await stopMicSession(id) : null;
-      if (result?.kind === "stopFailed") {
+      const stopped = id !== null ? await stopMicSession(id) : null;
+      if (stopped?.kind === "stopFailed") {
         // The capture was never told to stop: still recording.
         throw new MicBusyError("stopFailed");
       }
-      // No fixed wait: the tail of the recording is every chunk up to the
-      // native lastSeq, already drained by micSession (Gate B step 5 — this
-      // used to be a 200 ms guess).
+      // Capture has stopped. No fixed wait: the tail of the recording is
+      // every chunk up to the native lastSeq, drained by micSession once the
+      // release is confirmed (Gate B step 5 — this used to be a 200 ms guess).
       sessionIdRef.current = null;
       isRecordingRef.current = false;
       setIsRecording(false);
       setAmplitude(0);
 
+      // Release not confirmed yet: nothing is transcribed, saved or asked
+      // until it is. The audio waits in memory only (micSession).
+      let result: FinalStopResult | null =
+        stopped?.kind === "releaseUnconfirmed" ? null : (stopped as FinalStopResult | null);
+      if (stopped?.kind === "releaseUnconfirmed" && id !== null) {
+        result = await Promise.race([
+          stopped.eventual,
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), RELEASE_CONFIRM_WAIT_MS)),
+        ]);
+        if (!result) abandonMicAudio(id);
+      }
+      if (stopped && (!result || result.kind !== "released")) {
+        // Never confirmed, or the release failed: this recording is not
+        // processed (its in-memory audio is dropped) and the microphone
+        // stays marked busy until the native side answers.
+        Alert.alert(
+          "Recording Not Saved",
+          result?.kind === "releaseFailed"
+            ? "Xayra couldn’t close the microphone, so this recording wasn’t processed. Close and reopen Xayra."
+            : "The microphone didn’t close in time, so this recording wasn’t processed. Please try again in a moment."
+        );
+        return null;
+      }
+
       const finalizeStart = nowMs();
       // Missing parts are left out of the WAV but never hidden: an
-      // incomplete recording is still processed (what was captured is the
-      // user's words), with a warning.
+      // incomplete recording (release confirmed, some chunks lost) is still
+      // processed — what was captured is the user's words — with a warning.
       const audio = result ? result.audio : null;
       const chunks = audio?.chunks ?? [];
 
