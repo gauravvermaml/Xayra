@@ -52,9 +52,14 @@ export function CancelProcessingButton({
     >
       {({ pressed }) => (
         <Animated.View
-          style={[styles.button, tone === "filled" && styles.buttonFilled, pressed && styles.buttonPressed, animatedStyle]}
+          style={[
+            styles.button,
+            tone === "filled" && styles.buttonFilled,
+            pressed && (tone === "filled" ? styles.buttonFilledPressed : styles.buttonPressed),
+            animatedStyle,
+          ]}
         >
-          <Text style={styles.text}>{label}</Text>
+          <Text style={[styles.text, tone === "filled" && styles.textFilled]}>{label}</Text>
         </Animated.View>
       )}
     </Pressable>
@@ -74,9 +79,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  /** The primary of a Finish / Cancel pair (Stage 5d): solid lilac with
+   * dark text, so it reads as the main action next to the outline Cancel
+   * (the earlier 13% lilac tint was too close to it). */
   buttonFilled: {
-    backgroundColor: xayraColors.lilacSoft,
-    borderColor: xayraColors.lilacRing,
+    backgroundColor: xayraColors.lilac,
+    borderColor: xayraColors.lilac,
+  },
+  buttonFilledPressed: {
+    backgroundColor: xayraColors.lilacText,
+  },
+  textFilled: {
+    color: xayraColors.surface,
+    fontWeight: "600",
   },
   buttonPressed: {
     backgroundColor: xayraColors.line,

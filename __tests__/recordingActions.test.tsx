@@ -14,7 +14,9 @@ jest.mock("expo-haptics", () => ({
 jest.mock("react-native-worklets", () => require("react-native-worklets/src/mock"));
 jest.mock("react-native-reanimated", () => require("react-native-reanimated/mock"));
 
+import { StyleSheet, Text } from "react-native";
 import { RecordingActions } from "../components/RecordingActions";
+import { xayraColors } from "../constants/xayraTheme";
 import { ManualUtteranceController, recordingActionsFor } from "../services/audio/manualUtterance";
 
 const mounted: ReactTestRenderer[] = [];
@@ -89,6 +91,22 @@ describe("RecordingActions", () => {
     }
     const texts = tree.root.findAll((n) => typeof n.props.children === "string").map((n) => n.props.children);
     expect(texts).toEqual(expect.arrayContaining(["Finish", "Cancel"]));
+  });
+
+  it("Finish is the solid lilac primary with dark text; Cancel stays the outline secondary (Stage 5d)", async () => {
+    const tree = await render({ mode: "record", showFinish: true, onFinish: jest.fn(), onCancel: jest.fn() });
+    const surfaceOf = (id: string) => {
+      const button = pressable(tree, id);
+      const pill = button.findAll((n) => n.props.style && StyleSheet.flatten(n.props.style)?.minHeight === 40)[0];
+      const label = button.findAll((n) => n.type === Text && typeof n.props.children === "string")[0];
+      return { pill: StyleSheet.flatten(pill.props.style), label: StyleSheet.flatten(label.props.style) };
+    };
+    const finish = surfaceOf("finish-recording");
+    const cancel = surfaceOf("cancel-recording");
+    expect(finish.pill.backgroundColor).toBe(xayraColors.lilac);
+    expect(finish.label.color).toBe(xayraColors.surface);
+    expect(cancel.pill.backgroundColor).toBeUndefined();
+    expect(cancel.label.color).toBe(xayraColors.text);
   });
 
   it("Ask wording for an Ask recording", async () => {
