@@ -151,3 +151,28 @@ describe("Tier 1 recognizer lifecycle", () => {
     expect(native.abort).not.toHaveBeenCalled();
   });
 });
+
+describe("recognizers left behind by a recording that never asked for them", () => {
+  it("one that already ended doesn't block the next recording's Tier 1, and its transcript is never reused", async () => {
+    router.startListening();
+    emit("result", { results: [{ transcript: "stale" }] });
+    emit("end"); // ended on its own; its recording never called transcribe or cancel
+    router.startListening();
+    expect(native.start).toHaveBeenCalledTimes(2);
+    const p = router.transcribe("file:///x.wav");
+    await flush();
+    emit("end");
+    expect(await drive(p)).toEqual({ transcript: "from whisper", tier: "whisper", whisperModelId: "base" });
+  });
+
+  it("one still listening is aborted (bounded) at the next start, and that recording skips Tier 1", async () => {
+    router.startListening(); // orphan: its recording ended without transcribe/cancel
+    router.startListening();
+    expect(native.abort).toHaveBeenCalledTimes(1);
+    expect(native.start).toHaveBeenCalledTimes(1);
+    emit("end"); // the orphan ends
+    await flush();
+    router.startListening();
+    expect(native.start).toHaveBeenCalledTimes(2);
+  });
+});

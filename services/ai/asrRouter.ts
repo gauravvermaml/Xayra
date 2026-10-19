@@ -114,6 +114,8 @@ function ensureSubscribed(): void {
   ExpoSpeechRecognitionModule.addListener("end", () => {
     if (current && !current.ended) {
       current.finish();
+      // Nobody will ask a cancelled session for its transcript.
+      if (!current.useTranscript) current = null;
       return;
     }
     // Nobody waiting: a late "end" from a recognizer we stopped waiting for.
@@ -169,6 +171,18 @@ export function startListening(): void {
   if (!checkNativeTierAvailable()) return;
   if (!isConcurrentTier1Enabled()) {
     devTiming("ASRRouter", "tier1 skipped", { reason: "disabled" });
+    return;
+  }
+  // A session whose recording ended without asking for its transcript (or
+  // cancelling it): already ended → just forget it; still listening →
+  // abort it (bounded) and skip Tier 1 this once.
+  if (current && current.ended) {
+    current = null;
+  } else if (current && current.useTranscript) {
+    const orphan = current;
+    orphan.useTranscript = false;
+    void terminate(orphan, "abort");
+    devTiming("ASRRouter", "tier1 skipped", { reason: "orphaned previous aborted" });
     return;
   }
   if (current || recognizerUnconfirmed) {

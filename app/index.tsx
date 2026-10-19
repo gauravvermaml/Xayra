@@ -1302,6 +1302,9 @@ export default function HomeScreen() {
         });
       },
       onCaptureDiscarded: () => {
+        // Nothing to transcribe: the recognizer started alongside this
+        // recording has no use either (Gate B — it used to be left running).
+        asrRouter.cancelListening();
         const reservation = pendingVoiceAskRef.current;
         pendingVoiceAskRef.current = null;
         if (reservation) discardVoiceAsk(reservation);
