@@ -30,7 +30,7 @@ import { ComposeBar } from "../components/ComposeBar";
 import { ExpandedTextOverlay } from "../components/ExpandedTextOverlay";
 import { HandsfreeTypingStatus } from "../components/HandsfreeTypingStatus";
 import { HistorySheet, SHEET_HANDLE_HEIGHT, SHEET_SNAP_POINTS } from "../components/HistorySheet";
-import { HomeDock } from "../components/HomeDock";
+import { HomeDock, type HandsfreeDisplayState } from "../components/HomeDock";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { showToast } from "../components/Toast";
 import { TodosOverlay } from "../components/TodosOverlay";
@@ -74,7 +74,8 @@ import {
   type UtteranceMode,
 } from "../services/audio/manualUtterance";
 import { useVoiceRecorder } from "../services/audio/recorder";
-import { speakTextAndWait } from "../services/audio/tts";
+import { speakTextAndWait, stopSpeech } from "../services/audio/tts";
+import { interruptHandsfreeWork, mayHandsfreeSpeak } from "../services/audio/handsfreeInterrupt";
 import { playWakeChime } from "../services/audio/wakeChime";
 import { cleanupOrphanRecordings } from "../services/audio/recordingCleanup";
 import { isAudioTooShort } from "../services/audio/wav";
@@ -852,6 +853,10 @@ export default function HomeScreen() {
   }, []);
 
   const currentJobRef = useRef<ProcessingJob | null>(null);
+  // The job of the Handsfree utterance in flight (never a manual one), and
+  // the Handsfree jobs the user has explicitly stopped.
+  const handsfreeJobRef = useRef<ProcessingJob | null>(null);
+  const interruptedHandsfreeJobsRef = useRef(new WeakSet<ProcessingJob>());
   const [cancellableJobId, setCancellableJobId] = useState<number | null>(null);
   const beginJob = useCallback(() => {
     const job = new ProcessingJob();
@@ -908,6 +913,7 @@ export default function HomeScreen() {
         // early.
         job = beginJob();
         const thisJob = job;
+        if (options?.isHandsfree) handsfreeJobRef.current = thisJob;
         // A cancelled utterance releases its manual-utterance slot at once
         // (the mic is already closed by now), so the central button works
         // again without waiting for Whisper/RAG to unwind.
@@ -1011,6 +1017,11 @@ export default function HomeScreen() {
 
         // "speaking" is reported only when something is actually about to be
         // spoken — Handsfree's status must never say "speaking" in silence.
+        // Nothing is spoken for a Handsfree utterance the user stopped — not
+        // even "Saved." for a note whose write had already committed.
+        if (options?.isHandsfree && !mayHandsfreeSpeak(thisJob, interruptedHandsfreeJobsRef.current)) {
+          return;
+        }
         if (intent === "RECORD") {
           // Spoken only when a note was really written (it used to be said
           // even when the recording was discarded as empty/silent).
@@ -1057,6 +1068,7 @@ export default function HomeScreen() {
         if (!job || currentJobRef.current === job) {
           setPipelineStage(mode === "record" ? "note" : "chat", null);
         }
+        if (job && handsfreeJobRef.current === job) handsfreeJobRef.current = null;
         if (job) endJob(job);
         else {
           setProcessingState("idle");
@@ -1468,7 +1480,40 @@ export default function HomeScreen() {
     return clearHandsfreeTimeout;
   }, [activeMode.isActive, armHandsfreeTimeout, clearHandsfreeTimeout]);
 
+  // Explicit Stop (dock, typing strip, long-press) stops the Handsfree
+  // interaction in progress, not just the listening (Stage 5b correction):
+  // the Handsfree-owned job is cancelled where it still can be — never a
+  // manual one — speech it started stops, and nothing more is spoken for
+  // it. A note whose write already committed stays saved; an answer already
+  // in the history stays there.
+  const interruptHandsfree = useCallback(() => {
+    interruptHandsfreeWork({
+      handsfreeJob: handsfreeJobRef.current,
+      interrupted: interruptedHandsfreeJobsRef.current,
+      isSpeaking: activeMode.state === "speaking",
+      stopSpeech: () => void stopSpeech(),
+      onCancelled: (job) => {
+        if (currentJobRef.current !== job) return;
+        currentJobRef.current = null;
+        setCancellableJobId(null);
+        setProcessingState("idle");
+        setProcessingLabel(null);
+      },
+    });
+  }, [activeMode.state]);
+
+  const stopHandsfreeExplicitly = useCallback(() => {
+    interruptHandsfree();
+    void activeMode.stop().then((stopped) => {
+      if (!stopped) showToast("Couldn’t stop the microphone. Tap Handsfree to try again.");
+    });
+  }, [activeMode, interruptHandsfree]);
+
   const handleToggleHandsfree = useCallback(() => {
+    if (activeMode.isActive || activeMode.isStarting) {
+      stopHandsfreeExplicitly();
+      return;
+    }
     // The other half of the mutual-exclusion fix above: refuse to engage
     // Handsfree (and steal the one native capture session) while a manual
     // recording is already using it. Only guards the *engage* direction —
@@ -1480,7 +1525,7 @@ export default function HomeScreen() {
     void activeMode.toggle().catch((err) => {
       Alert.alert("Handsfree Error", userFacingMessage(err, "Something went wrong. Try again."));
     });
-  }, [activeMode, recorder.isRecording, recorder.isTransitioning]);
+  }, [activeMode, recorder.isRecording, recorder.isTransitioning, stopHandsfreeExplicitly]);
 
   const handleLongPressCenterButton = handleToggleHandsfree;
 
@@ -1499,7 +1544,7 @@ export default function HomeScreen() {
     ? "recording"
     : processingState === "processing"
       ? "transcribing"
-      : activeMode.isActive && activeMode.state === "listening"
+      : activeMode.isActive && activeMode.state === "listening" && !activeMode.stopFailed
         ? "listening"
         : "idle";
 
@@ -1620,9 +1665,12 @@ export default function HomeScreen() {
         : "Tap to record. Long-press for Handsfree";
 
   // Stop from the typing status: the existing controller's own stop.
-  const handleStopHandsfree = useCallback(() => {
-    void activeMode.stop();
-  }, [activeMode]);
+  const handleStopHandsfree = stopHandsfreeExplicitly;
+  const handsfreeDisplayState: HandsfreeDisplayState = activeMode.isStarting
+    ? "starting"
+    : activeMode.stopFailed
+      ? "stopFailed"
+      : activeMode.state;
 
   // The dock element, memoised so it's only re-created when what it shows
   // changes (HistorySheet hands it to the sheet's footer).
@@ -1632,7 +1680,7 @@ export default function HomeScreen() {
       <HomeDock
         ref={quickMenuButtonRef}
         handsfreeActive={activeMode.isActive || activeMode.isStarting}
-        handsfreeState={activeMode.isStarting ? "starting" : activeMode.state}
+        handsfreeState={handsfreeDisplayState}
         pendingCount={pendingCount}
         bottomInset={insets.bottom}
         onHandsfree={handleToggleHandsfree}
@@ -1844,7 +1892,7 @@ export default function HomeScreen() {
               at 50%); an active Handsfree session stays visible here — real
               state and a working Stop. */}
           {activeMode.isActive && (isTyping || (dockYieldsAtHalf && sheetIndex === 1)) && (
-            <HandsfreeTypingStatus state={activeMode.state} onStop={handleStopHandsfree} />
+            <HandsfreeTypingStatus state={handsfreeDisplayState} onStop={handleStopHandsfree} />
           )}
           <SegmentedControl
             segments={MODE_SEGMENTS}

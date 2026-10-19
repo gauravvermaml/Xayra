@@ -7,11 +7,14 @@ import type { ActiveModeState } from "../services/audio/activeMode";
 
 /** Spoken/visible Handsfree states. `idle` never shows while active. */
 /** What the dock and typing strip show: the controller's state, plus
- * "starting" while a start is opening the microphone. */
-export type HandsfreeDisplayState = ActiveModeState | "starting";
+ * "starting" while a start is opening the microphone and "stopFailed" when
+ * a stop couldn't tell the microphone to stop (it may still be capturing;
+ * Handsfree stays on and the next tap retries). */
+export type HandsfreeDisplayState = ActiveModeState | "starting" | "stopFailed";
 
 export const HANDSFREE_STATE_LABEL: Record<HandsfreeDisplayState, string> = {
   starting: "starting",
+  stopFailed: "stop failed",
   idle: "on",
   listening: "listening",
   processing: "processing",
@@ -96,7 +99,13 @@ export const HomeDock = forwardRef<View, HomeDockProps>(function HomeDock(
           onPress={onHandsfree}
           accessibilityRole="switch"
           accessibilityLabel={handsfreeActive ? `Handsfree, ${HANDSFREE_STATE_LABEL[handsfreeState]}` : "Handsfree"}
-          accessibilityHint={handsfreeActive ? "Turns Handsfree off" : "Turns Handsfree on"}
+          accessibilityHint={
+            !handsfreeActive
+              ? "Turns Handsfree on"
+              : handsfreeState === "stopFailed"
+                ? "The microphone may still be on. Tries stopping Handsfree again"
+                : "Turns Handsfree off"
+          }
           accessibilityState={{ checked: handsfreeActive }}
           // Listening → processing → speaking is announced as it changes.
           accessibilityLiveRegion={handsfreeActive ? "polite" : "none"}

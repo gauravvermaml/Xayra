@@ -286,6 +286,16 @@ export class ActiveModeManager {
   /** Stop was requested while the start was still opening the microphone. */
   private stopRequestedDuringStart = false;
 
+  /** The last stop's native call threw, so the capture loop was never told
+   * to stop and the microphone may still be capturing. The session stays
+   * open (Handsfree still owns the microphone; nothing else may take it),
+   * nothing is captured or re-armed, and the next stop() retries. */
+  private stopFailedFlag = false;
+
+  get stopFailed(): boolean {
+    return this.stopFailedFlag;
+  }
+
   private setState(next: ActiveModeState): void {
     this._state = next;
     this.callbacks.onStateChange?.(next);
@@ -385,14 +395,22 @@ export class ActiveModeManager {
     if (this.stopped) {
       return;
     }
-    this.stopped = true;
+    // Nothing more is captured, handed off or re-armed from here, whether
+    // or not the native stop below succeeds.
     this.capturing = false;
     this.clearSilenceCheck();
     try {
       AudioRecord.stop();
-    } catch {
-      // Already stopped — fine.
+    } catch (err) {
+      // The native call never ran, so the capture loop is still running:
+      // the microphone is NOT reported free and the session stays open.
+      // Stage 5b correction — this used to be swallowed as "already
+      // stopped" and the microphone marked free regardless.
+      this.stopFailedFlag = true;
+      throw err;
     }
+    this.stopFailedFlag = false;
+    this.stopped = true;
     this.subscription?.remove();
     this.subscription = null;
     this.errorSubscription?.remove();
@@ -441,7 +459,7 @@ export class ActiveModeManager {
    * act on.
    */
   cancelCurrentUtterance(): boolean {
-    if (this.stopped || !this.capturing || !this.detector.hasDetectedSpeech) {
+    if (this.stopped || this.stopFailedFlag || !this.capturing || !this.detector.hasDetectedSpeech) {
       return false;
     }
     this.armListening();
@@ -453,7 +471,7 @@ export class ActiveModeManager {
    * longer touches `AudioRecord` at all; the native session is opened once,
    * in `start()`, and stays open until `stop()`. */
   private armListening(): void {
-    if (this.stopped) {
+    if (this.stopped || this.stopFailedFlag) {
       return;
     }
     this.chunks = [];
@@ -511,7 +529,7 @@ export class ActiveModeManager {
 
     this.setState("processing");
     const session = this.session;
-    const isCurrent = () => !this.stopped && this.session === session;
+    const isCurrent = () => !this.stopped && !this.stopFailedFlag && this.session === session;
     try {
       const uri = await writePcmChunksAsWav(chunks, "active-mode");
       // Reports from this utterance only count while its session is still
@@ -535,9 +553,14 @@ export type UseActiveMode = {
    * "starting", and it already counts as Handsfree for microphone
    * ownership — a second tap now turns Handsfree off. */
   isStarting: boolean;
+  /** The last stop couldn't tell the microphone to stop: Handsfree is still
+   * on and may still be capturing. Stopping again retries. */
+  stopFailed: boolean;
   state: ActiveModeState;
   toggle: () => Promise<void>;
-  stop: () => Promise<void>;
+  /** Resolves true once the microphone was told to stop (Handsfree off);
+   * false if the native stop failed and Handsfree is still on. */
+  stop: () => Promise<boolean>;
   /** See ActiveModeManager.cancelCurrentUtterance's own doc comment. */
   cancelCurrentUtterance: () => boolean;
 };
@@ -552,7 +575,11 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
   const [isActive, setIsActive] = useState(false);
   const [state, setState] = useState<ActiveModeState>("idle");
   const [isStarting, setIsStarting] = useState(false);
+  const [stopFailed, setStopFailed] = useState(false);
   const managerRef = useRef<ActiveModeManager | null>(null);
+  // The background listener is registered once; it reaches the latest stop
+  // (and its failure handling) through this ref.
+  const stopRef = useRef<() => Promise<boolean>>(async () => true);
   const onUtteranceRef = useRef(onUtterance);
   onUtteranceRef.current = onUtterance;
 
@@ -587,7 +614,7 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
       // then active, mid-start), so a start in flight is left to finish and
       // re-check the app state itself (see `start` below).
       if (nextState === "background" && managerRef.current?.isRunning) {
-        void managerRef.current.stop().then(() => setIsActive(managerRef.current?.isRunning ?? false));
+        void stopRef.current();
       }
     });
     return () => subscription.remove();
@@ -607,18 +634,28 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
       // Left the app while the start was opening the microphone: leaving
       // the app turns Handsfree off, as it always has.
       if (AppState.currentState === "background") {
-        await managerRef.current?.stop();
+        await managerRef.current?.stop().catch((err) => console.warn("[ActiveMode] Stopping the microphone failed", err));
       }
     } finally {
       setIsStarting(false);
+      setStopFailed(managerRef.current?.stopFailed ?? false);
       setIsActive(managerRef.current?.isRunning ?? false);
     }
   }, []);
 
+  // A failed native stop leaves Handsfree on, marked `stopFailed` (the
+  // microphone may still be capturing); calling stop again retries.
   const stop = useCallback(async () => {
-    await managerRef.current?.stop();
-    setIsActive(managerRef.current?.isRunning ?? false);
-    releaseWakeChime();
+    try {
+      await managerRef.current?.stop();
+    } catch (err) {
+      console.warn("[ActiveMode] Stopping the microphone failed", err);
+    }
+    const running = managerRef.current?.isRunning ?? false;
+    setStopFailed(managerRef.current?.stopFailed ?? false);
+    setIsActive(running);
+    if (!running) releaseWakeChime();
+    return !running;
   }, []);
 
   // Decided by the controller, not the last render: a second tap while the
@@ -631,9 +668,11 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
     }
   }, [start, stop]);
 
+  stopRef.current = stop;
+
   const cancelCurrentUtterance = useCallback(() => {
     return managerRef.current?.cancelCurrentUtterance() ?? false;
   }, []);
 
-  return { isActive, isStarting, state, toggle, stop, cancelCurrentUtterance };
+  return { isActive, isStarting, stopFailed, state, toggle, stop, cancelCurrentUtterance };
 }

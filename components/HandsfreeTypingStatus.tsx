@@ -1,8 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { HANDSFREE_STATE_LABEL } from "./HomeDock";
+import { HANDSFREE_STATE_LABEL, type HandsfreeDisplayState } from "./HomeDock";
 import { MIN_TOUCH_TARGET, xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
-import type { ActiveModeState } from "../services/audio/activeMode";
 
 const STOP_HEIGHT = 40;
 
@@ -12,7 +11,7 @@ const STOP_HEIGHT = 40;
  * calls the controller's own stop. Presentational only: no state of its own,
  * no microphone access.
  */
-export function HandsfreeTypingStatus({ state, onStop }: { state: ActiveModeState; onStop: () => void }) {
+export function HandsfreeTypingStatus({ state, onStop }: { state: HandsfreeDisplayState; onStop: () => void }) {
   return (
     <View testID="handsfree-typing-status" style={styles.row} accessibilityLiveRegion="polite">
       <View style={styles.dot} />

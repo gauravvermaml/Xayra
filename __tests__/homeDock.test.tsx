@@ -174,3 +174,22 @@ describe("Handsfree status is the controller's real state (Stage 5b)", () => {
     expect(onStop).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("a failed stop stays visible (Stage 5b correction)", () => {
+  it("dock: 'Handsfree · stop failed', still checked, hint says the mic may be on and a tap retries", async () => {
+    const tree = await render(<HomeDock {...dockProps({ handsfreeActive: true, handsfreeState: "stopFailed" })} />);
+    expect(texts(tree)).toContain("Handsfree · stop failed");
+    const toggle = byTestId(tree, "dock-handsfree");
+    expect(toggle.props.accessibilityState).toEqual({ checked: true });
+    expect(toggle.props.accessibilityHint).toBe("The microphone may still be on. Tries stopping Handsfree again");
+  });
+
+  it("typing strip: the same state, with Stop to retry", async () => {
+    const onStop = jest.fn();
+    const tree = await render(<HandsfreeTypingStatus state="stopFailed" onStop={onStop} />);
+    expect(texts(tree)).toContain("Handsfree · stop failed");
+    act(() => byTestId(tree, "handsfree-typing-stop").props.onPress());
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+});
+

@@ -344,3 +344,80 @@ describe("useActiveMode mirrors the controller", () => {
     act(() => tree.unmount());
   });
 });
+
+describe("a native stop failure never reports the microphone free (mocked native module)", () => {
+  const failNextStop = () =>
+    mockAudioRecord.stop.mockImplementationOnce(() => {
+      throw new Error("native stop failed");
+    });
+
+  it("controller: stays open and owning the mic, captures and re-arms nothing, and a retry stops it", async () => {
+    const h = heldManager();
+    await h.manager.start();
+    await speakOnce();
+    failNextStop();
+    await expect(h.manager.stop()).rejects.toThrow("native stop failed");
+    expect(h.manager.isRunning).toBe(true);
+    expect(h.manager.stopFailed).toBe(true);
+    expect(isMicInUse()).toBe(true);
+    // The in-flight utterance's late report and finish can't revive it.
+    h.report("speaking");
+    h.finish();
+    await flush();
+    expect(h.manager.state).toBe("processing");
+    expect(h.manager.cancelCurrentUtterance()).toBe(false);
+    await speakOnce();
+    expect(h.onUtterance).toHaveBeenCalledTimes(1);
+
+    await h.manager.stop();
+    expect(h.manager.isRunning).toBe(false);
+    expect(h.manager.stopFailed).toBe(false);
+    expect(isMicInUse()).toBe(false);
+    expect(h.manager.state).toBe("idle");
+  });
+
+  it("hook: Stop reports failure, Handsfree stays on (not 'off'), and the next Stop retries", async () => {
+    const ref: { current: UseActiveMode | null } = { current: null };
+    function Harness() {
+      ref.current = useActiveMode(() => Promise.resolve());
+      return null;
+    }
+    let tree!: ReturnType<typeof create>;
+    await act(async () => {
+      tree = create(<Harness />);
+    });
+    await act(async () => ref.current!.toggle());
+    failNextStop();
+    let first!: boolean;
+    await act(async () => {
+      first = await ref.current!.stop();
+    });
+    expect(first).toBe(false);
+    expect(ref.current!.isActive).toBe(true);
+    expect(ref.current!.stopFailed).toBe(true);
+    expect(isMicInUse()).toBe(true);
+
+    let second!: boolean;
+    await act(async () => {
+      second = await ref.current!.stop();
+    });
+    expect(second).toBe(true);
+    expect(ref.current!.isActive).toBe(false);
+    expect(ref.current!.stopFailed).toBe(false);
+    expect(isMicInUse()).toBe(false);
+    act(() => tree.unmount());
+  });
+
+  it("a toggle while the stop has failed retries the stop (never starts a second session)", async () => {
+    const h = heldManager();
+    await h.manager.start();
+    failNextStop();
+    await h.manager.stop().catch(() => {});
+    expect(h.manager.isEngaged).toBe(true);
+    await h.manager.start();
+    expect(mockAudioRecord.init).toHaveBeenCalledTimes(1);
+    await h.manager.stop();
+    expect(isMicInUse()).toBe(false);
+  });
+});
+
