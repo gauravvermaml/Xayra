@@ -98,6 +98,7 @@ import {
 } from "../services/notes/noteManager";
 import { isMicInUse } from "../services/audio/audioInputState";
 import { busyMessage } from "../services/audio/micSession";
+import { CANCEL_STOP_FAILED_MESSAGE, clearCancelStopError } from "../utils/micErrors";
 import { useMicSnapshot } from "../hooks/useMicSnapshot";
 import {
   canAdoptShortcutMode,
@@ -1272,7 +1273,7 @@ export default function HomeScreen() {
       },
       onCancelCleanupError: (err) => {
         console.warn("[Recorder] Stopping the microphone failed while cancelling", err);
-        setError("Couldn’t stop the microphone. Try Cancel again.");
+        setError(CANCEL_STOP_FAILED_MESSAGE);
       },
       processUtterance: async (audioUri, mode, trigger, release) => {
         if (__DEV__) {
@@ -1369,7 +1370,11 @@ export default function HomeScreen() {
   const handleCancelRecording = useCallback(
     (utteranceId: number) => {
       void manualController.cancel(utteranceId).then((cancelled) => {
-        if (cancelled) showToast("Cancelled");
+        if (!cancelled) return;
+        showToast("Cancelled");
+        // A retried Cancel worked: its own earlier "couldn't stop" message
+        // no longer applies. Any other error is left alone.
+        setError(clearCancelStopError);
       });
     },
     [manualController]
