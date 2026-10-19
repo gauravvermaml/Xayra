@@ -1094,6 +1094,9 @@ export default function HomeScreen() {
         if (options?.isHandsfree && !mayHandsfreeSpeak(thisJob, interruptedHandsfreeJobsRef.current)) {
           return;
         }
+        // A Cancel from here on also silences whatever this job starts
+        // saying.
+        thisJob.onCancel(() => void stopSpeech());
         if (intent === "RECORD") {
           // Spoken only when a note was really written (it used to be said
           // even when the recording was discarded as empty/silent).
@@ -1392,9 +1395,23 @@ export default function HomeScreen() {
 
   // The one way a manual utterance starts — a central-button tap or a
   // launcher shortcut — with the mode it will mean.
+  // Ends text entry before any voice capture starts (manual or Handsfree):
+  // the keyboard closes and the field leaves compose mode. The draft text
+  // is kept.
+  const endComposingForCapture = useCallback(() => {
+    Keyboard.dismiss();
+    setIsComposing(false);
+  }, []);
+
   const startManualUtterance = useCallback(
     async (mode: UtteranceMode) => {
       setError(null);
+      // Recording and composing are never both live: a recording started
+      // while the compose field had focus used to leave the keyboard up and
+      // the screen in two states at once — dock gone, Record/Ask stranded in
+      // the tray, recording controls hidden under it (Redmi uplift 1C,
+      // reproduced on the emulator).
+      endComposingForCapture();
       // Starting a recording collapses the sheet to its resting peek
       // immediately.
       sheetRef.current?.snapToIndex(0);
@@ -1410,7 +1427,7 @@ export default function HomeScreen() {
         setError(userFacingMessage(err, "Recording failed."));
       }
     },
-    [manualController]
+    [manualController, endComposingForCapture]
   );
 
   const handleRecordPress = useCallback(async () => {
@@ -1604,10 +1621,11 @@ export default function HomeScreen() {
       showToast("Finish your current recording first.");
       return;
     }
+    endComposingForCapture();
     void activeMode.toggle().catch((err) => {
       Alert.alert("Handsfree Error", userFacingMessage(err, "Something went wrong. Try again."));
     });
-  }, [activeMode, recorder.isRecording, recorder.isTransitioning, stopHandsfreeExplicitly]);
+  }, [activeMode, recorder.isRecording, recorder.isTransitioning, stopHandsfreeExplicitly, endComposingForCapture]);
 
   const handleLongPressCenterButton = handleToggleHandsfree;
 
