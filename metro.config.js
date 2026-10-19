@@ -1,7 +1,13 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
+const { realpathSync } = require("fs");
+// eslint-disable-next-line @typescript-eslint/no-var-requires
 const { getDefaultConfig } = require("expo/metro-config");
 
-const config = getDefaultConfig(__dirname);
+// The project root with the drive letter's real case. Started from a
+// lowercase `c:\` directory, `__dirname` keeps that case, while the local
+// modules' node_modules symlinks (expo-app-signature, …) resolve to `C:\`;
+// Metro compares the two case-sensitively and then can't find the module.
+const config = getDefaultConfig(realpathSync.native(__dirname));
 
 // Registers ONNX model binaries as bundler assets (analogous to whisper.rn's
 // GGML files) so `require("./model.onnx")` resolves like any other asset —
