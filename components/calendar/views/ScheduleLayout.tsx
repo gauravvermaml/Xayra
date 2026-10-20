@@ -17,17 +17,18 @@ import { groupToDosByDate, todayIso } from "../../../services/calendar/dateRange
 import type { ToDo } from "../../../services/todos/todoManager";
 import { CalendarTaskCard } from "../CalendarTaskCard";
 
-const WEEKDAY_NAMES = ["SUNDAY", "MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY"] as const;
-const MONTH_ABBR = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"] as const;
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
+const MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"] as const;
 
-/** "FRIDAY, 25 SEP" — matches the spec's exact banner wording, with "TODAY"
+/** "Friday, 25 Sep" — sentence case, like every label in Xayra 2.0 (Redmi
+ * uplift Stage 4; was all caps), with "Today"
  * substituted in place of the weekday name when the section is today's own
  * date (a small, honest touch mainstream calendar apps also do, and free
  * given `groupToDosByDate` already keys sections by real ISO dates). */
 function formatSectionHeader(iso: string): string {
   const [year, month, day] = iso.split("-").map(Number);
   const date = new Date(year, month - 1, day);
-  const label = iso === todayIso() ? "TODAY" : WEEKDAY_NAMES[date.getDay()];
+  const label = iso === todayIso() ? "Today" : WEEKDAY_NAMES[date.getDay()];
   return `${label}, ${day} ${MONTH_ABBR[month - 1]}`;
 }
 
@@ -147,7 +148,6 @@ const styles = StyleSheet.create({
   sectionHeaderText: {
     color: colors.textMuted,
     ...typography.label,
-    letterSpacing: 0.6,
   },
   // Carries both the "gap below each card" and "gap below/above a header"
   // spacing that `ItemSeparatorComponent` used to provide — a flat row list

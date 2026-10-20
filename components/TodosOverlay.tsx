@@ -12,6 +12,7 @@ import { TaskPreviewSheet } from "./calendar/TaskPreviewSheet";
 import { NoteDetailModal } from "./NoteDetailModal";
 import { showToast } from "./Toast";
 import { colors, radius, spacing, typography } from "../constants/theme";
+import { xayraFonts } from "../constants/xayraTheme";
 import type { Recurrence } from "../db/schema";
 import { useCalendarViewStore } from "../hooks/useCalendarViewStore";
 import { useToDos } from "../hooks/useToDos";
@@ -541,11 +542,13 @@ const styles = StyleSheet.create({
     gap: spacing.base,
   },
   snackbarText: {
+    fontFamily: xayraFonts.ui,
     flex: 1,
     color: colors.textPrimary,
     fontSize: 14,
   },
   snackbarUndo: {
+    fontFamily: xayraFonts.display,
     color: colors.accent,
     fontSize: 14,
     fontWeight: "700",

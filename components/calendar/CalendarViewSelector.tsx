@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 import { TouchableOpacity } from "react-native-gesture-handler";
+import { Feather } from "@expo/vector-icons";
 import Animated, {
   interpolate,
   useAnimatedStyle,
@@ -11,12 +12,14 @@ import Animated, {
 import { colors, radius, spacing, typography } from "../../constants/theme";
 import type { CalendarLayoutMode } from "../../hooks/useCalendarViewStore";
 
-const OPTIONS: { mode: CalendarLayoutMode; icon: string; label: string }[] = [
-  { mode: "day", icon: "📅", label: "Day" },
-  { mode: "work_week", icon: "📅", label: "Work Week" },
-  { mode: "week", icon: "📅", label: "Week" },
-  { mode: "month", icon: "📅", label: "Month" },
-  { mode: "schedule", icon: "📑", label: "Schedule View" },
+// Xayra 2.0 (Redmi uplift Stage 4): the same line icons as Home, not emoji.
+type FeatherName = React.ComponentProps<typeof Feather>["name"];
+const OPTIONS: { mode: CalendarLayoutMode; icon: FeatherName; label: string }[] = [
+  { mode: "day", icon: "calendar", label: "Day" },
+  { mode: "work_week", icon: "calendar", label: "Work week" },
+  { mode: "week", icon: "calendar", label: "Week" },
+  { mode: "month", icon: "grid", label: "Month" },
+  { mode: "schedule", icon: "list", label: "Schedule" },
 ];
 
 const OPTION_BY_MODE = new Map(OPTIONS.map((option) => [option.mode, option]));
@@ -74,10 +77,11 @@ export function CalendarViewSelector({ mode, onChange }: CalendarViewSelectorPro
   return (
     <View style={styles.container}>
       <TouchableOpacity onPress={() => setOpen(!isOpen)} activeOpacity={0.75} style={styles.trigger}>
-        <Text style={styles.triggerText}>
-          {active.icon} {active.label}
-        </Text>
-        <Animated.Text style={[styles.chevron, chevronAnimatedStyle]}>▼</Animated.Text>
+        <Feather name={active.icon} size={16} color={colors.textSecondary} />
+        <Text style={styles.triggerText}>{active.label}</Text>
+        <Animated.View style={chevronAnimatedStyle}>
+          <Feather name="chevron-down" size={16} color={colors.textMuted} />
+        </Animated.View>
       </TouchableOpacity>
 
       {isOpen && (
@@ -94,10 +98,11 @@ export function CalendarViewSelector({ mode, onChange }: CalendarViewSelectorPro
                 activeOpacity={0.7}
                 style={[styles.menuRow, option.mode === mode && styles.menuRowActive]}
               >
-                <Text style={styles.menuRowText}>
-                  {option.icon} {option.label}
-                </Text>
-                {option.mode === mode && <Text style={styles.menuRowCheck}>✓</Text>}
+                <View style={styles.menuRowLabel}>
+                  <Feather name={option.icon} size={16} color={colors.textSecondary} />
+                  <Text style={styles.menuRowText}>{option.label}</Text>
+                </View>
+                {option.mode === mode && <Feather name="check" size={16} color={colors.accent} />}
               </TouchableOpacity>
             ))}
           </Animated.View>
@@ -126,10 +131,7 @@ const styles = StyleSheet.create({
     color: colors.textPrimary,
     ...typography.label,
   },
-  chevron: {
-    color: colors.textMuted,
-    fontSize: 10,
-  },
+
   // Sits below the trigger, overlaying whatever's beneath it (the search bar
   // / calendar body) rather than pushing that content down — matches the
   // "fold-down... overlay" wording in the spec.
@@ -164,13 +166,15 @@ const styles = StyleSheet.create({
   menuRowActive: {
     backgroundColor: colors.accentMuted,
   },
+  menuRowLabel: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: spacing.sm,
+  },
   menuRowText: {
     color: colors.textPrimary,
     ...typography.body,
     fontSize: 14,
   },
-  menuRowCheck: {
-    color: colors.accent,
-    fontWeight: "700",
-  },
+
 });
