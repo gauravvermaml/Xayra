@@ -119,10 +119,15 @@ describe("borderless Ask answers", () => {
     const tree = await render(
       <ChatSheetContent {...baseProps} mode="ask" messages={exchange} speakingMessageId={null} onToggleSpeech={onToggleSpeech} onShowCitation={onShowCitation} />
     );
-    expect(texts(tree)).toEqual(expect.arrayContaining(["Listen", "[Note 1]", "[Note 2]"]));
+    // Redmi uplift Stage 3: verified sources are a labelled, dated list —
+    // not bare "[Note N]" chips — and never labelled "Related notes".
+    expect(texts(tree)).toEqual(expect.arrayContaining(["Listen", "Sources"]));
+    expect(texts(tree)).not.toContain("Related notes");
+    expect(texts(tree)).not.toContain("[Note 1]");
     await act(async () => pressByLabel(tree, "Listen to this answer"));
     expect(onToggleSpeech).toHaveBeenCalledWith(exchange[1]);
-    await act(async () => pressByLabel(tree, "Open source note 2"));
+    const source = tree.root.find((n) => n.props.testID === "source-note-n2" && typeof n.props.onPress === "function");
+    await act(async () => source.props.onPress());
     expect(onShowCitation).toHaveBeenCalledWith("n2");
   });
 

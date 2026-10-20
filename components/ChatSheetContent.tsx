@@ -17,7 +17,7 @@ import { MarkdownText } from "./MarkdownText";
 import type { SharedValue } from "react-native-reanimated";
 import { useReduceMotion } from "../hooks/useReduceMotion";
 import { NoteCard } from "./NoteCard";
-import { RelatedNotesSection } from "./RelatedNotesSection";
+import { RelatedNotesSection, SourcesSection } from "./RelatedNotesSection";
 import { Chip } from "./ui/Chip";
 import { Pill } from "./ui/Pill";
 import { XText } from "./ui/XText";
@@ -379,6 +379,9 @@ export function ChatSheetContent({
           </View>
         )}
         {/* Shown only under the "couldn't verify" fallback — see RelatedNotesSection. */}
+        {/* Verified answers list their Sources; the "couldn't verify"
+            fallback lists Related notes instead — never both. */}
+        <SourcesSection notes={message.citations ?? []} onOpen={onShowCitation} />
         <RelatedNotesSection notes={message.relatedNotes ?? []} onOpen={onShowCitation} />
         {!isUser && !message.isStreaming && message.text.length > 0 && (
           <View style={styles.actionRow}>
@@ -394,14 +397,6 @@ export function ChatSheetContent({
               }
               onPress={() => onToggleSpeech(message)}
             />
-            {message.citations?.map((citation) => (
-              <Chip
-                key={citation.noteId}
-                label={`[Note ${citation.index}]`}
-                accessibilityLabel={`Open source note ${citation.index}`}
-                onPress={() => onShowCitation(citation.noteId)}
-              />
-            ))}
           </View>
         )}
       </Pressable>

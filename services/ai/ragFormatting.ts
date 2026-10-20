@@ -349,6 +349,10 @@ export const NO_RELEVANT_NOTES_MESSAGE = "No information found in your notes.";
  * false here — notes exist, the app just couldn't verify an answer from them. */
 export const UNVERIFIED_ANSWER_MESSAGE = "I found related notes, but couldn't verify an accurate answer from them.";
 
+/** The same outcome when none of the notes shown can be offered as related
+ * (rag.ts): "I found related notes" over an empty list would be untrue. */
+export const UNVERIFIED_NO_RELATED_MESSAGE = "I couldn't verify an accurate answer from your notes.";
+
 /** Below this length a word is almost always a function word ("the", "and",
  * "this") rather than real content — skipping them without needing a
  * dedicated stopword list keeps this function self-contained (see this

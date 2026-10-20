@@ -21,17 +21,44 @@ function formatRecordedAt(createdAt: number): string {
  * to check themselves.
  */
 export function RelatedNotesSection({ notes, onOpen }: { notes: RagCitation[]; onOpen: (noteId: string) => void }) {
+  return <NoteRows label="Related notes" kind="related" notes={notes} onOpen={onOpen} />;
+}
+
+/**
+ * The notes a VERIFIED answer rests on (RagAnswer.citations) — "Sources",
+ * same rows as Related notes, so a summary or any grounded answer shows
+ * what it came from, dated (Redmi uplift Stage 3; it was a row of bare
+ * "[Note N]" chips beside Listen). Only ever given citations that passed
+ * Grounding v1 — never related notes.
+ */
+export function SourcesSection({ notes, onOpen }: { notes: RagCitation[]; onOpen: (noteId: string) => void }) {
+  return <NoteRows label="Sources" kind="source" notes={notes} onOpen={onOpen} />;
+}
+
+function NoteRows({
+  label,
+  kind,
+  notes,
+  onOpen,
+}: {
+  label: string;
+  kind: "related" | "source";
+  notes: RagCitation[];
+  onOpen: (noteId: string) => void;
+}) {
   if (notes.length === 0) {
     return null;
   }
   return (
     <View style={styles.section}>
-      <Text style={styles.label}>Related notes</Text>
+      <Text style={styles.label}>{label}</Text>
       {notes.map((note) => (
         <Pressable
           key={note.noteId}
-          testID={`related-note-${note.noteId}`}
+          testID={`${kind}-note-${note.noteId}`}
           accessibilityRole="button"
+          accessibilityLabel={`${kind === "source" ? "Source" : "Related"} note, ${formatRecordedAt(note.createdAt)}`}
+          accessibilityHint="Opens the note"
           onPress={() => onOpen(note.noteId)}
           style={styles.row}
         >
