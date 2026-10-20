@@ -8,6 +8,8 @@ import { RecoveryCodePrompt, showRestoreResult } from "../components/ExtraPrivac
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { NotesSheetContent, type DisplayNote } from "../components/NotesSheetContent";
 import { colors, radius, spacing, typography } from "../constants/theme";
+import { xayraFonts } from "../constants/xayraTheme";
+import { BackLink } from "../components/ui/BackLink";
 import { deleteNote, listNotes, retryPendingEmbeddings, type Note } from "../services/notes/noteManager";
 import { matchesKeywordSearch } from "../services/search/keywordMatch";
 import {
@@ -176,13 +178,7 @@ export default function ArchiveScreen() {
   return (
     <SafeAreaView style={styles.safeArea} edges={["top", "left", "right"]}>
       <View style={styles.header}>
-        <Pressable
-          onPress={() => router.back()}
-          hitSlop={12}
-          style={({ pressed }) => [styles.backButton, pressed && styles.backButtonPressed]}
-        >
-          <Text style={styles.backButtonText}>‹ Back</Text>
-        </Pressable>
+        <BackLink onPress={() => router.back()} />
         <Text style={styles.title}>Archive</Text>
         <Text style={styles.subtitle}>Every thought you've ever recorded, exactly as captured.</Text>
       </View>
@@ -261,19 +257,6 @@ const styles = StyleSheet.create({
     paddingTop: spacing.xxl,
     marginBottom: spacing.md,
   },
-  backButton: {
-    alignSelf: "flex-start",
-    marginBottom: spacing.md,
-    paddingVertical: spacing.xs,
-  },
-  backButtonPressed: {
-    opacity: 0.6,
-  },
-  backButtonText: {
-    color: colors.accent,
-    fontSize: 15,
-    fontWeight: "600",
-  },
   title: {
     color: colors.textPrimary,
     ...typography.title,
@@ -284,6 +267,7 @@ const styles = StyleSheet.create({
     marginTop: spacing.xs,
   },
   errorText: {
+    fontFamily: xayraFonts.ui,
     color: colors.danger,
     fontSize: 13,
     paddingHorizontal: spacing.xl,

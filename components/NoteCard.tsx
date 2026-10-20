@@ -17,7 +17,8 @@ export type NoteCardProps = {
   onPress?: () => void;
   onDelete: () => void;
   /** `xayra`: the 2.0 home tray card (quiet slate card, icon delete).
-   * `classic` (default): the existing card Archive still uses. */
+   * `classic` (default): the original card — no screen uses it since
+   * Archive moved to `xayra` (Redmi uplift Stage 4). */
   appearance?: "classic" | "xayra";
 };
 
