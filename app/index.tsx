@@ -46,6 +46,7 @@ import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
 import { cancelActiveLlamaCompletion } from "../services/ai/localLlama";
 import { devTiming } from "../services/ai/perf";
+import { checkVoiceReady } from "../services/ai/voiceReadiness";
 import { discardVoiceAskReservation, reserveVoiceAsk, type VoiceAskReservation } from "../services/ai/voiceAsk";
 import { ProcessingJob } from "../services/ai/processingJob";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
@@ -1511,6 +1512,13 @@ export default function HomeScreen() {
   const startManualUtterance = useCallback(
     async (mode: UtteranceMode) => {
       setError(null);
+      // No speech model yet → no recording at all (it could only fail to
+      // transcribe, losing the spoken note); typing works meanwhile.
+      const voice = await checkVoiceReady();
+      if (!voice.ready) {
+        setError(voice.message);
+        return;
+      }
       // Recording and composing are never both live: a recording started
       // while the compose field had focus used to leave the keyboard up and
       // the screen in two states at once — dock gone, Record/Ask stranded in
@@ -1727,7 +1735,14 @@ export default function HomeScreen() {
       return;
     }
     endComposingForCapture();
-    void activeMode.toggle().catch((err) => {
+    void (async () => {
+      const voice = await checkVoiceReady();
+      if (!voice.ready) {
+        setError(voice.message);
+        return;
+      }
+      await activeMode.toggle();
+    })().catch((err) => {
       Alert.alert("Handsfree Error", userFacingMessage(err, "Something went wrong. Try again."));
     });
   }, [activeMode, recorder.isRecording, recorder.isTransitioning, stopHandsfreeExplicitly, endComposingForCapture]);
