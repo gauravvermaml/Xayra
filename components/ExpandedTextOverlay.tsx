@@ -242,6 +242,12 @@ const styles = StyleSheet.create({
     // point is that this reads as "the sheet, just bigger," not a visually
     // distinct layer.
     backgroundColor: "#000000",
+    // Above every home control (Record/Ask is 25): on Android, elevation —
+    // not tree order — decides what paints on top, and the switch used to
+    // paint over this view mid-transition (Redmi flicker). Invisible and
+    // non-interactive at progress 0, so this costs nothing at rest.
+    zIndex: 30,
+    elevation: 30,
   },
   // Xayra 2.0: the tray surface, grown to full height — same colour, top
   // corners and edge as HistorySheet's sheet, so it reads as the tray

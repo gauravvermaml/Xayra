@@ -213,3 +213,31 @@ describe("full-screen Collapse", () => {
     act(() => tree.unmount());
   });
 });
+
+describe("full-screen view layering (Record/Ask flicker)", () => {
+  it("paints above the home controls on Android: elevation above Record/Ask's 25", async () => {
+    let tree!: ReactTestRenderer;
+    await act(async () => {
+      tree = create(
+        <ExpandedTextOverlay
+          topInset={24}
+          bottomInset={24}
+          progress={{ value: 0.5 } as never}
+          dragDistance={274}
+          onSettle={jest.fn()}
+          listScrollOffset={{ value: 0 } as never}
+        >
+          {null}
+        </ExpandedTextOverlay>
+      );
+    });
+    const { StyleSheet } = jest.requireActual("react-native");
+    const root = tree.root.findAll((n) => {
+      const s = StyleSheet.flatten(n.props.style);
+      return typeof n.type !== "string" && s?.position === "absolute" && s?.backgroundColor === "#000000";
+    })[0];
+    const style = StyleSheet.flatten(root.props.style);
+    expect(style.elevation).toBeGreaterThan(25);
+    expect(style.zIndex).toBeGreaterThan(25);
+  });
+});

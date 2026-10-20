@@ -160,6 +160,9 @@ const ORBIT_SPAN = 1.36;
 const ORBIT_SIDE_GUTTER = 16;
 /** Gap between the Record/Ask switch and the tray's top edge. */
 const MODE_SWITCH_BOTTOM_GAP = 12;
+/** Full-screen progress (0..1) by which Record/Ask is fully hidden — a few
+ * px of travel, well before the rising full-screen tray reaches it. */
+const FULL_SCREEN_SWITCH_HIDE_AT = 0.01;
 /** Until the switch has been measured (first frame only). */
 const MODE_SWITCH_FALLBACK_HEIGHT = 50;
 
@@ -763,10 +766,15 @@ export default function HomeScreen() {
   // a plain shared-value interpolation against the sheet's own index.
   const drawerFloatingStackAnimatedStyle = useAnimatedStyle(() => ({
     bottom: liveSheetPx.value + MODE_SWITCH_BOTTOM_GAP,
-    // Gone as soon as the full-screen view starts opening (Redmi uplift
-    // Stage 2: on Android the elevated switch painted over the growing
-    // full-screen tray mid-drag).
-    opacity: interpolate(expandProgress.value, [0, 0.08], [1, 0], "clamp"),
+    // Visibility comes only from the full-screen progress, on the UI thread:
+    // gone within the first ~1% of an expansion (a few px of travel — before
+    // the rising tray reaches the switch) and back only in the last ~1% of a
+    // collapse, when its place above the tray is free again. No React state,
+    // no mount/unmount, no timed fade — so no frame can lag the tray. (It was
+    // unmounted on release with a 120 ms FadeOut that restarted from full
+    // opacity, and remounted with a FadeIn while the full-screen tray still
+    // covered the screen: the flash/residue seen on the Redmi.)
+    opacity: interpolate(expandProgress.value, [0, FULL_SCREEN_SWITCH_HIDE_AT], [1, 0], "clamp"),
   }));
 
   // The emblem zone takes the space actually left between the header and
@@ -2123,15 +2131,19 @@ export default function HomeScreen() {
 
       {/* The Record/Ask switch, centred directly above the tray and tracking
           its live height (drawerFloatingStackAnimatedStyle), so it stays
-          above the tray at every snap index. Hidden in the full-screen
-          reading overlay and under To-Dos — same reasons as the floating
-          cluster it replaces (sibling paint order alone didn't reliably keep
-          it behind either). */}
-      {!isTextBoxExpanded && !isTodosVisible && (
+          above the tray at every snap index. Under To-Dos it is unmounted
+          (its fades run only then). For the full-screen view it stays
+          mounted: hidden by the view's own progress (see
+          drawerFloatingStackAnimatedStyle), and drawn BENEATH the view —
+          ExpandedTextOverlay sits at a higher elevation — so no frame of it
+          can ever paint over the full-screen tray. */}
+      {!isTodosVisible && (
         <Animated.View
           entering={FadeIn.duration(150)}
           exiting={FadeOut.duration(120)}
-          pointerEvents="box-none"
+          pointerEvents={isTextBoxExpanded ? "none" : "box-none"}
+          importantForAccessibility={isTextBoxExpanded ? "no-hide-descendants" : "auto"}
+          accessibilityElementsHidden={isTextBoxExpanded}
           onLayout={handleModeSwitchLayout}
           style={[styles.modeSwitchRow, drawerFloatingStackAnimatedStyle]}
         >
