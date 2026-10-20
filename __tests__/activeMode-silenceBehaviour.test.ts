@@ -6,19 +6,8 @@
  */
 import { QUIET, SPEECH, feedAudio } from "./support/pcm";
 
-let mockEmitData: (base64: string) => void = () => {};
-jest.mock("@fugood/react-native-audio-pcm-stream", () => ({
-  __esModule: true,
-  default: {
-    init: jest.fn(),
-    start: jest.fn(),
-    stop: jest.fn(),
-    on: jest.fn((event: string, handler: (data: string) => void) => {
-      if (event === "data") mockEmitData = handler;
-      return { remove: jest.fn() };
-    }),
-  },
-}));
+// Gate B: the shared fake native module (legacy + session API). MOCK ONLY.
+jest.mock("@fugood/react-native-audio-pcm-stream", () => require("./support/fakeMicNative").fakeMicModule);
 jest.mock("expo-audio", () => ({
   requestRecordingPermissionsAsync: jest.fn(() => Promise.resolve({ granted: true })),
   setAudioModeAsync: jest.fn(() => Promise.resolve()),
@@ -40,8 +29,10 @@ jest.mock("../services/audio/tts", () => ({ stopSpeech: jest.fn(() => Promise.re
 jest.mock("../services/audio/wakeChime", () => ({ preloadWakeChime: jest.fn(), releaseWakeChime: jest.fn() }));
 
 import { ActiveModeManager } from "../services/audio/activeMode";
+import { fakeMic } from "./support/fakeMicNative";
+import { resetMicSessionForTests } from "../services/audio/micSession";
 
-const emit = (base64: string) => mockEmitData(base64);
+const emit = (base64: string) => fakeMic.emit(base64);
 
 async function startManager() {
   const onUtterance = jest.fn(() => Promise.resolve());
@@ -58,6 +49,8 @@ async function flush() {
 describe("Handsfree silence detection (unchanged by the shared detector)", () => {
   beforeEach(() => {
     jest.useFakeTimers();
+    fakeMic.reset();
+    resetMicSessionForTests();
   });
   afterEach(() => {
     jest.useRealTimers();

@@ -2,7 +2,13 @@ import { generateLocalRAGAnswer, LlamaCancelledError } from "./localLlama";
 import { isDevelopmentBuild, nowMs } from "./perf";
 import { AskProgress } from "./pipelineStage";
 import type { CancelSignal } from "./processingJob";
-import { buildNoteContext, finalizeAnswer, resolveNoteText } from "./ragFormatting";
+import {
+  buildNoteContext,
+  finalizeAnswer,
+  resolveNoteText,
+  UNVERIFIED_ANSWER_MESSAGE,
+  UNVERIFIED_NO_RELATED_MESSAGE,
+} from "./ragFormatting";
 import { relatedEvidenceNotes } from "./relationshipGrounding";
 import { getNotesForTarget, getRecentNotes, hybridSearchNotes, type HybridSearchResult } from "../notes/noteManager";
 import {
@@ -294,11 +300,44 @@ async function answerQuery(
     final: result.text,
   });
   const keepCitations = result.outcome === "shown";
-  // No notes shown → no related notes; a verified answer keeps its normal
-  // citations instead.
-  const relatedIndices =
-    keepCitations || result.outcome === "no-notes" || !built ? [] : relatedEvidenceNotes(built.evidence, userQuery, now);
+  const relatedIndices = relatedNoteIndices({
+    verified: keepCitations,
+    notesShown: result.outcome !== "no-notes" && built !== null,
+    retrievalPath,
+    included,
+    aboutQuestion: () => (built ? relatedEvidenceNotes(built.evidence, userQuery, now) : []),
+  });
   const relatedNotes = citations.filter((_, k) => relatedIndices.includes(included[k]));
-  mark("answer ready", { outcome: result.outcome, citations: keepCitations ? citations.length : 0 });
-  return { text: result.text, citations: keepCitations ? citations : [], relatedNotes };
+  mark("answer ready", { outcome: result.outcome, citations: keepCitations ? citations.length : 0, related: relatedNotes.length });
+  return { text: unverifiedWording(result.text, relatedNotes.length), citations: keepCitations ? citations : [], relatedNotes };
+}
+
+/**
+ * Which shown notes are offered as "Related notes" under an answer that
+ * couldn't be verified — never as citations, never as proof (Grounding v1).
+ * A verified answer keeps its citations instead; no notes shown, none.
+ * Normally the shown notes about the question (`aboutQuestion`). A
+ * recent-notes request ("summarise my latest notes") is ABOUT the notes it
+ * was shown — every one of them is its subject — but has no content words
+ * of its own to match, so it got none, and the screen said "I found related
+ * notes" over an empty list (Redmi uplift Stage 3). Those are the notes
+ * shown, in context order.
+ */
+export function relatedNoteIndices(args: {
+  verified: boolean;
+  notesShown: boolean;
+  retrievalPath: "temporal" | "recent" | "hybrid";
+  included: number[];
+  aboutQuestion: () => number[];
+}): number[] {
+  if (args.verified || !args.notesShown) return [];
+  if (args.retrievalPath === "recent") return [...args.included];
+  return args.aboutQuestion();
+}
+
+/** The unverified fallback promises related notes only when there are some
+ * to show (Redmi uplift Stage 3). Only this fixed app message is reworded —
+ * a generated answer is never touched. */
+export function unverifiedWording(text: string, relatedCount: number): string {
+  return text === UNVERIFIED_ANSWER_MESSAGE && relatedCount === 0 ? UNVERIFIED_NO_RELATED_MESSAGE : text;
 }

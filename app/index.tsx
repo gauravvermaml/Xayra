@@ -1,39 +1,52 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Alert, Dimensions, Image, Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { LayoutChangeEvent } from "react-native";
+import { Alert, AppState, Dimensions, Image, Keyboard, PixelRatio, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import { getRecordingPermissionsAsync } from "expo-audio";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter } from "expo-router";
 import BottomSheet, { useBottomSheetSpringConfigs } from "@gorhom/bottom-sheet";
+import { Feather } from "@expo/vector-icons";
 import Animated, {
   FadeIn,
   FadeOut,
   interpolate,
   useAnimatedStyle,
+  useDerivedValue,
   useSharedValue,
   withSpring,
+  withTiming,
 } from "react-native-reanimated";
 
 import {
   CentralRecorderCanvas,
-  IDLE_TEXT_CLEARANCE_PX,
+  WAVEFORM_ROW_HEIGHT,
   type RecorderCanvasState,
 } from "../components/CentralRecorderCanvas";
 import { ChatSheetContent } from "../components/ChatSheetContent";
 import { CancelProcessingButton } from "../components/CancelProcessingButton";
+import { RecordingActions } from "../components/RecordingActions";
 import { ComposeBar } from "../components/ComposeBar";
 import { ExpandedTextOverlay } from "../components/ExpandedTextOverlay";
-import { HistorySheet, SHEET_SNAP_POINTS } from "../components/HistorySheet";
+import { HandsfreeTypingStatus } from "../components/HandsfreeTypingStatus";
+import { HistorySheet, SHEET_HANDLE_HEIGHT, SHEET_SNAP_POINTS } from "../components/HistorySheet";
+import { HomeDock, type HandsfreeDisplayState } from "../components/HomeDock";
+import { settleExpandProgress } from "../components/SwipeableTrayHandle";
+import { useHardwareBack } from "../hooks/useHardwareBack";
+import { decideHomeBack, type HomeBackState } from "../utils/backNavigation";
 import { NoteDetailModal } from "../components/NoteDetailModal";
 import { showToast } from "../components/Toast";
 import { TodosOverlay } from "../components/TodosOverlay";
+import { SegmentedControl } from "../components/ui/SegmentedControl";
+import { XText } from "../components/ui/XText";
 import { HOME_SUBTITLE } from "../constants/copy";
-import { colors } from "../constants/theme";
+import { MIN_TOUCH_TARGET, xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
 import { useLaunchShortcut } from "../hooks/useLaunchShortcut";
 import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
 import { cancelActiveLlamaCompletion } from "../services/ai/localLlama";
 import { devTiming } from "../services/ai/perf";
+import { checkVoiceReady } from "../services/ai/voiceReadiness";
 import { discardVoiceAskReservation, reserveVoiceAsk, type VoiceAskReservation } from "../services/ai/voiceAsk";
 import { ProcessingJob } from "../services/ai/processingJob";
 import { prewarmEngines } from "../services/ai/enginePrewarmer";
@@ -60,11 +73,13 @@ import {
   idleTapCue,
   recordCompletionSpeech,
   ManualUtteranceController,
+  recordingActionsFor,
   type ManualUtteranceSnapshot,
   type UtteranceMode,
 } from "../services/audio/manualUtterance";
 import { useVoiceRecorder } from "../services/audio/recorder";
-import { speakTextAndWait } from "../services/audio/tts";
+import { speakTextAndWait, stopSpeech } from "../services/audio/tts";
+import { interruptHandsfreeWork, mayHandsfreeSpeak } from "../services/audio/handsfreeInterrupt";
 import { playWakeChime } from "../services/audio/wakeChime";
 import { cleanupOrphanRecordings } from "../services/audio/recordingCleanup";
 import { isAudioTooShort } from "../services/audio/wav";
@@ -83,6 +98,9 @@ import {
   type Note,
 } from "../services/notes/noteManager";
 import { isMicInUse } from "../services/audio/audioInputState";
+import { busyMessage } from "../services/audio/micSession";
+import { CANCEL_STOP_FAILED_MESSAGE, clearCancelStopError } from "../utils/micErrors";
+import { useMicSnapshot } from "../hooks/useMicSnapshot";
 import {
   canAdoptShortcutMode,
   decideShortcutLaunch,
@@ -92,6 +110,16 @@ import {
 import { wordCount } from "../services/logging/redact";
 import { getGreetingFirstName } from "../services/sync/driveSync";
 import { getTimeBasedGreeting } from "../utils/greeting";
+import {
+  emblemFit,
+  fittedEmblemZone,
+  FULL_EMBLEM_TIER,
+  liveTrayHeight,
+  sameEmblemTier,
+  type EmblemTier,
+} from "../utils/emblemLayout";
+import { dockYieldsAtHalf as dockYieldsAtHalfFor } from "../utils/readingViewport";
+import { userFacingMessage } from "../services/errors/userMessage";
 
 /** Screen goes idle-with-mic-open for this long with zero detected speech
  * before Handsfree auto-disengages — a safety/battery guard, not a UX
@@ -101,7 +129,67 @@ import { getTimeBasedGreeting } from "../utils/greeting";
 const HANDSFREE_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** Vertical gap between the central button and the status lines under it. */
-const CENTER_AREA_GAP_PX = 12;
+const CENTER_AREA_GAP_PX = 10;
+/** The "Tap to finish" hint sits this much closer to the status line. */
+const STATUS_HINT_OFFSET = -4;
+/** How long the compose field stays non-editable after To-Dos closes by
+ * hardware Back, unless touched first (see `isComposeGuarded`). */
+const COMPOSE_UNCOVER_DELAY_MS = 400;
+
+/** Emblem zone limits (canvas row P): the home size — the ceiling at every
+ * tray position, 50% included (Redmi uplift Stage 3: the thinking emblem
+ * stays near home size) — and a floor below which it stops shrinking. The
+ * actual size comes from the measured space (see emblemZoneSize). Until
+ * that is measured, the first frame uses the initial size. */
+const EMBLEM_ZONE_MAX_REST = 248;
+const EMBLEM_ZONE_INITIAL = 168;
+const EMBLEM_ZONE_MIN = 64;
+/** Extra room, as a multiple of the zone, kept for the orbit rings that
+ * reach beyond it — full orbit, and the reduced one (no dotted ring or teal
+ * arc) used first when space is short. */
+const ORBIT_ROOM = 1.22;
+const ORBIT_ROOM_REDUCED = 1.12;
+/** Responsive priority (approved): below these zone sizes, first the orbit
+ * is reduced, then the optional "Tap to …" cue goes, then the emblem
+ * shrinks to EMBLEM_ZONE_MIN; only if even that can't fit is it hidden. */
+const ORBIT_REDUCE_BELOW = 132;
+const CUE_DROP_BELOW = 96;
+/** Width of the outer orbit arcs relative to the zone (r 176 of 390 in a
+ * box 1.5x the zone), and the side gutter they stay inside. */
+const ORBIT_SPAN = 1.36;
+const ORBIT_SIDE_GUTTER = 16;
+/** Gap between the Record/Ask switch and the tray's top edge. */
+const MODE_SWITCH_BOTTOM_GAP = 12;
+/** Full-screen progress (0..1) by which Record/Ask is fully hidden — a few
+ * px of travel, well before the rising full-screen tray reaches it. */
+const FULL_SCREEN_SWITCH_HIDE_AT = 0.01;
+/** Until the switch has been measured (first frame only). */
+const MODE_SWITCH_FALLBACK_HEIGHT = 50;
+
+/** Soft red on black for the inline error line (6.9:1). */
+const ERROR_TEXT = "#F2A5A5";
+
+const MODE_SEGMENTS = [
+  { key: "record", label: "Record" },
+  { key: "ask", label: "Ask" },
+] as const;
+
+/** Breathing room after the tray list's last item (the body already ends at
+ * the dock's top edge), and after the full-screen list's (plus the inset). */
+const TRAY_LIST_END_PADDING = 16;
+const OVERLAY_LIST_END_PADDING = 24;
+
+
+const QUICK_MENU_GUTTER = 12;
+/** The More menu opens toward the free side of its button and stays inside
+ * the screen's side gutter. */
+function quickMenuPosition(anchor: { x: number; y: number; width: number; height: number }) {
+  const { width, height } = Dimensions.get("window");
+  const right = Math.max(QUICK_MENU_GUTTER, width - (anchor.x + anchor.width));
+  return anchor.y > height / 2
+    ? { right, bottom: height - anchor.y + 8 }
+    : { right, top: anchor.y + anchor.height + 6 };
+}
 
 /** How long the launch greeting ("Good morning, ...") stays up before
  * cross-fading into the header's normal persistent subtitle. */
@@ -178,9 +266,20 @@ function todosOverlayPopIn() {
 // sheet's own real rendered height sitting on top of it in z-order, not
 // this padding value.
 const SCREEN_HEIGHT = Dimensions.get("window").height;
+/** The legacy 20%/50% heights — kept ONLY to derive EXPAND_DRAG_DISTANCE
+ * below, so the full-screen drag keeps exactly the travel it had (274dp on
+ * a 914dp screen). The tray's real rest height is measured (Option B). */
 const SHEET_HEIGHTS_PX = SHEET_SNAP_POINTS.map(
   (point) => (parseFloat(point) / 100) * SCREEN_HEIGHT
 ) as [number, number];
+/** Option B rest stage = handle + compose field + this gap + dock. */
+const REST_FIELD_DOCK_GAP = 12;
+/** The sheet body's own top margin between the compose field and the list
+ * (HistorySheet) — part of the measured reading-viewport calculation. */
+const SHEET_BODY_MARGIN_TOP = 16;
+/** First-frame estimates until the field and dock have been measured. */
+const COMPOSE_HEADER_FALLBACK = 48;
+const DOCK_ROW_FALLBACK = 74;
 /** Pixels of drag the tray's own "expand" handle and the full-screen
  * overlay's own "collapse" handle both map their full 0..1 progress across
  * — deliberately the SAME distance the real sheet travels between its two
@@ -190,11 +289,9 @@ const SHEET_HEIGHTS_PX = SHEET_SNAP_POINTS.map(
  * does. See SwipeableTrayHandle.tsx's own doc comment for the full gesture
  * design this feeds. */
 const EXPAND_DRAG_DISTANCE = SHEET_HEIGHTS_PX[1] - SHEET_HEIGHTS_PX[0];
-/** Clean breathing room kept between the record button and the sheet's top
- * edge, on top of the sheet's own current height — Build 20 BUTTON
- * CLEARANCE, most visible when the sheet auto-peeks to Index 1 (50%) while
- * an ASK request is in flight. */
-const CENTER_AREA_BREATHING_ROOM_PX = 40;
+/** Breathing room between the emblem area and the Record/Ask switch above
+ * the tray — Build 20 BUTTON CLEARANCE, now measured from the switch. */
+const CENTER_AREA_BREATHING_ROOM_PX = 12;
 
 /**
  * Build 22 — REVERT TO EXPLICIT MODE SWITCHING: the automatic RECORD/ASK
@@ -340,6 +437,51 @@ export default function HomeScreen() {
   // own doc comment for why this is deliberately NOT done by changing which
   // index the sheet snaps to.
   const [isComposing, setIsComposing] = useState(false);
+  // Keyboard on screen — true also after a typed Record send, which keeps
+  // the keyboard up while `isComposing` clears. "Typing" for the dock and
+  // the Handsfree status means either.
+  const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+  const keyboardVisibleRef = useRef(false);
+  useEffect(() => {
+    const show = Keyboard.addListener("keyboardDidShow", () => {
+      keyboardVisibleRef.current = true;
+      setIsKeyboardVisible(true);
+    });
+    const hide = Keyboard.addListener("keyboardDidHide", () => {
+      keyboardVisibleRef.current = false;
+      setIsKeyboardVisible(false);
+      // A keyboard closed on its own (Android Back, the keyboard's own
+      // hide key) left the field focused: still "composing", so the dock
+      // stayed hidden and the tray's list blank with no keyboard on screen
+      // (Redmi 09:10; reproduced on the emulator). Closing the keyboard ends
+      // composing — the draft text stays. Blurred on the next frame, and
+      // only a field that still has focus: calling Keyboard.dismiss() from
+      // inside this event hung the app on the emulator (ANR twice, right
+      // after Back closed the keyboard), and a second hide event must find
+      // nothing left to do.
+      requestAnimationFrame(() => TextInput.State.currentlyFocusedInput()?.blur());
+      // Redmi uplift Stage 2: the tray kept the position it was pushed to
+      // while the keyboard was up (a keyboard's height too high — the dock,
+      // switch and emblem all followed it; reproduced on the emulator). A
+      // re-snap to the same stage, once the keyboard is gone, recomputes it
+      // against the full screen. The stage itself never changes here.
+      requestAnimationFrame(() => sheetRef.current?.snapToIndex(requestedSheetIndexRef.current));
+    });
+    // A keyboard-hidden event missed while the app was away must not keep
+    // the screen in its typing layout (dock hidden) after coming back.
+    const appState = AppState.addEventListener("change", (state) => {
+      if (state !== "active") return;
+      const visible = Keyboard.isVisible();
+      keyboardVisibleRef.current = visible;
+      setIsKeyboardVisible(visible);
+    });
+    return () => {
+      show.remove();
+      hide.remove();
+      appState.remove();
+    };
+  }, []);
+  const isTyping = isComposing || isKeyboardVisible;
   // Opens a note from either a chat citation chip (handleShowCitation below)
   // or a tap on a row in the Record-mode notes list (`notes` below) — same
   // modal either way.
@@ -387,13 +529,28 @@ export default function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const sheetRef = useRef<BottomSheet>(null);
+  /** Every app-driven tray snap: remembers the stage asked for. */
+  const snapSheet = useCallback((index: number) => {
+    requestedSheetIndexRef.current = index;
+    sheetRef.current?.snapToIndex(index);
+  }, []);
   const sheetAnimatedIndex = useSharedValue(0);
+  const sheetAnimatedPosition = useSharedValue(0);
   // Mirrors sheetAnimatedIndex into plain JS state — HistorySheet needs this
   // (not just the Reanimated shared value) to actually skip rendering its
   // body at index 0 (see STRICT LAYOUT HIERARCHY), which has to be a real
   // React conditional, not something achievable from a UI-thread value alone.
   const [sheetIndex, setSheetIndex] = useState(0);
-  const handleSheetIndexChange = useCallback((index: number) => setSheetIndex(index), []);
+  const sheetIndexRef = useRef(0);
+  // The stage the tray was last asked to reach (by the app or a gesture) —
+  // what a re-snap after the keyboard closes restores, so it never undoes a
+  // snap still animating (e.g. the collapse a recording starts with).
+  const requestedSheetIndexRef = useRef(0);
+  const handleSheetIndexChange = useCallback((index: number) => {
+    sheetIndexRef.current = index;
+    requestedSheetIndexRef.current = index;
+    setSheetIndex(index);
+  }, []);
 
   // MONOCHROMATIC GLASS EXPAND/COLLAPSE: `expandProgress` (0 = tray, 1 =
   // fully expanded) is dragged continuously by BOTH the tray's own handle
@@ -410,9 +567,85 @@ export default function HomeScreen() {
   // yes/no — hiding the floating pill cluster below — updated via
   // `handleExpandSettle`, fired the instant a drag's release DECIDES which
   // way it's settling, not once the spring animation actually finishes.
+  // The dock's anchor (Redmi uplift Stage 2): the canvas height measured
+  // while the keyboard is down. The dock is drawn at the bottom of that, so
+  // the keyboard or any tray movement can never lift it — with the keyboard
+  // up it simply sits underneath.
+  const [stableCanvasHeight, setStableCanvasHeight] = useState(0);
+  const handleCanvasLayout = useCallback((e: LayoutChangeEvent) => {
+    const height = Math.round(e.nativeEvent.layout.height);
+    setStableCanvasHeight((prev) => (!keyboardVisibleRef.current || height > prev ? height : prev));
+  }, []);
+
   const [isTextBoxExpanded, setIsTextBoxExpanded] = useState(false);
   const expandProgress = useSharedValue(0);
   const handleExpandSettle = useCallback((expanded: boolean) => setIsTextBoxExpanded(expanded), []);
+  // The full-screen list's scroll offset: at its top, a downward drag on
+  // the list collapses the view (ExpandedTextOverlay).
+  const overlayListOffset = useSharedValue(0);
+
+  // ---- Android Back (Stage 5c) ---------------------------------------------
+  // The topmost thing open closes first; only a home screen with nothing
+  // open hands Back to Android (see utils/backNavigation.ts). The keyboard
+  // and native modals (NoteDetailModal) receive Back before this listener.
+  const todosBackRef = useRef<(() => boolean) | null>(null);
+  // The compose field is non-editable while To-Dos covers it, and — only
+  // when To-Dos was closed by hardware Back — for a moment after: Back takes
+  // the window out of touch mode, and as To-Dos' focused field unmounts
+  // Android moves focus to the next editable field, the compose field,
+  // which raised the tray into compose mode (seen on the emulator). A touch
+  // close never triggers that, so it never arms the guard; and a real touch
+  // on the field ends the guard at once and focuses it (Stage 5d — before,
+  // a quick tap right after closing was swallowed).
+  const [isComposeGuarded, setIsComposeGuarded] = useState(false);
+  const endComposeGuard = useCallback(() => setIsComposeGuarded(false), []);
+  useEffect(() => {
+    if (!isComposeGuarded) return;
+    const timer = setTimeout(() => setIsComposeGuarded(false), COMPOSE_UNCOVER_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [isComposeGuarded]);
+  const backStateRef = useRef<HomeBackState>({
+    quickMenuOpen: false,
+    todosOpen: false,
+    fullScreenOpen: false,
+    composing: false,
+    trayRaised: false,
+  });
+  backStateRef.current = {
+    quickMenuOpen: isQuickMenuOpen,
+    todosOpen: isTodosVisible,
+    fullScreenOpen: isTextBoxExpanded,
+    composing: isComposing,
+    // `sheetIndex` changes when a snap settles, so a Back pressed while the
+    // tray is still settling down to rest collapses it again (a no-op)
+    // rather than skipping straight to the system's Back.
+    trayRaised: sheetIndex > 0,
+  };
+  useHardwareBack(() => {
+    switch (decideHomeBack(backStateRef.current)) {
+      case "close-quick-menu":
+        setIsQuickMenuOpen(false);
+        return true;
+      case "todos":
+        if (!todosBackRef.current?.()) {
+          setIsComposeGuarded(true);
+          setIsTodosVisible(false);
+        }
+        return true;
+      case "collapse-full-screen":
+        settleExpandProgress(expandProgress, false, handleExpandSettle);
+        return true;
+      case "end-composing":
+        // Blurs the field; the draft text is untouched.
+        Keyboard.dismiss();
+        return true;
+      case "collapse-tray":
+        snapSheet(0);
+        return true;
+      case "system":
+        return false;
+    }
+  });
 
   // Shared spring physics for every snapToIndex call this sheet makes
   // (`@gorhom/bottom-sheet`'s own `animationConfigs` prop, applied uniformly
@@ -427,18 +660,97 @@ export default function HomeScreen() {
     overshootClamping: false,
   });
 
+  // ---- Option B: the tray's rest height is its measured content ----------
+  // handle + compose field + gap + dock (the dock's height includes the
+  // bottom safe-area inset — counted once, there). Measurements that arrive
+  // while typing (a growing multiline field, keyboard animation) are held
+  // and applied once typing ends, so the rest snap point never moves under
+  // the keyboard or mid-animation.
+  const [composeHeaderHeight, setComposeHeaderHeight] = useState(COMPOSE_HEADER_FALLBACK);
+  const [dockHeight, setDockHeight] = useState(DOCK_ROW_FALLBACK + insets.bottom);
+  const isTypingRef = useRef(false);
+  isTypingRef.current = isTyping;
+  const pendingHeaderHeightRef = useRef<number | null>(null);
+  const handleComposeHeaderLayout = useCallback((height: number) => {
+    if (isTypingRef.current) {
+      pendingHeaderHeightRef.current = height;
+      return;
+    }
+    // A fresh measurement outside typing supersedes anything held from
+    // typing — otherwise the effect below could apply the stale value after
+    // it (the two arrive in either order once typing ends) and leave the
+    // rest tray shorter than its field.
+    pendingHeaderHeightRef.current = null;
+    setComposeHeaderHeight(height);
+  }, []);
+  useEffect(() => {
+    if (!isTyping && pendingHeaderHeightRef.current !== null) {
+      setComposeHeaderHeight(pendingHeaderHeightRef.current);
+      pendingHeaderHeightRef.current = null;
+    }
+  }, [isTyping]);
+  const handleDockHeight = useCallback((height: number) => {
+    if (height > 0) setDockHeight(height);
+  }, []);
+  const restHeight = Math.round(SHEET_HANDLE_HEIGHT + composeHeaderHeight + REST_FIELD_DOCK_GAP + dockHeight);
+  // The 50% stage, unchanged — read from the live window (gorhom resolves
+  // "50%" against the live container, so a resize must move both together).
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const sheetHalfPx = windowHeight * 0.5;
+  // On constrained screens the dock yields at 50% (utils/readingViewport.ts):
+  // all measured — the 50% height, handle, compose field, body margin, dock.
+  const dockYieldsAtHalf = dockYieldsAtHalfFor({
+    halfHeight: sheetHalfPx,
+    handleHeight: SHEET_HANDLE_HEIGHT,
+    composeHeaderHeight,
+    bodyMarginTop: SHEET_BODY_MARGIN_TOP,
+    dockHeight,
+  });
+  const sheetHalfPxValue = useSharedValue(sheetHalfPx);
+  useEffect(() => {
+    sheetHalfPxValue.value = sheetHalfPx;
+  }, [sheetHalfPx, sheetHalfPxValue]);
+  const sheetRestPx = useSharedValue(restHeight);
+  useEffect(() => {
+    sheetRestPx.value = withTiming(restHeight, { duration: 220 });
+  }, [restHeight, sheetRestPx]);
+
+  // THE TRAY'S LIVE HEIGHT — the single owner of the home screen's vertical
+  // geometry (Redmi uplift Stage 2 corrections). Record/Ask, the centre
+  // area's clearance and the emblem's fit all read it, so they can't
+  // disagree: before, each assumed the tray sat exactly on a snap point, and
+  // whenever it didn't (a keyboard-era position, seen on the Redmi) the
+  // emblem ran under the switch and the switch under the dock. Measured from
+  // gorhom's own live top edge against the keyboard-down canvas; until both
+  // are known, the snap-point interpolation stands in.
+  const canvasHeightSV = useSharedValue(0);
+  useEffect(() => {
+    canvasHeightSV.value = stableCanvasHeight;
+  }, [stableCanvasHeight, canvasHeightSV]);
+  const liveSheetPx = useDerivedValue(() => {
+    const staged = interpolate(sheetAnimatedIndex.value, [0, 1], [sheetRestPx.value, sheetHalfPxValue.value], "clamp");
+    return liveTrayHeight(staged, canvasHeightSV.value, sheetAnimatedPosition.value, sheetRestPx.value);
+  });
+
+  // Xayra 2.0: the Record/Ask switch sits centred just above the tray and
+  // follows it (drawerFloatingStackAnimatedStyle below). Its measured height
+  // feeds the centre area's clearance, so the emblem never runs into it.
+  const modeSwitchReserve = useSharedValue(MODE_SWITCH_FALLBACK_HEIGHT + MODE_SWITCH_BOTTOM_GAP + CENTER_AREA_BREATHING_ROOM_PX);
+  const [modeSwitchHeight, setModeSwitchHeight] = useState(MODE_SWITCH_FALLBACK_HEIGHT);
+  const handleModeSwitchLayout = useCallback(
+    (e: LayoutChangeEvent) => setModeSwitchHeight(Math.round(e.nativeEvent.layout.height)),
+    []
+  );
+  useEffect(() => {
+    modeSwitchReserve.value = modeSwitchHeight + MODE_SWITCH_BOTTOM_GAP + CENTER_AREA_BREATHING_ROOM_PX;
+  }, [modeSwitchHeight, modeSwitchReserve]);
+
   // Build 20 BUTTON CLEARANCE: the center canvas's own bottom padding tracks
-  // the sheet's live height (same interpolation approach as ComposeBar's
-  // PINNED DRAWER HEADER below) plus a fixed breathing-room margin, so the
-  // record button never ends up crowded against — or covered by — the sheet
-  // once it auto-peeks to 50% during an ASK request.
+  // the sheet's live height plus the Record/Ask switch above it, so the
+  // emblem never ends up crowded against — or covered by — either one once
+  // the sheet auto-peeks to 50% during an ASK request.
   const centerAreaAnimatedStyle = useAnimatedStyle(() => ({
-    paddingBottom: interpolate(
-      sheetAnimatedIndex.value,
-      [0, 1],
-      SHEET_HEIGHTS_PX.map((heightPx) => heightPx + CENTER_AREA_BREATHING_ROOM_PX),
-      "clamp"
-    ),
+    paddingBottom: liveSheetPx.value + modeSwitchReserve.value,
   }));
 
   // Build 23 POSITION FLOATING PILLS (live-tracked): found by testing on a
@@ -453,8 +765,42 @@ export default function HomeScreen() {
   // there's no text input or keyboard interaction in this stack at all, just
   // a plain shared-value interpolation against the sheet's own index.
   const drawerFloatingStackAnimatedStyle = useAnimatedStyle(() => ({
-    bottom: interpolate(sheetAnimatedIndex.value, [0, 1], SHEET_HEIGHTS_PX, "clamp") + 16,
+    bottom: liveSheetPx.value + MODE_SWITCH_BOTTOM_GAP,
+    // Visibility comes only from the full-screen progress, on the UI thread:
+    // gone within the first ~1% of an expansion (a few px of travel — before
+    // the rising tray reaches the switch) and back only in the last ~1% of a
+    // collapse, when its place above the tray is free again. No React state,
+    // no mount/unmount, no timed fade — so no frame can lag the tray. (It was
+    // unmounted on release with a 120 ms FadeOut that restarted from full
+    // opacity, and remounted with a FadeIn while the full-screen tray still
+    // covered the screen: the flash/residue seen on the Redmi.)
+    opacity: interpolate(expandProgress.value, [0, FULL_SCREEN_SWITCH_HIDE_AT], [1, 0], "clamp"),
   }));
+
+  // The emblem zone takes the space actually left between the header and
+  // the switch at each tray stage (measured centre-area height), less what
+  // sits under it (cue/status, plus the waveform and Cancel while working),
+  // within the canvas's limits. Two targets, interpolated live with the
+  // tray's position, so it resizes in step with a drag or snap.
+  const [centerRegionHeight, setCenterRegionHeight] = useState(0);
+  const handleCenterAreaLayout = useCallback(
+    (e: LayoutChangeEvent) => setCenterRegionHeight(Math.round(e.nativeEvent.layout.height)),
+    []
+  );
+  const zoneRest = useSharedValue(EMBLEM_ZONE_INITIAL);
+  const zoneHalf = useSharedValue(EMBLEM_ZONE_INITIAL);
+  // What the emblem's fit needs besides the tray's height (set with the
+  // stage targets below): the room above the tray less the switch and the
+  // essentials under the emblem, and each stage's cue height and orbit room.
+  const zoneBudget = useSharedValue({ base: 0, maxZone: EMBLEM_ZONE_MAX_REST, cueRest: 0, cueHalf: 0, roomRest: ORBIT_ROOM, roomHalf: ORBIT_ROOM });
+  const emblemZoneSize = useDerivedValue(() => {
+    const t = sheetAnimatedIndex.value;
+    const staged = interpolate(t, [0, 1], [zoneRest.value, zoneHalf.value], "clamp");
+    const b = zoneBudget.value;
+    const cue = interpolate(t, [0, 1], [b.cueRest, b.cueHalf], "clamp");
+    const room = interpolate(t, [0, 1], [b.roomRest, b.roomHalf], "clamp");
+    return fittedEmblemZone(staged, b.maxZone, b.base, liveSheetPx.value, cue, room);
+  });
 
   // BACKDROP TAP TO DISMISS: tapping anywhere on the canvas outside the
   // sheet/compose bar/center button (all of which are Pressables of their
@@ -462,9 +808,19 @@ export default function HomeScreen() {
   // keyboard and returns the sheet to its resting peek. Both calls are
   // harmless no-ops when already dismissed/collapsed, so this doesn't need
   // to first check whether either is actually open.
+  //
+  // Not while the full-screen view is open (Redmi uplift Stage 2): nothing
+  // behind it is backdrop, but a touch on its list's empty space (a short
+  // list doesn't claim the touch) fell through to this canvas — and since
+  // the canvas is the whole screen, even a swipe counted as a press. It
+  // quietly collapsed the tray underneath, so closing the full-screen view
+  // landed on the rest stage instead of the 50% tray it opened from.
+  const isTextBoxExpandedRef = useRef(false);
+  isTextBoxExpandedRef.current = isTextBoxExpanded;
   const handleBackdropPress = useCallback(() => {
+    if (isTextBoxExpandedRef.current) return;
     Keyboard.dismiss();
-    sheetRef.current?.snapToIndex(0);
+    snapSheet(0);
   }, []);
 
   // Catches up any note saved while the embedding model wasn't available
@@ -533,7 +889,10 @@ export default function HomeScreen() {
           ? await createVoiceNote(audioUri, text, whisperModelId)
           : await createTextNote(text);
         showToast("Saved thought to memory");
-        sheetRef.current?.snapToIndex(0);
+        // Back to the resting peek — unless the keyboard is open (typed notes
+        // keep it up for the next one): the peek sits behind the keyboard, so
+        // snapping there hid the input and its Send button.
+        if (!Keyboard.isVisible()) snapSheet(0);
         savedNote = true;
         // So the Record-mode drawer list shows the new note immediately,
         // not just after the next screen-focus refresh.
@@ -596,7 +955,7 @@ export default function HomeScreen() {
       // still moves right away rather than only after the note/answer
       // pipeline finishes. A manual voice Ask already raised it when its
       // recording ended — not again, so a manual drag isn't overridden.
-      if (!voiceAsk) sheetRef.current?.snapToIndex(1);
+      if (!voiceAsk) snapSheet(1);
       const intent: "RECORD" | "ASK" = mode === "record" ? "RECORD" : "ASK";
       try {
         setProcessingLabel(intent === "RECORD" ? "note" : "query");
@@ -680,6 +1039,10 @@ export default function HomeScreen() {
   }, []);
 
   const currentJobRef = useRef<ProcessingJob | null>(null);
+  // The job of the Handsfree utterance in flight (never a manual one), and
+  // the Handsfree jobs the user has explicitly stopped.
+  const handsfreeJobRef = useRef<ProcessingJob | null>(null);
+  const interruptedHandsfreeJobsRef = useRef(new WeakSet<ProcessingJob>());
   const [cancellableJobId, setCancellableJobId] = useState<number | null>(null);
   const beginJob = useCallback(() => {
     const job = new ProcessingJob();
@@ -736,6 +1099,7 @@ export default function HomeScreen() {
         // early.
         job = beginJob();
         const thisJob = job;
+        if (options?.isHandsfree) handsfreeJobRef.current = thisJob;
         // A cancelled utterance releases its manual-utterance slot at once
         // (the mic is already closed by now), so the central button works
         // again without waiting for Whisper/RAG to unwind.
@@ -837,15 +1201,26 @@ export default function HomeScreen() {
         // manual utterance open.
         options?.onRouted?.();
 
-        reportState?.("speaking");
+        // "speaking" is reported only when something is actually about to be
+        // spoken — Handsfree's status must never say "speaking" in silence.
+        // Nothing is spoken for a Handsfree utterance the user stopped — not
+        // even "Saved." for a note whose write had already committed.
+        if (options?.isHandsfree && !mayHandsfreeSpeak(thisJob, interruptedHandsfreeJobsRef.current)) {
+          return;
+        }
+        // A Cancel from here on also silences whatever this job starts
+        // saying.
+        thisJob.onCancel(() => void stopSpeech());
         if (intent === "RECORD") {
           // Spoken only when a note was really written (it used to be said
           // even when the recording was discarded as empty/silent).
           const completion = recordCompletionSpeech(saved);
           if (completion) {
+            reportState?.("speaking");
             await speakTextAndWait(completion);
           }
         } else if (answerText && assistantId) {
+          reportState?.("speaking");
           // `chatSession.speakMessageAndWait` — not chatSession's other
           // (fire-and-forget) speech path, and not a raw `speakTextAndWait`
           // call either. Handsfree Mode needs to actually wait for playback
@@ -882,6 +1257,7 @@ export default function HomeScreen() {
         if (!job || currentJobRef.current === job) {
           setPipelineStage(mode === "record" ? "note" : "chat", null);
         }
+        if (job && handsfreeJobRef.current === job) handsfreeJobRef.current = null;
         if (job) endJob(job);
         else {
           setProcessingState("idle");
@@ -1004,6 +1380,18 @@ export default function HomeScreen() {
     manualControllerRef.current = new ManualUtteranceController({
       startRecording: (options) => recorderRef.current.startRecording(options),
       stopRecording: () => recorderRef.current.stopRecording(),
+      // Cancel during recording: the native recognizer started alongside
+      // the recording goes too, and no audio file is ever written.
+      discardRecording: async () => {
+        // Throws, leaving the recording as it was, if the microphone
+        // couldn't be told to stop — then the recognizer keeps going too.
+        await recorderRef.current.discardRecording();
+        asrRouter.cancelListening();
+      },
+      onCancelCleanupError: (err) => {
+        console.warn("[Recorder] Stopping the microphone failed while cancelling", err);
+        setError(CANCEL_STOP_FAILED_MESSAGE);
+      },
       processUtterance: async (audioUri, mode, trigger, release) => {
         if (__DEV__) {
           console.log(`[Recorder] Finished by ${trigger === "silence" ? "trailing silence" : "tap"} (${mode})`);
@@ -1013,13 +1401,13 @@ export default function HomeScreen() {
         try {
           await finishUtteranceRef.current(audioUri, mode, undefined, { onRouted: release, voiceAsk });
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
+          const message = userFacingMessage(err, "Something went wrong. Try again.");
           setError(message);
           Alert.alert("Recording Error", message);
         }
       },
       onChange: setManualUtterance,
-      onError: (err) => setError(err instanceof Error ? err.message : "Recording failed."),
+      onError: (err) => setError(userFacingMessage(err, "Recording failed.")),
       // VOICE ASK: the moment the recording ends, the tray rises (once) and
       // its answer bubble appears with "Got it…" — the single surface for
       // this Ask's whole wait, transcription included. Record is untouched.
@@ -1028,10 +1416,13 @@ export default function HomeScreen() {
         devTiming("VoiceAskTiming", "capture end — tray snap requested");
         pendingVoiceAskRef.current = reserveVoiceAsk(mode, {
           beginPendingAsk: () => chatSessionRef.current.beginPendingAsk(),
-          raiseTray: () => sheetRef.current?.snapToIndex(1),
+          raiseTray: () => snapSheet(1),
         });
       },
       onCaptureDiscarded: () => {
+        // Nothing to transcribe: the recognizer started alongside this
+        // recording has no use either (Gate B — it used to be left running).
+        asrRouter.cancelListening();
         const reservation = pendingVoiceAskRef.current;
         pendingVoiceAskRef.current = null;
         if (reservation) discardVoiceAsk(reservation);
@@ -1042,21 +1433,23 @@ export default function HomeScreen() {
   // If this screen unmounts mid-utterance (e.g. the activity is re-created),
   // that utterance must die with it — never finish or be processed by a
   // screen nobody can see. (The recorder hook closes the mic itself.)
-  useEffect(() => () => manualControllerRef.current?.dispose(), []);
+  useEffect(
+    () => () => {
+      const controller = manualControllerRef.current;
+      const phase = controller?.snapshot.phase;
+      if (phase === "starting" || phase === "recording") asrRouter.cancelListening();
+      controller?.dispose();
+    },
+    []
+  );
 
   useFocusEffect(
     useCallback(() => {
       return () => {
-        // An abandoned recording is never transcribed, so its WAV is
-        // deleted here — it used to be left behind permanently.
-        void recorderRef.current
-          .stopRecording()
-          .then((uri) => {
-            if (!uri) return undefined;
-            manualControllerRef.current?.abandon();
-            return FileSystem.deleteAsync(uri, { idempotent: true });
-          })
-          .catch(() => {});
+        // Leaving the screen mid-recording cancels it exactly like the
+        // Cancel button: never transcribed, no audio file written. (Once
+        // capture has ended, processing carries on as before.)
+        void manualControllerRef.current?.cancel();
       };
     }, [])
   );
@@ -1076,6 +1469,9 @@ export default function HomeScreen() {
   const handleCancelProcessing = useCallback(() => {
     const job = currentJobRef.current;
     if (!cancelProcessing(job)) return;
+    // A recognizer still waiting to be asked for this utterance's
+    // transcript never will be (Gate B).
+    asrRouter.cancelListening();
     currentJobRef.current = null;
     setCancellableJobId(null);
     setProcessingState("idle");
@@ -1083,33 +1479,84 @@ export default function HomeScreen() {
     showToast("Cancelled");
   }, []);
 
+  // Cancel DURING RECORDING (Stage 5a) — distinct from the processing
+  // Cancel above: closes the microphone and throws the utterance away
+  // before anything is transcribed, saved or asked. The id pins it to the
+  // recording the button was shown for; if that recording already finished
+  // (a tap or trailing silence won the race), this does nothing.
+  const handleCancelRecording = useCallback(
+    (utteranceId: number) => {
+      void manualController.cancel(utteranceId).then((cancelled) => {
+        if (!cancelled) return;
+        showToast("Cancelled");
+        // A retried Cancel worked: its own earlier "couldn't stop" message
+        // no longer applies. Any other error is left alone.
+        setError(clearCancelStopError);
+      });
+    },
+    [manualController]
+  );
+
+  // Finish from the compact control shown only when the emblem is hidden
+  // (constrained screens): the same manual completion as tapping the
+  // emblem, pinned to the recording it was shown for.
+  const handleFinishRecording = useCallback(
+    (utteranceId: number) => {
+      void manualController.finish("tap", utteranceId);
+    },
+    [manualController]
+  );
+
   // The one way a manual utterance starts — a central-button tap or a
   // launcher shortcut — with the mode it will mean.
+  // Ends text entry before any voice capture starts (manual or Handsfree):
+  // the keyboard closes and the field leaves compose mode. The draft text
+  // is kept.
+  const endComposingForCapture = useCallback(() => {
+    Keyboard.dismiss();
+    setIsComposing(false);
+  }, []);
+
   const startManualUtterance = useCallback(
     async (mode: UtteranceMode) => {
       setError(null);
+      // No speech model yet → no recording at all (it could only fail to
+      // transcribe, losing the spoken note); typing works meanwhile.
+      const voice = await checkVoiceReady();
+      if (!voice.ready) {
+        setError(voice.message);
+        return;
+      }
+      // Recording and composing are never both live: a recording started
+      // while the compose field had focus used to leave the keyboard up and
+      // the screen in two states at once — dock gone, Record/Ask stranded in
+      // the tray, recording controls hidden under it (Redmi uplift 1C,
+      // reproduced on the emulator).
+      endComposingForCapture();
       // Starting a recording collapses the sheet to its resting peek
       // immediately.
-      sheetRef.current?.snapToIndex(0);
+      snapSheet(0);
       try {
         // Build 39: the PCM recorder starts FIRST, then Tier 1 — confirmed
         // on-device (Pixel 9) that reconfiguring the audio session
         // (`setAudioModeAsync`, inside startRecording) while Tier 1's
         // SpeechRecognizer was already listening starved it of audio.
         await manualController.start(mode);
-        asrRouter.startListening();
+        // Not for a start that was cancelled (or failed) on the way.
+        if (manualController.snapshot.phase === "recording") asrRouter.startListening();
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Recording failed.");
+        setError(userFacingMessage(err, "Recording failed."));
       }
     },
-    [manualController]
+    [manualController, endComposingForCapture]
   );
 
   const handleRecordPress = useCallback(async () => {
     const action = decideCentralTap({
       manualPhase: manualController.snapshot.phase,
       isProcessing: processingState === "processing",
-      isHandsfreeActive: activeMode.isActive,
+      // A Handsfree start in flight already owns the microphone.
+      isHandsfreeActive: activeMode.isActive || activeMode.isStarting,
       isRecorderTransitioning: recorder.isTransitioning,
     });
     switch (action) {
@@ -1253,7 +1700,40 @@ export default function HomeScreen() {
     return clearHandsfreeTimeout;
   }, [activeMode.isActive, armHandsfreeTimeout, clearHandsfreeTimeout]);
 
+  // Explicit Stop (dock, typing strip, long-press) stops the Handsfree
+  // interaction in progress, not just the listening (Stage 5b correction):
+  // the Handsfree-owned job is cancelled where it still can be — never a
+  // manual one — speech it started stops, and nothing more is spoken for
+  // it. A note whose write already committed stays saved; an answer already
+  // in the history stays there.
+  const interruptHandsfree = useCallback(() => {
+    interruptHandsfreeWork({
+      handsfreeJob: handsfreeJobRef.current,
+      interrupted: interruptedHandsfreeJobsRef.current,
+      isSpeaking: activeMode.state === "speaking",
+      stopSpeech: () => void stopSpeech(),
+      onCancelled: (job) => {
+        if (currentJobRef.current !== job) return;
+        currentJobRef.current = null;
+        setCancellableJobId(null);
+        setProcessingState("idle");
+        setProcessingLabel(null);
+      },
+    });
+  }, [activeMode.state]);
+
+  const stopHandsfreeExplicitly = useCallback(() => {
+    interruptHandsfree();
+    void activeMode.stop().then((stopped) => {
+      if (!stopped) showToast("Couldn’t stop the microphone. Tap Handsfree to try again.");
+    });
+  }, [activeMode, interruptHandsfree]);
+
   const handleToggleHandsfree = useCallback(() => {
+    if (activeMode.isActive || activeMode.isStarting) {
+      stopHandsfreeExplicitly();
+      return;
+    }
     // The other half of the mutual-exclusion fix above: refuse to engage
     // Handsfree (and steal the one native capture session) while a manual
     // recording is already using it. Only guards the *engage* direction —
@@ -1262,10 +1742,18 @@ export default function HomeScreen() {
       showToast("Finish your current recording first.");
       return;
     }
-    void activeMode.toggle().catch((err) => {
-      Alert.alert("Handsfree Error", err instanceof Error ? err.message : String(err));
+    endComposingForCapture();
+    void (async () => {
+      const voice = await checkVoiceReady();
+      if (!voice.ready) {
+        setError(voice.message);
+        return;
+      }
+      await activeMode.toggle();
+    })().catch((err) => {
+      Alert.alert("Handsfree Error", userFacingMessage(err, "Something went wrong. Try again."));
     });
-  }, [activeMode, recorder.isRecording, recorder.isTransitioning]);
+  }, [activeMode, recorder.isRecording, recorder.isTransitioning, stopHandsfreeExplicitly, endComposingForCapture]);
 
   const handleLongPressCenterButton = handleToggleHandsfree;
 
@@ -1274,19 +1762,30 @@ export default function HomeScreen() {
   // once so the hand-off is visible.
   const isManualStopping =
     manualUtterance.phase === "processing" && (recorder.isRecording || recorder.isTransitioning);
-  const canvasState: RecorderCanvasState = isManualStopping
+  // Cancelling acknowledges at once: the listening visuals go while the
+  // microphone closes underneath.
+  const canvasState: RecorderCanvasState = manualUtterance.phase === "cancelling"
+    ? "idle"
+    : isManualStopping
     ? "transcribing"
     : recorder.isRecording
     ? "recording"
     : processingState === "processing"
       ? "transcribing"
-      : activeMode.isActive && activeMode.state === "listening"
+      : activeMode.isActive && activeMode.state === "listening" && !activeMode.stopFailed
         ? "listening"
         : "idle";
 
   // Listening copy only while the mic is capturing; once capture ends,
   // "Got it", then the real pipeline stages (see centralStatusText).
-  const recordingStatusText = centralStatusText({
+  // While the microphone's native release is unconfirmed or failed, the
+  // status line says so rather than implying the microphone is off (Gate B).
+  const micSnapshot = useMicSnapshot();
+  const micNotice =
+    micSnapshot.phase === "releaseUnconfirmed" || micSnapshot.phase === "releaseFailed"
+      ? busyMessage(micSnapshot.phase)
+      : null;
+  const recordingStatusText = micNotice ?? centralStatusText({
     phase: isManualStopping
       ? "stopping"
       : canvasState === "recording"
@@ -1308,9 +1807,142 @@ export default function HomeScreen() {
     mode: inputMode,
   });
   const showCancelProcessing = canvasState === "transcribing" && !activeMode.isActive && cancellableJobId !== null;
+  const recordingUtteranceId = manualController.utteranceId;
   // Record/Ask can't change while a manual utterance is in flight — its
   // meaning was frozen when recording began.
   const isModeLocked = manualUtterance.phase !== "idle";
+
+  // Emblem zone targets (see emblemZoneSize). Recomputed only when the
+  // measured space or what sits under the emblem changes — never per frame.
+  // Responsive priority per tray stage: reduce the orbit, then drop the
+  // optional cue, then shrink the emblem, and hide it only when even the
+  // smallest emblem can't fit beside the essential controls.
+  const isEmblemBusy = canvasState === "recording" || canvasState === "transcribing";
+  const isManualRecording = canvasState === "recording";
+  // The status line's measured height: at large text it wraps ("Listening…
+  // I'll finish when you're done" takes two lines at 200%), which a
+  // one-line estimate under-counts — enough to push Cancel into the switch.
+  const [statusTextHeight, setStatusTextHeight] = useState(0);
+  const handleStatusTextLayout = useCallback((e: LayoutChangeEvent) => {
+    const height = Math.round(e.nativeEvent.layout.height);
+    setStatusTextHeight((prev) => (prev === height ? prev : height));
+  }, []);
+  const [emblemTiers, setEmblemTiers] = useState<{ rest: EmblemTier; half: EmblemTier }>({
+    rest: FULL_EMBLEM_TIER,
+    half: FULL_EMBLEM_TIER,
+  });
+  useEffect(() => {
+    if (centerRegionHeight === 0) return;
+    const textLine = (xayraType.cue.lineHeight ?? 20) * PixelRatio.getFontScale();
+    const statusLines = Math.max(textLine, statusTextHeight);
+    // Essential under the emblem: the status line (as measured), plus the
+    // waveform and Cancel while working. Optional: the idle "Tap to …" cue,
+    // or while recording the "Tap to finish" hint (Stage 5a: Cancel now
+    // shows during recording too, so the hint is what gives way first).
+    const essentialBelow = isEmblemBusy
+      ? CENTER_AREA_GAP_PX + statusLines + WAVEFORM_ROW_HEIGHT + CENTER_AREA_GAP_PX + MIN_TOUCH_TARGET
+      : 0;
+    const hintLine = (xayraType.meta.lineHeight ?? 18) * PixelRatio.getFontScale() + STATUS_HINT_OFFSET;
+    const cueBelow = isManualRecording
+      ? CENTER_AREA_GAP_PX + hintLine
+      : isEmblemBusy
+        ? 0
+        : CENTER_AREA_GAP_PX + textLine;
+    const reserve = modeSwitchHeight + MODE_SWITCH_BOTTOM_GAP + CENTER_AREA_BREATHING_ROOM_PX;
+    // The outer orbit arcs span ORBIT_SPAN x the zone; keep them inside the
+    // screen's side gutters too.
+    const widthCap = (windowWidth - 2 * ORBIT_SIDE_GUTTER) / ORBIT_SPAN;
+    const fit = (sheetPx: number, max: number) =>
+      emblemFit({
+        available: centerRegionHeight - sheetPx - reserve - essentialBelow,
+        cueHeight: cueBelow,
+        maxZone: Math.min(max, widthCap),
+        minZone: EMBLEM_ZONE_MIN,
+        reduceOrbitBelow: ORBIT_REDUCE_BELOW,
+        dropCueBelow: CUE_DROP_BELOW,
+        orbitRoom: ORBIT_ROOM,
+        reducedOrbitRoom: ORBIT_ROOM_REDUCED,
+      });
+    const rest = fit(restHeight, EMBLEM_ZONE_MAX_REST);
+    // The 50% stage gets the same ceiling as rest (Redmi uplift Stage 3:
+    // the thinking emblem stays near home size wherever the space allows).
+    const half = fit(sheetHalfPx, EMBLEM_ZONE_MAX_REST);
+    zoneBudget.value = {
+      base: centerRegionHeight - reserve - essentialBelow,
+      maxZone: Math.min(EMBLEM_ZONE_MAX_REST, widthCap),
+      cueRest: rest.tier.cue ? cueBelow : 0,
+      cueHalf: half.tier.cue ? cueBelow : 0,
+      roomRest: rest.tier.orbit === "full" ? ORBIT_ROOM : ORBIT_ROOM_REDUCED,
+      roomHalf: half.tier.orbit === "full" ? ORBIT_ROOM : ORBIT_ROOM_REDUCED,
+    };
+    zoneRest.value = withTiming(Math.round(rest.zone), { duration: 220 });
+    zoneHalf.value = withTiming(Math.round(half.zone), { duration: 220 });
+    setEmblemTiers((prev) =>
+      sameEmblemTier(prev.rest, rest.tier) && sameEmblemTier(prev.half, half.tier) ? prev : { rest: rest.tier, half: half.tier }
+    );
+  }, [
+    centerRegionHeight,
+    modeSwitchHeight,
+    isEmblemBusy,
+    isManualRecording,
+    statusTextHeight,
+    windowWidth,
+    restHeight,
+    sheetHalfPx,
+    zoneRest,
+    zoneHalf,
+    zoneBudget,
+  ]);
+  const emblemTier = sheetIndex === 0 ? emblemTiers.rest : emblemTiers.half;
+  // Cancel while a manual recording is capturing (Handsfree keeps its own
+  // tap-to-discard); Finish beside it only when the emblem is hidden.
+  const recordingActions = recordingActionsFor({
+    isCapturing: canvasState === "recording" && manualUtterance.phase === "recording",
+    isHandsfreeActive: activeMode.isActive,
+    emblemHidden: emblemTier.hidden,
+  });
+
+  const emblemLabel = activeMode.isActive
+    ? "Handsfree is on. Long-press to turn it off"
+    : canvasState === "recording"
+      ? "Recording. Tap to finish"
+      : inputMode === "ask"
+        ? "Tap to ask. Long-press for Handsfree"
+        : "Tap to record. Long-press for Handsfree";
+
+  // Stop from the typing status: the existing controller's own stop.
+  const handleStopHandsfree = stopHandsfreeExplicitly;
+  const handsfreeDisplayState: HandsfreeDisplayState = activeMode.isStarting
+    ? "starting"
+    : activeMode.stopFailed
+      ? "stopFailed"
+      : activeMode.state;
+
+  // The dock element, memoised so it's only re-created when what it shows
+  // changes (HistorySheet hands it to the sheet's footer).
+  const handleOpenTodos = useCallback(() => setIsTodosVisible(true), []);
+  const dock = useMemo(
+    () => (
+      <HomeDock
+        ref={quickMenuButtonRef}
+        handsfreeActive={activeMode.isActive || activeMode.isStarting}
+        handsfreeState={handsfreeDisplayState}
+        pendingCount={pendingCount}
+        bottomInset={insets.bottom}
+        onHandsfree={handleToggleHandsfree}
+        onTodos={handleOpenTodos}
+        onMore={handleOpenQuickMenu}
+        onHeightChange={handleDockHeight}
+      />
+    ),
+    [activeMode.isActive, activeMode.isStarting, activeMode.state, pendingCount, insets.bottom, handleToggleHandsfree, handleOpenTodos, handleOpenQuickMenu, handleDockHeight]
+  );
+
+  const isDockShown = !isTyping && !isTextBoxExpanded;
+  const dockHiddenAtHalf = dockYieldsAtHalf && sheetIndex === 1;
+  const dockFadeStyle = useAnimatedStyle(() => ({
+    opacity: dockYieldsAtHalf ? interpolate(sheetAnimatedIndex.value, [0.4, 1], [1, 0], "clamp") : 1,
+  }));
 
   // Opens a note's detail modal — shared by a chat citation chip's tap AND
   // a row tap in the Record-mode notes list (ChatSheetContent's
@@ -1332,7 +1964,7 @@ export default function HomeScreen() {
           void deleteNote(noteId)
             .then(() => setNotes((prev) => prev.filter((note) => note.id !== noteId)))
             .catch((err) => {
-              const message = err instanceof Error ? err.message : "Failed to delete note.";
+              const message = userFacingMessage(err, "Failed to delete note.");
               Alert.alert("Delete Error", message);
             });
         },
@@ -1355,7 +1987,7 @@ export default function HomeScreen() {
   // HistorySheet's `contentHidden` prop instead, entirely independent of
   // which index the sheet is actually at.
   const handleInputFocus = useCallback(() => {
-    sheetRef.current?.snapToIndex(1);
+    snapSheet(1);
     setIsComposing(true);
   }, []);
   // Blur (tapping away without submitting) un-hides the list again — a
@@ -1380,7 +2012,7 @@ export default function HomeScreen() {
       void routeFreeformInput(text, null, null, inputMode, job)
         .catch((err) => {
           if (job.cancelled) return;
-          const message = err instanceof Error ? err.message : "Something went wrong.";
+          const message = userFacingMessage(err, "Something went wrong.");
           setError(message);
           Alert.alert("Failed", message);
         })
@@ -1412,16 +2044,28 @@ export default function HomeScreen() {
         earlier version of this fix nested them inside the same Pressable and
         `pointerEvents="none"` blocked TodosOverlay's own subtree too,
         freezing the entire To-Dos screen (no scroll, no tap, nothing). */}
-    <Pressable style={styles.canvas} onPress={handleBackdropPress} pointerEvents={isTodosVisible ? "none" : "auto"}>
-      {/* Build 23 CLEAN TOP BRAND HEADER: back to just the logo/title (plus
-          its subtitle) — no pills, no cogwheel. Both moved out: the cogwheel
-          returned to ComposeBar's row (see that component), and Handsfree +
-          the Record/Ask pill now float above the drawer instead (below). */}
+    <Pressable
+      style={styles.canvas}
+      onLayout={handleCanvasLayout}
+      onPress={handleBackdropPress}
+      pointerEvents={isTodosVisible ? "none" : "auto"}
+      // A tap-to-dismiss surface only: not an accessibility element, so it
+      // doesn't swallow the header, emblem and switch into one giant focus
+      // stop (TalkBack reads and focuses them individually instead). "no"
+      // hides only this node, never its children.
+      accessible={false}
+      focusable={false}
+      importantForAccessibility="no"
+    >
+      {/* Xayra 2.0 header: centred mark and guidance only — Handsfree, To-Dos
+          and More live in the tray's dock (HomeDock). */}
       <View style={[styles.header, { paddingTop: insets.top + 12 }]}>
         <View style={styles.brandRow}>
           {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
           <Image source={require("../assets/icon.png")} style={styles.brandLogo} resizeMode="contain" />
-          <Text style={styles.brandTitle}>Xayra</Text>
+          <XText variant="wordmark" accessibilityRole="header">
+            Xayra
+          </XText>
         </View>
         {showGreeting ? (
           <Animated.Text key="greeting" entering={FadeIn} exiting={FadeOut} style={styles.brandSubtitle}>
@@ -1434,9 +2078,13 @@ export default function HomeScreen() {
         )}
       </View>
 
-      <Animated.View style={[styles.centerArea, centerAreaAnimatedStyle]}>
+      <Animated.View style={[styles.centerArea, centerAreaAnimatedStyle]} onLayout={handleCenterAreaLayout}>
         <CentralRecorderCanvas
           state={canvasState}
+          zoneSize={emblemZoneSize}
+          orbitDetail={emblemTier.orbit}
+          hidden={emblemTier.hidden}
+          accessibilityLabel={emblemLabel}
           amplitude={recorder.amplitude}
           onPress={() => void handleRecordPress()}
           onLongPress={handleLongPressCenterButton}
@@ -1456,105 +2104,80 @@ export default function HomeScreen() {
           // support.
           disabled={recorder.isTransitioning}
         />
-        {recordingStatusText && <Text style={styles.statusText}>{recordingStatusText}</Text>}
-        {idleCue && (
-          <Text testID="idle-tap-cue" style={[styles.statusText, styles.idleCue]}>
+        {recordingStatusText && (
+          // Polite live region: "Listening…", "Got it" and Record's real
+          // stages are announced as they change.
+          <Text style={styles.statusText} onLayout={handleStatusTextLayout} accessibilityLiveRegion="polite">
+            {recordingStatusText}
+          </Text>
+        )}
+        {idleCue && !micNotice && emblemTier.cue && (
+          <Text testID="idle-tap-cue" style={styles.statusText}>
             {idleCue}
           </Text>
         )}
-        {canvasState === "recording" && <Text style={styles.statusHint}>Tap to finish</Text>}
+        {canvasState === "recording" && emblemTier.cue && <Text style={styles.statusHint}>Tap to finish</Text>}
         {showCancelProcessing && <CancelProcessingButton onCancel={handleCancelProcessing} />}
+        {recordingActions.cancel && (
+          <RecordingActions
+            mode={manualUtterance.mode}
+            showFinish={recordingActions.finish}
+            onFinish={() => handleFinishRecording(recordingUtteranceId)}
+            onCancel={() => handleCancelRecording(recordingUtteranceId)}
+          />
+        )}
         {error && <Text style={styles.errorText}>{error}</Text>}
       </Animated.View>
 
-      {/* Build 23 POSITION FLOATING PILLS: Handsfree + the Record/Ask mode
-          pill float in a single right-aligned cluster directly above the
-          bottom sheet drawer, tracking the sheet's live height (see
-          drawerFloatingStackAnimatedStyle above) so it stays above the
-          drawer at every snap index instead of only at the 20% rest peek.
-
-          Hidden entirely while the glass box is at its 88% expanded stage:
-          `drawerFloatingStackAnimatedStyle` tracks `sheetAnimatedIndex`,
-          which never reports anything past its 50%-height value during that
-          stage (see this screen's own SHEET_HEIGHTS_PX comment for why) —
-          confirmed on-device, this cluster stayed pinned at the 50%
-          position and visibly overlapped the now-much-taller box's note
-          cards instead of floating cleanly above it. Rather than build a
-          second, independent animated position purely to track an
-          overshoot state the user isn't even meant to interact with these
-          controls during (they're browsing/reading, not recording, while
-          expanded — a swipe down on the expanded view's own handle is right
-          there to get back), hiding the cluster removes the collision
-          outright. */}
-      {/* Also hidden while TodosOverlay is open (isTodosVisible) — plain
-          sibling paint order alone didn't reliably keep this Animated.View
-          (entering/exiting FadeIn/FadeOut) behind the overlay on-device;
-          not mounting it at all while the overlay is up is the same
-          defensive pattern already used for isTextBoxExpanded above,
-          applied for the same reason. */}
-      {!isTextBoxExpanded && !isTodosVisible && (
+      {/* The Record/Ask switch, centred directly above the tray and tracking
+          its live height (drawerFloatingStackAnimatedStyle), so it stays
+          above the tray at every snap index. Under To-Dos it is unmounted
+          (its fades run only then). For the full-screen view it stays
+          mounted: hidden by the view's own progress (see
+          drawerFloatingStackAnimatedStyle), and drawn BENEATH the view —
+          ExpandedTextOverlay sits at a higher elevation — so no frame of it
+          can ever paint over the full-screen tray. */}
+      {!isTodosVisible && (
         <Animated.View
           entering={FadeIn.duration(150)}
           exiting={FadeOut.duration(120)}
-          pointerEvents="box-none"
-          style={[styles.drawerFloatingStack, { right: 24 }, drawerFloatingStackAnimatedStyle]}
+          pointerEvents={isTextBoxExpanded ? "none" : "box-none"}
+          importantForAccessibility={isTextBoxExpanded ? "no-hide-descendants" : "auto"}
+          accessibilityElementsHidden={isTextBoxExpanded}
+          onLayout={handleModeSwitchLayout}
+          style={[styles.modeSwitchRow, drawerFloatingStackAnimatedStyle]}
         >
-          {/* "Quiet Corner" pass: Archive and Settings are both deliberate,
-              infrequent visits — never something reached for mid-recording —
-              so they don't get their own permanent pills in this cluster.
-              One small icon, inline with To-Dos (the cluster's own
-              least-frequent existing member), opens a two-row popover
-              instead. Record/Ask/Handsfree below are unchanged. */}
-          <View style={styles.topRow}>
-            <Pressable ref={quickMenuButtonRef} onPress={handleOpenQuickMenu} hitSlop={10} style={styles.quickMenuButton}>
-              <Text style={styles.quickMenuButtonText}>•••</Text>
-            </Pressable>
-            <Pressable onPress={() => setIsTodosVisible(true)} style={styles.todosPill}>
-              <Text style={styles.todosPillText}>
-                {pendingCount > 0 ? `To-Dos (${pendingCount})` : "To-Dos"}
-              </Text>
-            </Pressable>
-          </View>
-
-          <Pressable
-            onPress={handleToggleHandsfree}
-            style={[styles.handsfreePill, activeMode.isActive && styles.handsfreePillActive]}
-          >
-            <Text style={[styles.handsfreePillText, activeMode.isActive && styles.handsfreePillTextActive]}>
-              🎧 {activeMode.isActive ? `Handsfree · ${activeMode.state}` : "Handsfree"}
-            </Text>
-          </Pressable>
-
-          <View style={styles.modePill}>
-            {(["record", "ask"] as const).map((mode) => (
-              <Pressable
-                key={mode}
-                onPress={() => handleSelectMode(mode)}
-                disabled={isModeLocked}
-                accessibilityState={{ selected: inputMode === mode, disabled: isModeLocked }}
-                style={[
-                  styles.modePillOption,
-                  inputMode === mode && styles.modePillOptionActive,
-                  isModeLocked && inputMode !== mode && styles.modePillOptionLocked,
-                ]}
-              >
-                <Text style={[styles.modePillText, inputMode === mode && styles.modePillTextActive]}>
-                  {mode === "record" ? "Record" : "Ask"}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
+          {/* The dock is hidden while typing (and, on constrained screens,
+              at 50%); an active Handsfree session stays visible here — real
+              state and a working Stop. */}
+          {activeMode.isActive && (isTyping || (dockYieldsAtHalf && sheetIndex === 1)) && (
+            <HandsfreeTypingStatus state={handsfreeDisplayState} onStop={handleStopHandsfree} />
+          )}
+          <SegmentedControl
+            segments={MODE_SEGMENTS}
+            value={inputMode}
+            onChange={handleSelectMode}
+            disabled={isModeLocked}
+            accessibilityLabel="Mode"
+          />
         </Animated.View>
       )}
 
       <HistorySheet
         ref={sheetRef}
         animatedIndex={sheetAnimatedIndex}
+        animatedPosition={sheetAnimatedPosition}
         sheetIndex={sheetIndex}
         contentHidden={isComposing}
         onIndexChange={handleSheetIndexChange}
         modelDownload={chatSession.modelDownload}
         bottomInset={insets.bottom}
+        restHeight={restHeight}
+        reserveFooter={isDockShown}
+        gesturesEnabled={!isTextBoxExpanded}
+        footerHeight={dockHeight}
+        footerYieldsAtHalf={dockYieldsAtHalf}
+        onHeaderLayout={handleComposeHeaderLayout}
         expandProgress={expandProgress}
         expandDragDistance={EXPAND_DRAG_DISTANCE}
         onExpandSettle={handleExpandSettle}
@@ -1566,8 +2189,11 @@ export default function HomeScreen() {
             onInputFocus={handleInputFocus}
             onInputBlur={handleInputBlur}
             onSubmit={handleSubmitText}
-            placeholder={inputMode === "record" ? "Type your thoughts..." : "Search your thoughts..."}
+            placeholder={inputMode === "record" ? "Type your thoughts…" : "Search your thoughts…"}
             mode={inputMode}
+            sheetIndex={sheetIndex}
+            covered={isTodosVisible || isComposeGuarded}
+            onCoveredTouch={endComposeGuard}
           />
         }
         // Record mode shows the notes list (newest first); Ask mode keeps
@@ -1591,10 +2217,30 @@ export default function HomeScreen() {
             onSubmitStarterPrompt={(prompt) => void chatSession.submitQuery(prompt, "text")}
             onToggleSpeech={chatSession.toggleSpeech}
             onShowCitation={handleShowCitation}
-            bottomInset={insets.bottom}
+            listBottomPadding={TRAY_LIST_END_PADDING}
           />
         }
       />
+
+      {/* The dock: a fixed screen element anchored to the bottom of the
+          keyboard-down canvas (Redmi uplift Stage 2) — never the tray's
+          footer, so recording, processing, the tray, the keyboard or a
+          stale keyboard-era layout can't lift it. Hidden while typing and
+          in the full-screen view, as before. */}
+      {isDockShown && (
+        <Animated.View
+          pointerEvents={dockHiddenAtHalf ? "none" : "box-none"}
+          importantForAccessibility={dockHiddenAtHalf ? "no-hide-descendants" : "auto"}
+          accessibilityElementsHidden={dockHiddenAtHalf}
+          style={[
+            styles.dockAnchor,
+            stableCanvasHeight > 0 ? { top: stableCanvasHeight - dockHeight } : { bottom: 0 },
+            dockFadeStyle,
+          ]}
+        >
+          {dock}
+        </Animated.View>
+      )}
 
       {/* Build 20 HARDENED NAV BAR SURFACE: app.json's
           android.navigationBarColor already sets #1C1C1E at the OS level,
@@ -1633,6 +2279,7 @@ export default function HomeScreen() {
         progress={expandProgress}
         dragDistance={EXPAND_DRAG_DISTANCE}
         onSettle={handleExpandSettle}
+        listScrollOffset={overlayListOffset}
       >
         <ChatSheetContent
           mode={inputMode}
@@ -1648,8 +2295,9 @@ export default function HomeScreen() {
           onSubmitStarterPrompt={(prompt) => void chatSession.submitQuery(prompt, "text")}
           onToggleSpeech={chatSession.toggleSpeech}
           onShowCitation={handleShowCitation}
-          bottomInset={insets.bottom}
+          listBottomPadding={insets.bottom + OVERLAY_LIST_END_PADDING}
           usePlainList
+          listScrollOffset={overlayListOffset}
         />
       </ExpandedTextOverlay>
 
@@ -1673,7 +2321,7 @@ export default function HomeScreen() {
           subtree too, freezing To-Dos completely). */}
       {isTodosVisible && (
         <Animated.View entering={todosOverlayPopIn} exiting={FadeOut.duration(150)} style={styles.todosOverlayWrap}>
-          <TodosOverlay onClose={() => setIsTodosVisible(false)} />
+          <TodosOverlay onClose={() => setIsTodosVisible(false)} backRef={todosBackRef} />
         </Animated.View>
       )}
 
@@ -1696,11 +2344,10 @@ export default function HomeScreen() {
       {isQuickMenuOpen && quickMenuAnchor && (
         <View style={styles.quickMenuBackdropView} pointerEvents="box-none">
           <Pressable style={StyleSheet.absoluteFill} onPress={() => setIsQuickMenuOpen(false)} />
-          {/* Anchored to the icon's actual measured position (quickMenuAnchor),
-              not a fixed corner — grows UPWARD (bottom-anchored, per the
-              screen-height math below) since the icon sits low on screen,
-              and right-aligns its own right edge to the icon's, so it never
-              spills off the right edge of the screen. */}
+          {/* Anchored to the More button's actual measured position
+              (quickMenuAnchor): opens upward from the dock (downward if the
+              button is ever in the top half), right-aligned to it and kept
+              inside the screen's side gutter. */}
           {/* Design-sandbox pass: this used to pop into existence with zero
               animation — the one overlay in this file with no entrance
               transition at all. Fluid pop-out spring (scale 0.95->1.0 +
@@ -1713,29 +2360,30 @@ export default function HomeScreen() {
             exiting={FadeOut.duration(120)}
             style={[
               styles.quickMenuPopover,
-              {
-                right: Dimensions.get("window").width - (quickMenuAnchor.x + quickMenuAnchor.width),
-                bottom: Dimensions.get("window").height - quickMenuAnchor.y + 8,
-              },
+              quickMenuPosition(quickMenuAnchor),
             ]}
           >
             <Pressable
+              accessibilityRole="menuitem"
               style={({ pressed }) => [styles.quickMenuRow, pressed && styles.quickMenuRowPressed]}
               onPress={() => {
                 setIsQuickMenuOpen(false);
                 handleOpenArchive();
               }}
             >
-              <Text style={styles.quickMenuRowText}>🗄️ Archived notes ({notesCount})</Text>
+              <Feather name="archive" size={18} color={xayraColors.textSoft} />
+              <Text style={styles.quickMenuRowText}>Archived notes ({notesCount})</Text>
             </Pressable>
             <Pressable
+              accessibilityRole="menuitem"
               style={({ pressed }) => [styles.quickMenuRow, pressed && styles.quickMenuRowPressed]}
               onPress={() => {
                 setIsQuickMenuOpen(false);
                 handleSettingsPress();
               }}
             >
-              <Text style={styles.quickMenuRowText}>⚙️ Settings</Text>
+              <Feather name="settings" size={18} color={xayraColors.textSoft} />
+              <Text style={styles.quickMenuRowText}>Settings</Text>
             </Pressable>
           </Animated.View>
         </View>
@@ -1764,136 +2412,37 @@ const styles = StyleSheet.create({
     bottom: 0,
   },
   header: {
-    paddingHorizontal: 24,
+    paddingHorizontal: 12,
     paddingBottom: 4,
+    alignItems: "center",
+    gap: 8,
   },
   brandRow: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
+    justifyContent: "center",
+    gap: 9,
   },
   brandLogo: {
-    width: 26,
-    height: 26,
-    borderRadius: 6,
-  },
-  brandTitle: {
-    color: "#FFFFFF",
-    fontSize: 22,
-    fontWeight: "700",
-    letterSpacing: -0.3,
-  },
-  brandSubtitle: {
-    color: "rgba(235,235,245,0.55)",
-    fontSize: 13,
-    marginTop: 4,
-    lineHeight: 18,
-  },
-  // Build 23 POSITION FLOATING PILLS: Handsfree + the Record/Ask pill,
-  // right-aligned, floating above the drawer — `bottom` is animated (see
-  // drawerFloatingStackAnimatedStyle) to track the sheet's live height so
-  // this stays above the drawer at every snap index, not just its resting
-  // peek. No text input lives in here (that's ComposeBar's job, inside the
-  // sheet), so unlike Build 20's ComposeBar this has no keyboard-avoidance
-  // of its own to fight with anything — just a plain shared-value
-  // interpolation against the sheet's own index.
-  drawerFloatingStack: {
-    position: "absolute",
-    alignItems: "flex-end",
-    zIndex: 25,
-    elevation: 25,
-  },
-  // Order here is visual top-to-bottom: To-Dos, then Handsfree, then the
-  // Record/Ask pill. Styled as a plain dark pill, deliberately unstyled by
-  // pendingCount (no accent tint at >0) — the badge NUMBER inside the label
-  // is the whole affordance per spec, not a color change on top of it.
-  // Wraps the new "•••" quick-menu icon and the To-Dos pill side by side —
-  // inline, not stacked as its own row, so the cluster's total height
-  // doesn't grow past what it was before this pass (see the "Quiet Corner"
-  // placement discussion for why inline-with-To-Dos won out over a plain
-  // 4th stacked row).
-  topRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    marginBottom: 10, // gap above the Handsfree pill
-  },
-  quickMenuButton: {
     width: 28,
     height: 28,
-    borderRadius: 14,
-    borderWidth: 1,
+    borderRadius: 7,
+  },
+  brandSubtitle: {
+    ...xayraType.guidance,
+    color: xayraColors.textMuted,
+    textAlign: "center",
+    maxWidth: 320,
+    paddingHorizontal: 12,
+  },
+  modeSwitchRow: {
+    position: "absolute",
+    left: 0,
+    right: 0,
     alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "rgba(28, 28, 30, 0.85)",
-    borderColor: "rgba(255,255,255,0.1)",
-  },
-  quickMenuButtonText: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: "#8E8E93",
-    letterSpacing: 1,
-  },
-  todosPill: {
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderWidth: 1,
-    backgroundColor: "rgba(28, 28, 30, 0.85)",
-    borderColor: "rgba(255,255,255,0.1)",
-  },
-  todosPillText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: "#8E8E93",
-  },
-  handsfreePill: {
-    marginBottom: 10, // gap above the Record/Ask pill
-    borderRadius: 999,
-    paddingHorizontal: 12,
-    paddingVertical: 7,
-    borderWidth: 1,
-    // OFF state, per spec.
-    backgroundColor: "rgba(28, 28, 30, 0.85)",
-    borderColor: "rgba(255,255,255,0.1)",
-  },
-  handsfreePillActive: {
-    // ON state, per spec.
-    backgroundColor: "#635BFF",
-    borderColor: "#635BFF",
-  },
-  handsfreePillText: {
-    fontSize: 12,
-    fontWeight: "600",
-    color: "#8E8E93",
-  },
-  handsfreePillTextActive: {
-    color: "#FFFFFF",
-  },
-  modePill: {
-    flexDirection: "row",
-    backgroundColor: "#1C1C1E",
-    borderRadius: 999,
-    padding: 3,
-  },
-  modePillOption: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 999,
-  },
-  modePillOptionActive: {
-    backgroundColor: colors.accent,
-  },
-  modePillOptionLocked: {
-    opacity: 0.35,
-  },
-  modePillText: {
-    color: "rgba(235,235,245,0.6)",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-  modePillTextActive: {
-    color: colors.onAccent,
+    gap: 10,
+    zIndex: 25,
+    elevation: 25,
   },
   centerArea: {
     flex: 1,
@@ -1901,34 +2450,34 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     gap: CENTER_AREA_GAP_PX,
   },
-  // While idle there's no waveform row between the button and this line,
-  // so it needs its own clearance past the rim's shadow, plus breathing
-  // room. Recording/processing status keeps its existing spacing.
-  idleCue: {
-    marginTop: IDLE_TEXT_CLEARANCE_PX - CENTER_AREA_GAP_PX,
-  },
   statusText: {
-    color: "rgba(255,255,255,0.7)",
-    fontSize: 13,
-    fontWeight: "600",
+    ...xayraType.cue,
+    color: xayraColors.textMuted,
+    textAlign: "center",
+    paddingHorizontal: 24,
   },
   statusHint: {
-    color: "rgba(255,255,255,0.45)",
-    fontSize: 12,
-    marginTop: -6,
+    ...xayraType.meta,
+    color: xayraColors.textFaint,
+    marginTop: STATUS_HINT_OFFSET,
   },
   errorText: {
-    color: "#F87171",
-    fontSize: 12,
+    ...xayraType.meta,
+    color: ERROR_TEXT,
     textAlign: "center",
     paddingHorizontal: 32,
+  },
+  dockAnchor: {
+    position: "absolute",
+    left: 0,
+    right: 0,
   },
   navBarInset: {
     position: "absolute",
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: "#1C1C1E",
+    backgroundColor: xayraColors.surface,
     // Above ComposeBar's own zIndex/elevation (20, see that component) —
     // this strip must win the bottom edge even when the compose bar's
     // sheet-tracked position brings it this low on screen.
@@ -1953,11 +2502,11 @@ const styles = StyleSheet.create({
   // time) — `right`/`bottom` are set inline at the render site, not here.
   quickMenuPopover: {
     position: "absolute",
-    minWidth: 168,
-    backgroundColor: "#1C1C1E",
-    borderRadius: 14,
+    minWidth: 208,
+    backgroundColor: xayraColors.dock,
+    borderRadius: xayraRadius.card,
     borderWidth: 1,
-    borderColor: "rgba(255,255,255,0.1)",
+    borderColor: xayraColors.lineStrong,
     paddingVertical: 6,
     // Same shadow language as NoteDetailModal/other floating surfaces in
     // this app — a popover specifically needs to visibly lift off the
@@ -1969,17 +2518,20 @@ const styles = StyleSheet.create({
     elevation: 12,
   },
   quickMenuRow: {
-    paddingVertical: 12,
+    minHeight: MIN_TOUCH_TARGET,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
     paddingHorizontal: 14,
-    borderRadius: 10,
-    marginHorizontal: 4,
+    borderRadius: 12,
+    marginHorizontal: 6,
   },
   quickMenuRowPressed: {
-    backgroundColor: "rgba(255,255,255,0.08)",
+    backgroundColor: xayraColors.line,
   },
   quickMenuRowText: {
-    color: "#F8FAFC",
+    ...xayraType.chip,
     fontSize: 15,
-    fontWeight: "600",
+    color: xayraColors.text,
   },
 });

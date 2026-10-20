@@ -8,6 +8,8 @@ import { resumeDownloads, runOnboardingThreadCalibration, useModelDownload } fro
 import { markSetupComplete } from "../services/settings/appSettings";
 import { showSetupCompleteNotification } from "../services/notifications/setupCompleteNotification";
 import { readPreferences, writePreferences } from "../services/settings/preferences";
+import { checkVoiceReady } from "../services/ai/voiceReadiness";
+import { SETUP_VOICE_PENDING_HINT } from "../constants/copy";
 
 /**
  * "One Door, Opens Once" onboarding — the whole point (see this feature's
@@ -146,6 +148,19 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
   // something might be slow or might need a retry.
   const [memoryWarning, setMemoryWarning] = useState<string | null>(null);
   const [showEscapeHatch, setShowEscapeHatch] = useState(false);
+  // Whether the early way in would leave voice without its speech model —
+  // said plainly next to the button, never implied ready (Redmi uplift).
+  const [voicePending, setVoicePending] = useState(false);
+  useEffect(() => {
+    if (!showEscapeHatch) return;
+    let live = true;
+    void checkVoiceReady().then((voice) => {
+      if (live) setVoicePending(!voice.ready);
+    });
+    return () => {
+      live = false;
+    };
+  }, [showEscapeHatch]);
 
   useEffect(() => {
     let unmounted = false;
@@ -270,8 +285,8 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
           <Text style={styles.title}>Preparing Xayra - Your Pocket Companion</Text>
         </View>
         <Text style={styles.body}>
-          Everything Xayra needs is loading directly onto your phone so your thoughts and notes
-          stay 100% private. Feel free to minimize the app—we’ll notify you the moment it’s ready!
+          Everything Xayra needs is loading onto your phone, so your voice, notes and questions are
+          processed right here. Feel free to minimize the app—we’ll notify you the moment it’s ready!
         </Text>
 
         {isPaused && (
@@ -342,6 +357,7 @@ export function OnboardingSetupScreen({ onComplete }: { onComplete: () => void }
             <Text style={styles.escapeHatchHint}>
               This is taking longer than usual — you can jump in now with safe default settings, or keep waiting.
             </Text>
+            {voicePending && <Text style={styles.escapeHatchHint}>{SETUP_VOICE_PENDING_HINT}</Text>}
             <Pressable
               style={({ pressed }) => [styles.escapeHatchButton, pressed && styles.startButtonPressed]}
               onPress={() => void handleContinueAnyway()}
@@ -425,7 +441,8 @@ const styles = StyleSheet.create({
   },
   retryButtonText: {
     ...typography.label,
-    color: colors.textPrimary,
+    // Dark on the soft-red fill (Xayra 2.0 palette).
+    color: colors.onAccent,
   },
   stepRow: {
     flexDirection: "row",

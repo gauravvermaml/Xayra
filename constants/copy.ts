@@ -30,3 +30,10 @@ export const NOTES_EMPTY_TITLE = "No notes recorded yet.";
 export const RECORD_EMPTY_SUBTEXT = "Tap Xayra to speak, or type your first thought below.";
 /** Archive has no compose bar or Xayra button of its own. */
 export const ARCHIVE_EMPTY_SUBTEXT = "Tap Xayra on the home screen to speak or type your first thought.";
+/** Voice before the offline speech model is installed (onboarding can be
+ * finished early): nothing is recorded, so no spoken note is lost. */
+export const VOICE_MODEL_NOT_READY =
+  "Voice needs Xayra's speech model, which is still downloading. You can type a note or a question meanwhile.";
+/** Onboarding's early way in, when the speech model isn't installed yet. */
+export const SETUP_VOICE_PENDING_HINT =
+  "Typing works now; voice will be ready once its speech model finishes downloading.";

@@ -7,14 +7,18 @@ import * as SplashScreen from "expo-splash-screen";
 
 import { AppSplashScreen, releaseNativeSplash } from "../components/AppSplashScreen";
 import { DisposableVaultBanner } from "../components/DisposableVaultBanner";
+import { RecoverNotesFlow } from "../components/RecoverNotesFlow";
 import { resolveVaultMode, type VaultMode } from "../services/dev/disposableVault";
+import { clearRecoveryRecord, readRecoveryPhase } from "../services/recovery/originalVaultRecovery";
 import { cancelStaleDisposableReminders } from "../services/notifications/todoNotifications";
 import { OnboardingSetupScreen } from "../components/OnboardingSetupScreen";
-import { ToastHost } from "../components/Toast";
+import { showToast, ToastHost } from "../components/Toast";
 import { releaseLocalLlamaOnBackground } from "../services/ai/localLlama";
 import { releaseWhisperContext } from "../services/ai/localWhisper";
 import { initModelDownloads } from "../services/ai/modelDownloadManager";
+import { allowDownloadNotificationPermissionPrompt } from "../services/notifications/downloadNotification";
 import {
+  canRecoverOriginalVault,
   isExpectedLockReason,
   singleFlight,
   vaultLockReasonFor,
@@ -207,6 +211,28 @@ export default function RootLayout() {
     }
   }, [setupComplete, lockReason]);
 
+  // Original-vault recovery (key-missing only, every build). It ends by
+  // handing back to the normal unlock — the only thing that proves recovery.
+  const [recovering, setRecovering] = useState(false);
+  const recoveryAvailable = canRecoverOriginalVault(lockReason);
+  useEffect(() => {
+    if (!recoveryAvailable) setRecovering(false);
+  }, [recoveryAvailable]);
+  const recoveryKeyInstalled = useRef(false);
+  useEffect(() => {
+    if (setupComplete === null) return;
+    // Opened through normal authentication: only now is recovery done.
+    void readRecoveryPhase()
+      .then((phase) => {
+        if (phase === null) return;
+        void clearRecoveryRecord().catch(() => {});
+        if (phase === "keyInstalled" || recoveryKeyInstalled.current) {
+          showToast("Your notes are unlocked.");
+        }
+      })
+      .catch(() => {});
+  }, [setupComplete]);
+
   const vaultMode = useVaultMode();
   // Once the vault is open (either mode, before any to-do exists in it):
   // clear reminders a previous disposable test-vault session left behind.
@@ -215,6 +241,9 @@ export default function RootLayout() {
   useEffect(() => {
     if (vaultOpen) {
       void cancelStaleDisposableReminders().catch(() => {});
+      // Only now may the download notification ask for permission: earlier,
+      // its dialog would cancel the vault's fingerprint prompt.
+      allowDownloadNotificationPermissionPrompt();
     }
   }, [vaultOpen]);
 
@@ -239,8 +268,28 @@ export default function RootLayout() {
               underneath instead of navigating away from it. */}
           <Stack.Screen name="settings" options={{ presentation: "modal" }} />
         </Stack>
+      ) : recovering && recoveryAvailable ? (
+        <RecoverNotesFlow
+          onClose={() => setRecovering(false)}
+          onKeyInstalled={() => {
+            recoveryKeyInstalled.current = true;
+            setRecovering(false);
+            unlock();
+          }}
+        />
       ) : (
-        <AppSplashScreen lock={lockReason === null ? null : { reason: lockReason, unlocking, onUnlock: unlock }} />
+        <AppSplashScreen
+          lock={
+            lockReason === null
+              ? null
+              : {
+                  reason: lockReason,
+                  unlocking,
+                  onUnlock: unlock,
+                  onRecover: recoveryAvailable ? () => setRecovering(true) : undefined,
+                }
+          }
+        />
       )}
       {/* Mounted once at the root so every screen's copy-to-clipboard
           feedback (see utils/clipboard.ts) renders on the same overlay,

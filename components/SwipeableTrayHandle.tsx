@@ -1,6 +1,7 @@
 import { StyleSheet, View, type StyleProp, type ViewStyle } from "react-native";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { runOnJS, useSharedValue, withSpring, type SharedValue } from "react-native-reanimated";
+import { xayraColors } from "../constants/xayraTheme";
 
 /** Same feel as this app's other swipe-to-commit gestures (e.g. the
  * calendar's own swipe-to-navigate) — either threshold alone decides which
@@ -11,7 +12,31 @@ const SWIPE_VELOCITY_THRESHOLD = 500;
  * (`sheetAnimationConfigs` in app/index.tsx) — the point of driving this
  * handle continuously at all is that the 50%↔100% transition should feel
  * like the SAME gesture language as that native drag, not a different one. */
-const SETTLE_SPRING = { damping: 24, stiffness: 260, mass: 0.9, overshootClamping: false };
+export const SETTLE_SPRING = { damping: 24, stiffness: 260, mass: 0.9, overshootClamping: false };
+
+/** Where a released drag settles the full-screen view: a fast flick goes
+ * its way; otherwise whichever side of halfway it was let go on. */
+export function releaseExpandTarget(progress: number, velocityY: number): 0 | 1 {
+  "worklet";
+  if (velocityY <= -SWIPE_VELOCITY_THRESHOLD) return 1;
+  if (velocityY >= SWIPE_VELOCITY_THRESHOLD) return 0;
+  return progress >= 0.5 ? 1 : 0;
+}
+
+/**
+ * Settles the full-screen reading view open (true) or closed (false) from
+ * JS — the Collapse button and Android Back — with exactly the spring the
+ * handle's own release uses, then reports it like a release does. Closing
+ * returns to the 50% tray (the sheet underneath never left it).
+ */
+export function settleExpandProgress(
+  progress: SharedValue<number>,
+  expanded: boolean,
+  onSettle: (expanded: boolean) => void
+): void {
+  progress.value = withSpring(expanded ? 1 : 0, SETTLE_SPRING);
+  onSettle(expanded);
+}
 
 function clamp01(value: number): number {
   "worklet";
@@ -82,9 +107,7 @@ export function SwipeableTrayHandle({ progress, dragDistance, onSettle, style }:
       progress.value = clamp01(startProgress.value - event.translationY / dragDistance);
     })
     .onEnd((event) => {
-      const flickOpen = event.velocityY <= -SWIPE_VELOCITY_THRESHOLD;
-      const flickClose = event.velocityY >= SWIPE_VELOCITY_THRESHOLD;
-      const target = flickOpen ? 1 : flickClose ? 0 : progress.value >= 0.5 ? 1 : 0;
+      const target = releaseExpandTarget(progress.value, event.velocityY);
       progress.value = withSpring(target, SETTLE_SPRING);
       runOnJS(onSettle)(target === 1);
     });
@@ -103,9 +126,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   pill: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: "rgba(255,255,255,0.3)",
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: xayraColors.handle,
   },
 });

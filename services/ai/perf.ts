@@ -25,7 +25,9 @@ export function logDuration(label: string, startMs: number): number {
  * production app. Gate for development-only diagnostics.
  */
 export function isDevelopmentBuild(): boolean {
-  return __DEV__ || (Constants.expoConfig?.android?.package ?? "").endsWith(".dev");
+  const androidPackage = Constants.expoConfig?.android?.package ?? "";
+  // Xayra Dev (.dev) and the emulator-only Xayra Test (.devtest).
+  return __DEV__ || androidPackage.endsWith(".dev") || androidPackage.endsWith(".devtest");
 }
 
 /**

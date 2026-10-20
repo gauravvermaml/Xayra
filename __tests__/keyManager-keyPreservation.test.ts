@@ -251,3 +251,61 @@ describe("singleFlight (Unlock taps)", () => {
     await expect(run()).resolves.toBe(false);
   });
 });
+
+describe("installRecoveredDatabaseKey (original-vault recovery)", () => {
+  const { installRecoveredDatabaseKey, RecoveredKeyRefusedError } = require("../services/crypto/keyManager");
+  const RECOVERED = "c".repeat(64);
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockHasHardwareAsync.mockResolvedValue(true);
+    mockIsEnrolledAsync.mockResolvedValue(true);
+    mockGetItemAsync.mockResolvedValue(null); // missing / permanently invalidated entry
+    mockSetItemAsync.mockResolvedValue(undefined);
+  });
+
+  it("stores a well-formed key behind the fingerprint when the entry is missing or invalidated", async () => {
+    await installRecoveredDatabaseKey(RECOVERED);
+    expect(mockSetItemAsync).toHaveBeenCalledTimes(1);
+    expect(mockSetItemAsync.mock.calls[0][1]).toBe(RECOVERED);
+    expect(mockSetItemAsync.mock.calls[0][2]).toMatchObject({ requireAuthentication: true });
+    expect(mockDeleteItemAsync).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "C".repeat(64), "c".repeat(63), "not-a-key"])("refuses a malformed key %p without touching SecureStore", async (key) => {
+    await expect(installRecoveredDatabaseKey(key)).rejects.toBeInstanceOf(RecoveredKeyRefusedError);
+    expect(mockGetItemAsync).not.toHaveBeenCalled();
+    expectKeyUntouched();
+  });
+
+  it("never overwrites a key SecureStore can still return", async () => {
+    mockGetItemAsync.mockResolvedValue("d".repeat(64));
+    const err = await rejection(installRecoveredDatabaseKey(RECOVERED));
+    expect(err).toBeInstanceOf(RecoveredKeyRefusedError);
+    expect((err as { reason: string }).reason).toBe("keyAlreadyStored");
+    expectKeyUntouched();
+  });
+
+  it("fingerprint cancelled while saving: typed cancellation, one attempt only, nothing deleted", async () => {
+    mockSetItemAsync.mockRejectedValue(CANCELLED);
+    const err = await rejection(installRecoveredDatabaseKey(RECOVERED));
+    expect(vaultLockReasonFor(err)).toBe("userCancelled");
+    expect(mockSetItemAsync).toHaveBeenCalledTimes(1);
+    expect(mockDeleteItemAsync).not.toHaveBeenCalled();
+  });
+
+  it("SecureStore write failure: keyUnavailable, nothing deleted or generated", async () => {
+    mockSetItemAsync.mockRejectedValue(nativeError("ERR_ENCRYPT", "Could not encrypt the value"));
+    const err = await rejection(installRecoveredDatabaseKey(RECOVERED));
+    expect(vaultLockReasonFor(err)).toBe("keyUnavailable");
+    expect(mockDeleteItemAsync).not.toHaveBeenCalled();
+    expect(require("expo-crypto").getRandomBytesAsync).not.toHaveBeenCalled();
+  });
+
+  it("an unreadable entry (not an auth outcome) stops before writing", async () => {
+    mockGetItemAsync.mockRejectedValue(DECRYPT);
+    const err = await rejection(installRecoveredDatabaseKey(RECOVERED));
+    expect(vaultLockReasonFor(err)).toBe("keyUnavailable");
+    expectKeyUntouched();
+  });
+});

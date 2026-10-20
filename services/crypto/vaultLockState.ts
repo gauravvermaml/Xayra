@@ -1,3 +1,4 @@
+import { VaultStateError } from "../vault/vaultErrors";
 import { AuthenticationFailedError, DatabaseKeyError } from "./keyManager";
 import type { UnlockFailureReason } from "./unlockErrors";
 
@@ -12,7 +13,15 @@ export type VaultLockReason =
   /** A vault exists but its key is gone; no replacement key is minted. */
   | "keyMissing"
   /** The key was obtained but opening/initialising the database failed. */
-  | "databaseError";
+  | "databaseError"
+  /** This build has no SQLCipher; nothing is opened (vaultActivation.ts). */
+  | "encryptionUnavailable"
+  /** Files on disk don't match a safe vault state; fails closed. */
+  | "vaultConflict"
+  /** Not enough free space to encrypt the existing notes safely. */
+  | "insufficientStorage"
+  /** A step of encrypting the existing notes failed; the original is intact. */
+  | "migrationFailed";
 
 /** Maps whatever an unlock attempt threw to its lock state. Anything not
  * typed by keyManager is a database failure — never an authentication one. */
@@ -23,7 +32,22 @@ export function vaultLockReasonFor(err: unknown): VaultLockReason {
   if (err instanceof DatabaseKeyError) {
     return err.kind === "missing" ? "keyMissing" : "keyUnavailable";
   }
+  if (err instanceof VaultStateError) {
+    return err.kind === "conflict" ? "vaultConflict" : err.kind;
+  }
   return "databaseError";
+}
+
+/**
+ * Whether "Recover my notes" is offered: only when a vault exists and its key
+ * is genuinely gone (missing, or permanently invalidated by a fingerprint
+ * change — SecureStore reports both as no key). Never for a cancelled or
+ * locked-out prompt or a storage error: those keep the ordinary Unlock retry,
+ * so recovery can't stand in for normal authentication. Recovery itself only
+ * installs a key that has opened a copy of this vault; it never mints one.
+ */
+export function canRecoverOriginalVault(reason: VaultLockReason | null): boolean {
+  return reason === "keyMissing";
 }
 
 /** Outcomes the user caused or can wait out — not faults worth an error log. */

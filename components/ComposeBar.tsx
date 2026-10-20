@@ -1,9 +1,22 @@
-import { memo, useEffect, useRef } from "react";
-import { Keyboard, Pressable, StyleSheet, Text, View } from "react-native";
+import { memo, useEffect, useRef, useState } from "react";
+import {
+  Keyboard,
+  type LayoutChangeEvent,
+  type NativeSyntheticEvent,
+  PixelRatio,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  type TextLayoutEventData,
+  View,
+} from "react-native";
 import { BottomSheetTextInput } from "@gorhom/bottom-sheet";
 import { Feather } from "@expo/vector-icons";
 
-import { colors, radius, spacing } from "../constants/theme";
+import { spacing } from "../constants/theme";
+import { MIN_TOUCH_TARGET, xayraColors, xayraType } from "../constants/xayraTheme";
+import { composeClearance } from "../utils/composeClearance";
 
 /** Live-requested cap: past this many lines, earlier lines scroll up out of
  * view instead of the box growing further, so the line currently being
@@ -11,7 +24,24 @@ import { colors, radius, spacing } from "../constants/theme";
  * `lineHeight` below — see `numberOfLines` on the TextInput itself for the
  * other half of this. */
 const MAX_INPUT_LINES = 5;
-const INPUT_LINE_HEIGHT = 20;
+/** Xayra 2.0 compose type: DM Sans 16/22 (fixed size — never shrunk). */
+const INPUT_LINE_HEIGHT = 22;
+/** The input's own vertical padding, set explicitly so its one-line height
+ * is predictable (Android's default EditText padding was ~21dp and varied
+ * with font scale). Keeps the one-line field no taller than before at any
+ * text size, so keyboard clearance is never reduced by the restyle. */
+const INPUT_PADDING_VERTICAL = 5;
+const INPUT_MAX_HEIGHT = INPUT_LINE_HEIGHT * MAX_INPUT_LINES + 2 * INPUT_PADDING_VERTICAL;
+const SEARCH_BAR_MIN_HEIGHT = 48;
+const SEND_BUTTON_SIZE = 40;
+/** Kept between the field's bottom edge and the keyboard's top edge. */
+const KEYBOARD_MARGIN = 8;
+/** The 20% -> 50% focus snap can still be settling when the keyboard reports
+ * itself shown, so the field is measured again once it has. */
+const SETTLE_REMEASURE_MS = 300;
+
+type InputCap = { lines: number; maxHeight: number };
+const DEFAULT_CAP: InputCap = { lines: MAX_INPUT_LINES, maxHeight: INPUT_MAX_HEIGHT };
 
 export type ComposeBarProps = {
   inputText: string;
@@ -32,6 +62,20 @@ export type ComposeBarProps = {
   /** Picks the leading icon: a pencil for Record (writing a note), a
    * magnifier for Ask (searching your notes). Presentation only. */
   mode: "record" | "ask";
+  /** The tray's snap index. When it changes while the keyboard is open,
+   * the field has moved, so the clearance is measured again. */
+  sheetIndex?: number;
+  /** A full-screen overlay (To-Dos) covers the home screen, or has just
+   * closed by hardware Back: the field is not editable, so Android can't
+   * move focus into it from beneath — when the To-Dos add sheet's own field
+   * blurred as its keyboard closed on Back, focus jumped here (Stage 5c,
+   * seen on the emulator) and the tray rose into compose mode underneath. */
+  covered?: boolean;
+  /** A real touch landed on the field while it was covered (the brief
+   * guard after a Back close): the parent ends the guard, and the field
+   * focuses as soon as it's editable again — the tap is never lost
+   * (Stage 5d). */
+  onCoveredTouch?: () => void;
 };
 
 /**
@@ -104,8 +148,34 @@ export const ComposeBar = memo(function ComposeBar({
   onSubmit,
   placeholder,
   mode,
+  sheetIndex,
+  covered = false,
+  onCoveredTouch,
 }: ComposeBarProps) {
+  const inputRef = useRef<React.ElementRef<typeof BottomSheetTextInput>>(null);
+  const focusWhenUncoveredRef = useRef(false);
+  useEffect(() => {
+    if (!covered && focusWhenUncoveredRef.current) {
+      focusWhenUncoveredRef.current = false;
+      inputRef.current?.focus();
+    }
+  }, [covered]);
+  const handleFieldTouchStart = () => {
+    if (!covered) return;
+    focusWhenUncoveredRef.current = true;
+    onCoveredTouch?.();
+  };
   const canSubmit = inputText.trim().length > 0;
+  // Focus ring only — presentation; focus handling itself is the parent's.
+  const [isFocused, setIsFocused] = useState(false);
+  const handleFocus = () => {
+    setIsFocused(true);
+    onInputFocus();
+  };
+  const handleBlur = () => {
+    setIsFocused(false);
+    onInputBlur();
+  };
 
   // Build 22 FIX DUPLICATE SUBMISSIONS: guards the window between a submit
   // firing and the parent's cleared `inputText` prop actually landing back
@@ -128,36 +198,147 @@ export const ComposeBar = memo(function ComposeBar({
       return;
     }
     hasPendingSubmitRef.current = true;
-    // Dismiss on every submit, Record or Ask alike — `blurOnSubmit={false}`
-    // below only stops the TextInput's own AUTOMATIC blur-on-submit; it was
-    // never a statement that the keyboard should stay up after a real send.
-    // A submitted note/question is done — same "get out of the way" instinct
-    // as this pass's other fixes (the history list hiding while composing,
-    // the mis-tap-prone settings gear moving out of this row): once you've
-    // sent it, the keyboard has nothing left to do.
-    Keyboard.dismiss();
+    // Ask: the keyboard closes so the answer has room. Record: it stays up
+    // with the input focused (`blurOnSubmit={false}`), so the next note can
+    // be typed straight away — closing it after every note broke consecutive
+    // entry, and the layout jump it caused (the Record/Ask pill moving
+    // ~600px down) made a tap aimed at Ask right after a note land elsewhere.
+    if (mode === "ask") {
+      Keyboard.dismiss();
+    }
     onSubmit(inputText.trim());
   };
+
+  // While the keyboard is open, the field may only grow as far as the space
+  // actually left above it (see utils/composeClearance.ts for why the tray
+  // itself doesn't move). The cap is recomputed only on keyboard show/hide —
+  // never from layout or typing — so growing the field can't feed back into
+  // it. The input's one-line height (text plus Android's own padding, which
+  // varies with font scale) is the smallest height it has laid out at; it's
+  // kept in a ref, so recording it never re-renders.
+  const searchBarRef = useRef<View>(null);
+  const oneLineRef = useRef<{ fontScale: number; height: number } | null>(null);
+  // The real rendered line height, from a hidden two-line probe in the
+  // input's own type style. Android 14+ scales large text non-linearly, so
+  // 22 x fontScale overstates it at 200% (one line capped where two fit).
+  const lineHeightRef = useRef<{ fontScale: number; height: number } | null>(null);
+  const handleProbeLayout = (e: NativeSyntheticEvent<TextLayoutEventData>) => {
+    const [first, second] = e.nativeEvent.lines;
+    const height = second ? second.y - first.y : first?.height;
+    if (height && height > 0) lineHeightRef.current = { fontScale: PixelRatio.getFontScale(), height };
+  };
+  // Re-measures while the keyboard is open (set inside the effect below).
+  const remeasureRef = useRef<() => void>(() => {});
+  const [cap, setCap] = useState<InputCap>(DEFAULT_CAP);
+  const handleInputLayout = (e: LayoutChangeEvent) => {
+    const fontScale = PixelRatio.getFontScale();
+    const { height } = e.nativeEvent.layout;
+    const known = oneLineRef.current;
+    if (!known || known.fontScale !== fontScale || height < known.height) {
+      oneLineRef.current = { fontScale, height };
+    }
+  };
+  useEffect(() => {
+    const showEvent = Platform.OS === "ios" ? "keyboardWillShow" : "keyboardDidShow";
+    const hideEvent = Platform.OS === "ios" ? "keyboardWillHide" : "keyboardDidHide";
+    let settleTimer: ReturnType<typeof setTimeout> | null = null;
+    let keyboardTop: number | null = null;
+    const measure = () => {
+      const node = searchBarRef.current;
+      if (!node || keyboardTop === null) return;
+      const top = keyboardTop;
+      node.measureInWindow((_x, y) => {
+        if (keyboardTop !== top) return; // keyboard moved or closed since
+        const fontScale = PixelRatio.getFontScale();
+        const probed = lineHeightRef.current;
+        const lineHeight = probed && probed.fontScale === fontScale ? probed.height : INPUT_LINE_HEIGHT * fontScale;
+        const known = oneLineRef.current;
+        const { lines, maxHeight } = composeClearance({
+          keyboardTop: top,
+          containerTop: y,
+          containerPadding: spacing.xs,
+          containerMinHeight: SEARCH_BAR_MIN_HEIGHT,
+          margin: KEYBOARD_MARGIN,
+          lineHeight,
+          oneLineHeight: known && known.fontScale === fontScale ? known.height : lineHeight,
+          maxLines: MAX_INPUT_LINES,
+          maxHeight: INPUT_MAX_HEIGHT,
+        });
+        // Same values -> keep the same object, so React skips the re-render.
+        setCap((prev) => (prev.lines === lines && prev.maxHeight === maxHeight ? prev : { lines, maxHeight }));
+      });
+    };
+    const clearTimer = () => {
+      if (settleTimer !== null) clearTimeout(settleTimer);
+      settleTimer = null;
+    };
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      keyboardTop = e.endCoordinates.screenY;
+      clearTimer();
+      measure();
+      settleTimer = setTimeout(measure, SETTLE_REMEASURE_MS);
+    });
+    remeasureRef.current = () => {
+      if (keyboardTop === null) return;
+      clearTimer();
+      settleTimer = setTimeout(measure, SETTLE_REMEASURE_MS);
+    };
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      keyboardTop = null;
+      clearTimer();
+      setCap(DEFAULT_CAP);
+    });
+    return () => {
+      clearTimer();
+      remeasureRef.current = () => {};
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+  // The tray moved to another stage with the keyboard up (a drag while
+  // typing): measure again once it has settled. Never re-renders by itself.
+  useEffect(() => {
+    remeasureRef.current();
+  }, [sheetIndex]);
 
   return (
     <View style={styles.container}>
       <View style={styles.row}>
-        <View style={styles.searchBar}>
+        <View
+          ref={searchBarRef}
+          testID="compose-field"
+          onTouchStart={handleFieldTouchStart}
+          style={[styles.searchBar, isFocused && styles.searchBarFocused]}
+        >
           <Feather
             testID="compose-mode-icon"
             name={mode === "record" ? "edit-3" : "search"}
-            size={16}
-            color="rgba(235,235,245,0.6)"
+            size={20}
+            color={xayraColors.textMuted}
             style={styles.searchIcon}
           />
+          <Text
+            style={styles.lineProbe}
+            onTextLayout={handleProbeLayout}
+            accessible={false}
+            importantForAccessibility="no-hide-descendants"
+            pointerEvents="none"
+          >
+            {"Ag\nAg"}
+          </Text>
           <BottomSheetTextInput
+            ref={inputRef}
+            editable={!covered}
             value={inputText}
             onChangeText={onInputChange}
-            onFocus={onInputFocus}
-            onBlur={onInputBlur}
+            onFocus={handleFocus}
+            onBlur={handleBlur}
             placeholder={placeholder}
-            placeholderTextColor="rgba(235,235,245,0.45)"
-            style={styles.input}
+            placeholderTextColor={xayraColors.textMuted}
+            cursorColor={xayraColors.lilac}
+            selectionColor={xayraColors.lilacSoft}
+            style={[styles.input, cap !== DEFAULT_CAP && { maxHeight: cap.maxHeight }]}
+            onLayout={handleInputLayout}
             multiline
             // Android-specific: for a multiline TextInput, this is what
             // actually caps the box to N lines' worth of height and makes it
@@ -166,7 +347,11 @@ export const ComposeBar = memo(function ComposeBar({
             // didn't reliably cap growth on-device. `MAX_INPUT_LINES` and
             // `input`'s explicit `lineHeight` below are kept in exact
             // agreement so the two mechanisms describe the same 5 lines.
-            numberOfLines={MAX_INPUT_LINES}
+            //
+            // While the keyboard is open both are lowered together (`cap`),
+            // so on a short screen the box starts scrolling earlier instead
+            // of reaching under the keyboard.
+            numberOfLines={cap.lines}
             textAlignVertical="top"
             blurOnSubmit={false}
           />
@@ -182,10 +367,18 @@ export const ComposeBar = memo(function ComposeBar({
           <Pressable
             onPress={handleSubmit}
             disabled={!canSubmit}
-            hitSlop={8}
-            style={[styles.submitButton, !canSubmit && styles.submitButtonDisabled]}
+            hitSlop={(MIN_TOUCH_TARGET - SEND_BUTTON_SIZE) / 2}
+            testID="compose-submit"
+            accessibilityRole="button"
+            accessibilityLabel={mode === "ask" ? "Ask" : "Save note"}
+            accessibilityState={{ disabled: !canSubmit }}
+            style={({ pressed }) => [
+              styles.submitButton,
+              canSubmit ? styles.submitButtonReady : styles.submitButtonDisabled,
+              pressed && styles.submitButtonPressed,
+            ]}
           >
-            <Text style={styles.submitIcon}>↑</Text>
+            <Feather name="arrow-up" size={20} color={canSubmit ? "#000000" : xayraColors.teal} />
           </Pressable>
         </View>
       </View>
@@ -210,45 +403,63 @@ const styles = StyleSheet.create({
     flex: 1,
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: "#1C1C1E",
-    borderRadius: radius.lg,
+    backgroundColor: xayraColors.field,
+    borderRadius: SEARCH_BAR_MIN_HEIGHT / 2,
+    borderWidth: 1,
+    borderColor: xayraColors.lineStrong,
     paddingLeft: spacing.base,
     paddingRight: spacing.xs,
     // `minHeight` (was a fixed `height: 40`) plus vertical padding, not a
     // fixed height — `multiline` above means this box needs to actually grow
     // as the user types more lines, the same way any chat composer's input
     // does, instead of clipping everything past the first line.
-    minHeight: 40,
+    minHeight: SEARCH_BAR_MIN_HEIGHT,
     paddingVertical: spacing.xs,
   },
+  searchBarFocused: {
+    borderColor: "rgba(143,214,207,0.55)",
+  },
   searchIcon: {
-    marginRight: spacing.sm,
+    marginRight: 10,
   },
   input: {
     flex: 1,
-    color: colors.textPrimary,
-    fontSize: 15,
+    ...xayraType.input,
+    color: xayraColors.text,
+    paddingVertical: INPUT_PADDING_VERTICAL,
+    paddingHorizontal: 0,
     // Explicit, not left to the platform default — `numberOfLines` on the
-    // TextInput itself (the prop that actually enforces the 5-line cap on
+    // TextInput itself (the prop that actually enforces the line cap on
     // Android) needs to agree with this exactly, or the two disagree about
-    // where the 5th line ends.
+    // where the last line ends.
     lineHeight: INPUT_LINE_HEIGHT,
-    maxHeight: INPUT_LINE_HEIGHT * MAX_INPUT_LINES,
+    // Lowered inline while the keyboard leaves less room (`cap`).
+    maxHeight: INPUT_MAX_HEIGHT,
+  },
+  // Invisible two-line sample in the input's type style (handleProbeLayout).
+  lineProbe: {
+    ...xayraType.input,
+    lineHeight: INPUT_LINE_HEIGHT,
+    position: "absolute",
+    left: 0,
+    top: 0,
+    opacity: 0,
   },
   submitButton: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
-    backgroundColor: colors.accent,
+    width: SEND_BUTTON_SIZE,
+    height: SEND_BUTTON_SIZE,
+    borderRadius: SEND_BUTTON_SIZE / 2,
     alignItems: "center",
     justifyContent: "center",
+    marginLeft: spacing.sm,
+  },
+  submitButtonReady: {
+    backgroundColor: xayraColors.teal,
   },
   submitButtonDisabled: {
-    backgroundColor: "rgba(99,102,241,0.35)",
+    backgroundColor: xayraColors.tealSoft,
   },
-  submitIcon: {
-    color: colors.onAccent,
-    fontSize: 16,
-    fontWeight: "700",
+  submitButtonPressed: {
+    opacity: 0.75,
   },
 });

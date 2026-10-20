@@ -1,8 +1,20 @@
 import { useState } from "react";
-import { StyleSheet, View } from "react-native";
-import Animated, { interpolate, runOnJS, useAnimatedReaction, useAnimatedStyle, type SharedValue } from "react-native-reanimated";
+import { PixelRatio, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { Feather } from "@expo/vector-icons";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import Animated, {
+  interpolate,
+  runOnJS,
+  useAnimatedReaction,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  type SharedValue,
+} from "react-native-reanimated";
 
-import { SwipeableTrayHandle } from "./SwipeableTrayHandle";
+import { pullDownDecision } from "../utils/trayGestureRegions";
+import { releaseExpandTarget, settleExpandProgress, SETTLE_SPRING, SwipeableTrayHandle } from "./SwipeableTrayHandle";
+import { MIN_TOUCH_TARGET, xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
 
 export type ExpandedTextOverlayProps = {
   /** Device's safe-area top inset — pads the box's own top edge so it
@@ -34,6 +46,10 @@ export type ExpandedTextOverlayProps = {
    * — rendered as a fresh element here, independent of HistorySheet's own
    * copy of the same content (see this file's own doc comment for why). */
   children: React.ReactNode;
+  /** The list's scroll offset (written by the list, see ChatSheetContent's
+   * `listScrollOffset`). At the top, a downward drag on the list collapses
+   * this view, like pulling a sheet down; anywhere else the list scrolls. */
+  listScrollOffset: SharedValue<number>;
 };
 
 /** Below this, the overlay is fully hidden and non-interactive, and its
@@ -42,6 +58,13 @@ export type ExpandedTextOverlayProps = {
  * conditionally mounted outright, while still letting `progress` start
  * tracking a drag from its very first pixel of movement. */
 const INTERACTIVE_THRESHOLD = 0.01;
+/** The Collapse pill's visible height; hitSlop makes up the 48dp target. */
+const COLLAPSE_HEIGHT = 40;
+/** Narrow screens at large text: "Collapse" spelled out would run into the
+ * centred handle (seen at 360dp / 200%), so it's the chevron alone — same
+ * spoken label and hint, same 48dp target. */
+const COLLAPSE_COMPACT_BELOW_WIDTH = 400;
+const COLLAPSE_COMPACT_FROM_FONT_SCALE = 1.5;
 /** Opacity ramps in over just the first sliver of the drag, on top of the
  * continuous position tracking below — pure position alone (no fade) looks
  * acceptable by itself, since this box and the tray beneath it share the
@@ -103,7 +126,18 @@ const OPACITY_RAMP_END = 0.15;
  * genuinely matching the sheet's own native drag feel rather than
  * approximating it with a tuned entrance animation.
  */
-export function ExpandedTextOverlay({ topInset, bottomInset, progress, dragDistance, onSettle, children }: ExpandedTextOverlayProps) {
+export function ExpandedTextOverlay({
+  topInset,
+  bottomInset,
+  progress,
+  dragDistance,
+  onSettle,
+  children,
+  listScrollOffset,
+}: ExpandedTextOverlayProps) {
+  const { width } = useWindowDimensions();
+  const compactCollapse =
+    width < COLLAPSE_COMPACT_BELOW_WIDTH && PixelRatio.getFontScale() + 0.01 >= COLLAPSE_COMPACT_FROM_FONT_SCALE;
   const [interactive, setInteractive] = useState(false);
 
   useAnimatedReaction(
@@ -115,23 +149,81 @@ export function ExpandedTextOverlay({ topInset, bottomInset, progress, dragDista
     }
   );
 
+  // PULL-DOWN HANDOFF (Redmi uplift Stage 2 corrections): a drag on the list
+  // scrolls it; once the list is at its top, continued downward travel pulls
+  // the view down instead — no handle needed, as with a map's bottom sheet.
+  // Manual activation keeps the list in charge until that moment: upward
+  // travel fails this gesture at once (it's a scroll), and a tap never
+  // activates it. When it activates, the list stops scrolling.
+  const touchStartY = useSharedValue(0);
+  const pullBase = useSharedValue(0);
+  const pullDown = Gesture.Pan()
+    .manualActivation(true)
+    .onTouchesDown((e) => {
+      touchStartY.value = e.allTouches[0]?.absoluteY ?? 0;
+    })
+    .onTouchesMove((e, state) => {
+      const touch = e.allTouches[0];
+      if (!touch) return;
+      const decision = pullDownDecision(touch.absoluteY - touchStartY.value, listScrollOffset.value);
+      if (decision === "fail") state.fail();
+      else if (decision === "activate") state.activate();
+    })
+    .onStart((e) => {
+      pullBase.value = e.translationY;
+    })
+    .onUpdate((e) => {
+      progress.value = Math.min(1, Math.max(0, 1 - (e.translationY - pullBase.value) / dragDistance));
+    })
+    .onEnd((e) => {
+      const target = releaseExpandTarget(progress.value, e.velocityY);
+      progress.value = withSpring(target, SETTLE_SPRING);
+      runOnJS(onSettle)(target === 1);
+    });
+
   const containerStyle = useAnimatedStyle(() => ({
     opacity: interpolate(progress.value, [0, OPACITY_RAMP_END], [0, 1], "clamp"),
     transform: [{ translateY: (1 - progress.value) * dragDistance }],
   }));
 
   return (
-    <Animated.View pointerEvents={interactive ? "auto" : "none"} style={[styles.overlay, containerStyle]}>
-      <View style={[styles.box, { marginTop: topInset + 16, marginBottom: bottomInset + 16 }]}>
+    <Animated.View
+      pointerEvents={interactive ? "auto" : "none"}
+      // Collapsed, it's invisible — and must be invisible to TalkBack too
+      // (its Collapse button would otherwise be a focus stop nobody sees).
+      importantForAccessibility={interactive ? "auto" : "no-hide-descendants"}
+      accessibilityElementsHidden={!interactive}
+      style={[styles.overlay, containerStyle]}
+    >
+      <View style={[styles.box, { marginTop: topInset + 8 }]}>
         {/* Same handle component as HistorySheet.tsx's own tray — dragging
             it down continuously drives the SAME `progress` value back
             toward 0, collapsing this box back into the tray. */}
-        <SwipeableTrayHandle progress={progress} dragDistance={dragDistance} onSettle={onSettle} style={styles.closeHandleRow} />
+        <View style={styles.headerRow}>
+          <SwipeableTrayHandle progress={progress} dragDistance={dragDistance} onSettle={onSettle} style={styles.closeHandleRow} />
+          {/* Stage 5c: Collapse, for anyone who doesn't drag — the same
+              settle the handle's release does, back to the 50% tray. Sits
+              in the handle row's right gutter, clear of the list. */}
+          <Pressable
+            testID="full-screen-collapse"
+            onPress={() => settleExpandProgress(progress, false, onSettle)}
+            hitSlop={(MIN_TOUCH_TARGET - COLLAPSE_HEIGHT) / 2}
+            accessibilityRole="button"
+            accessibilityLabel="Collapse"
+            accessibilityHint="Returns to the half-height tray"
+            style={({ pressed }) => [styles.collapse, compactCollapse && styles.collapseCompact, pressed && styles.collapsePressed]}
+          >
+            <Feather name="chevron-down" size={compactCollapse ? 20 : 16} color={xayraColors.textSoft} />
+            {!compactCollapse && <Text style={styles.collapseText}>Collapse</Text>}
+          </Pressable>
+        </View>
         {/* `listClearance`'s padding matches HistorySheet.tsx's own tray
             exactly — see that file's `listClearance`/`trayHandleRow` styles
             for the full reasoning. `children` only mounts once interactive
             (see this file's own top doc comment for why). */}
-        <View style={styles.listClearance}>{interactive ? children : null}</View>
+        <GestureDetector gesture={pullDown}>
+          <View style={styles.listClearance}>{interactive ? children : null}</View>
+        </GestureDetector>
       </View>
     </Animated.View>
   );
@@ -150,24 +242,68 @@ const styles = StyleSheet.create({
     // point is that this reads as "the sheet, just bigger," not a visually
     // distinct layer.
     backgroundColor: "#000000",
+    // Above every home control (Record/Ask is 25): on Android, elevation —
+    // not tree order — decides what paints on top, and the switch used to
+    // paint over this view mid-transition (Redmi flicker). Invisible and
+    // non-interactive at progress 0, so this costs nothing at rest.
+    zIndex: 30,
+    elevation: 30,
   },
+  // Xayra 2.0: the tray surface, grown to full height — same colour, top
+  // corners and edge as HistorySheet's sheet, so it reads as the tray
+  // itself, just taller. The list's own bottom padding clears the nav bar.
   box: {
     flex: 1,
-    marginHorizontal: 16,
     position: "relative",
-    backgroundColor: "rgba(18, 18, 26, 0.65)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.12)",
-    borderRadius: 18,
-    padding: 16,
+    backgroundColor: xayraColors.surface,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    borderTopWidth: 1,
+    borderColor: xayraColors.lineStrong,
     overflow: "hidden",
   },
   listClearance: {
     flex: 1,
     paddingTop: 4,
   },
+  // The handle spans the whole header row (its drag area unchanged, its
+  // pill centred); Collapse sits on top of it at the right.
   closeHandleRow: {
-    paddingTop: 4,
-    paddingBottom: 8,
+    position: "absolute",
+    top: 0,
+    right: 0,
+    bottom: 0,
+    left: 0,
+    justifyContent: "center",
+  },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "flex-end",
+    minHeight: COLLAPSE_HEIGHT + 12,
+    paddingHorizontal: 12,
+    paddingTop: 6,
+  },
+  collapse: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    minHeight: COLLAPSE_HEIGHT,
+    paddingHorizontal: 12,
+    borderRadius: xayraRadius.pill,
+    borderWidth: 1,
+    borderColor: xayraColors.outline,
+  },
+  collapseCompact: {
+    width: COLLAPSE_HEIGHT,
+    paddingHorizontal: 0,
+    justifyContent: "center",
+  },
+  collapsePressed: {
+    backgroundColor: xayraColors.line,
+  },
+  collapseText: {
+    ...xayraType.chip,
+    color: xayraColors.textSoft,
   },
 });

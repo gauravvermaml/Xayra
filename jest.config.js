@@ -11,8 +11,10 @@ module.exports = {
   // jest-expo's own default already exempts the RN/Expo ecosystem from
   // CommonJS-only transformation; @op-engineering/op-sqlite ships ESM and
   // needs the same treatment so db/client.ts (imported transitively by
-  // db-client-serialization.test.ts) can load under Jest.
+  // db-client-serialization.test.ts) can load under Jest. @fugood's
+  // audio-pcm-stream wrapper is ESM too, and audioInputState now reaches it
+  // through micSession.
   transformIgnorePatterns: [
-    "/node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|standard-navigation|@op-engineering))",
+    "/node_modules/(?!(.pnpm|react-native|@react-native|@react-native-community|expo|@expo|@expo-google-fonts|react-navigation|@react-navigation|@sentry/react-native|native-base|standard-navigation|@op-engineering|@fugood))",
   ],
 };

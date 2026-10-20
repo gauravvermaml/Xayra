@@ -16,12 +16,11 @@
  * of the wake-word chain's fixes was built to prevent, but reachable through
  * this UI path because it was never covered by that fix's own scope.
  */
-let micInUse = false;
+import { isMicSessionBusy } from "./micSession";
 
-export function setMicInUse(inUse: boolean): void {
-  micInUse = inUse;
-}
-
+/** Gate B: manual recording and Handsfree both capture through
+ * services/audio/micSession.ts, and a session counts as in use until its
+ * native release is confirmed. */
 export function isMicInUse(): boolean {
-  return micInUse;
+  return isMicSessionBusy();
 }

@@ -49,6 +49,8 @@ export type SplashLock = {
   /** An attempt is in flight — the button is disabled so taps can't stack prompts. */
   unlocking: boolean;
   onUnlock: () => void;
+  /** Key-missing only (canRecoverOriginalVault): opens original-vault recovery. */
+  onRecover?: () => void;
 };
 
 const LOCKED = {
@@ -84,6 +86,26 @@ const LOCK_COPY: Record<VaultLockReason, { title: string; detail: string; action
   databaseError: {
     title: "Xayra couldn't open your notes",
     detail: "Nothing was changed. Try again, or restart the app.",
+    action: "Try again",
+  },
+  encryptionUnavailable: {
+    title: "Xayra can't protect your notes",
+    detail: "This version of Xayra is missing its encryption component, so it won't open your notes. Nothing was changed. Please update Xayra.",
+    action: "Try again",
+  },
+  vaultConflict: {
+    title: "Xayra needs attention",
+    detail: "Your notes' files aren't in the state Xayra expects, so it stopped rather than guess. Nothing was changed or deleted.",
+    action: "Try again",
+  },
+  insufficientStorage: {
+    title: "Not enough space to secure your notes",
+    detail: "Xayra needs free space to encrypt your notes safely. Free up some storage, then try again. Nothing was changed.",
+    action: "Try again",
+  },
+  migrationFailed: {
+    title: "Securing your notes didn't finish",
+    detail: "Your original notes are untouched. Try again — Xayra will start the step over.",
     action: "Try again",
   },
 };
@@ -183,6 +205,17 @@ function LockPanel({ lock }: { lock: SplashLock }) {
       >
         <Text style={styles.unlockLabel}>{lock.unlocking ? "Unlocking…" : copy.action}</Text>
       </Pressable>
+      {lock.reason === "keyMissing" && lock.onRecover ? (
+        <Pressable
+          onPress={lock.onRecover}
+          disabled={lock.unlocking}
+          accessibilityRole="button"
+          hitSlop={8}
+          style={({ pressed }) => [styles.recoverLink, pressed && styles.unlockButtonPressed]}
+        >
+          <Text style={styles.recoverLabel}>Recover my notes</Text>
+        </Pressable>
+      ) : null}
     </Animated.View>
   );
 }
@@ -249,8 +282,19 @@ const styles = StyleSheet.create({
   unlockButtonPressed: {
     opacity: 0.7,
   },
+  recoverLink: {
+    marginTop: 16,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+  },
+  recoverLabel: {
+    color: "#94A3B8",
+    fontSize: 14,
+    fontWeight: "600",
+    textDecorationLine: "underline",
+  },
   unlockLabel: {
-    color: "#FFFFFF",
+    color: colors.onAccent,
     fontSize: 16,
     fontWeight: "700",
   },

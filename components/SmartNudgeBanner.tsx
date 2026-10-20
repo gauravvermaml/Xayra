@@ -18,7 +18,8 @@ export function SmartNudgeBanner({ onConnect, onDismiss }: SmartNudgeBannerProps
   return (
     <View style={styles.container}>
       <Text style={styles.text}>
-        Protect your private vault. Connect Google Drive for encrypted auto-backups.
+        Keep a backup of your notes in your Google Drive. Backups are encrypted, and the key is kept in your Google
+        account so you can restore with just your account.
       </Text>
       <View style={styles.actions}>
         <Pressable onPress={onConnect} style={styles.connectButton}>

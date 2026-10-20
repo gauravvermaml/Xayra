@@ -1,11 +1,12 @@
 import { forwardRef, useCallback, useMemo } from "react";
-import { Pressable, StyleSheet, View } from "react-native";
+import { type LayoutChangeEvent, Pressable, StyleSheet, useWindowDimensions, View } from "react-native";
 import BottomSheet, { type BottomSheetProps } from "@gorhom/bottom-sheet";
-import type { SharedValue } from "react-native-reanimated";
+import Animated, { interpolate, type SharedValue, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 
 import { ModelDownloadCard } from "./ModelDownloadCard";
 import { createExpandOverdragGestureHandlersHook } from "./useExpandOverdragGestureHandlers";
 import { spacing } from "../constants/theme";
+import { xayraColors } from "../constants/xayraTheme";
 import type { ModelDownloadStatus } from "../services/ai/modelDownloadManager";
 import { devTiming } from "../services/ai/perf";
 
@@ -64,6 +65,14 @@ import { devTiming } from "../services/ai/perf";
  */
 export const SHEET_SNAP_POINTS = ["20%", "50%"];
 
+/** Xayra 2.0 (Option B): the expanded stage, unchanged. The rest stage is no
+ * longer a percentage — it's the measured content height (`restHeight`):
+ * handle + compose field + dock. SHEET_SNAP_POINTS stays only as the source
+ * of the full-screen drag distance (app/index.tsx), which is unchanged. */
+export const SHEET_HALF_SNAP_POINT = "50%";
+/** The drag handle's rendered height (8 + 5 + 7, see styles below). */
+export const SHEET_HANDLE_HEIGHT = 20;
+
 /**
  * A trivial, permanently-stable component — no props that change on every
  * keystroke or every render ever reach it — passed directly as
@@ -78,7 +87,14 @@ export const SHEET_SNAP_POINTS = ["20%", "50%"];
 const SheetDragHandle = forwardRef<View, { onPress: () => void }>(function SheetDragHandle({ onPress }, ref) {
   return (
     <View ref={ref} style={styles.handleWrap}>
-      <Pressable onPress={onPress} hitSlop={12} style={styles.dragHandleHitArea}>
+      <Pressable
+        onPress={onPress}
+        // 20dp row + 14dp above and below = a 48dp touch target.
+        hitSlop={14}
+        accessibilityRole="button"
+        accessibilityLabel="Tray handle. Tap to open, drag to resize"
+        style={styles.dragHandleHitArea}
+      >
         <View style={styles.dragHandle} />
       </Pressable>
     </View>
@@ -104,6 +120,10 @@ export type HistorySheetProps = {
   content: React.ReactNode;
   onIndexChange?: BottomSheetProps["onChange"];
   animatedIndex: SharedValue<number>;
+  /** The sheet's live top edge (px from the top of its container) — the
+   * one source the home layout positions Record/Ask and fits the emblem
+   * against (Redmi uplift Stage 2 corrections). */
+  animatedPosition: SharedValue<number>;
   /** Current snap index, tracked in JS state (app/index.tsx) alongside
    * `animatedIndex` — needed here to actually NOT RENDER the segment pill
    * and history content at index 0 (IDLE PEEK ISOLATION), rather than just
@@ -140,6 +160,30 @@ export type HistorySheetProps = {
       screenshot showed the card's subtitle clipped flush against the
       Android nav bar without it). */
   bottomInset: number;
+  /** Rest snap point in px, measured by app/index.tsx (handle + compose
+   * field + gap + dock). */
+  restHeight: number;
+  /** Whether the dock is shown below the tray's content (Redmi uplift
+   * Stage 2: the dock is a fixed screen element drawn by app/index.tsx, no
+   * longer this sheet's footer — gorhom moved the footer with its own
+   * container, which left the dock lifted by a keyboard's height on the
+   * Redmi). The sheet only keeps the body clear of it. */
+  reserveFooter: boolean;
+  /** False while the full-screen view covers the tray (Redmi uplift Stage
+   * 2): a swipe on the full-screen list reached this sheet underneath and
+   * dragged it down to rest unseen, so closing the full-screen view landed
+   * on the rest stage instead of the 50% tray it opened from. */
+  gesturesEnabled: boolean;
+  /** The footer's measured height (bottom inset included) — the body ends
+   * above it, so the list and its last item never run under the dock. */
+  footerHeight: number;
+  /** True on constrained screens (measured reading viewport at 50% below
+   * app/index.tsx's minimum): the dock fades out as the tray rises to 50%
+   * and the list takes its space, both tracking the tray's live position —
+   * no jump. Back at rest the dock is fully there again. */
+  footerYieldsAtHalf: boolean;
+  /** The compose header's rendered height. */
+  onHeaderLayout: (height: number) => void;
   /** Shared 0..1 progress this sheet's own handle drives once a drag
    * continues past its highest (50%) snap point — see
    * useExpandOverdragGestureHandlers.ts's own doc comment for the full
@@ -182,10 +226,17 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     content,
     onIndexChange,
     animatedIndex,
+    animatedPosition,
     sheetIndex,
     contentHidden,
     modelDownload,
     bottomInset,
+    restHeight,
+    reserveFooter,
+    gesturesEnabled,
+    footerHeight,
+    footerYieldsAtHalf,
+    onHeaderLayout,
     expandProgress,
     expandDragDistance,
     onExpandSettle,
@@ -214,22 +265,75 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
   // the same way its own `handleComponent` (`renderHandle`, below) does —
   // see useExpandOverdragGestureHandlers.ts's own doc comment for the full
   // mechanism.
+  // The header (compose bar) is a drag origin for the full-screen view, like
+  // the handle; the list below it scrolls (Redmi uplift Stage 2 corrections).
+  const headerHeight = useSharedValue(0);
   const expandGestureHandlersHook = useMemo(
-    () => createExpandOverdragGestureHandlersHook({ expandProgress, expandDragDistance, onExpandSettle }),
-    [expandProgress, expandDragDistance, onExpandSettle]
+    () =>
+      createExpandOverdragGestureHandlersHook({
+        expandProgress,
+        expandDragDistance,
+        onExpandSettle,
+        expandOriginHeight: headerHeight,
+      }),
+    [expandProgress, expandDragDistance, onExpandSettle, headerHeight]
   );
 
   const renderHandle = useCallback(() => <SheetDragHandle onPress={handleTapDragHandle} />, [handleTapDragHandle]);
 
+  const snapPoints = useMemo(() => [restHeight, SHEET_HALF_SNAP_POINT], [restHeight]);
+
+  // TRAY SCROLL FIX (Xayra 2.0 Stage 4.2): gorhom bounds its content area
+  // only with a Reanimated-animated `height` style (sheet height minus the
+  // handle). On this stack (RN 0.86, Reanimated 4, New Architecture) that
+  // animated height never reaches layout: measured on-device, a flex:1 child
+  // of gorhom's content container laid out at 1318dp instead of ~437dp, so
+  // the list was laid out at its full content height (1154dp for nine notes)
+  // and had nothing to scroll — the sheet only clipped it. The full-screen
+  // overlay's list scrolled because its parent has a static, bounded height.
+  // This gives the sheet's own children that same static bound: the content
+  // height at the 50% (highest) stage — half the window, which is what gorhom
+  // resolves "50%" against, minus the handle. Snap points, gestures and the
+  // library are untouched; at the rest stage the body is hidden anyway.
+  const { height: windowHeight } = useWindowDimensions();
+  const contentAreaHeight = Math.max(0, windowHeight * 0.5 - SHEET_HANDLE_HEIGHT);
+
+  const handleHeaderLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      const height = Math.round(e.nativeEvent.layout.height);
+      headerHeight.value = height;
+      onHeaderLayout(height);
+    },
+    [onHeaderLayout, headerHeight]
+  );
+  const footerVisible = reserveFooter;
+  // Body bottom padding: the dock's height, or — when it yields at 50% —
+  // interpolated with the live tray position down to the inset alone.
+  const bodyPaddingStyle = useAnimatedStyle(() => {
+    if (!footerVisible) return { paddingBottom: bottomInset };
+    if (!footerYieldsAtHalf) return { paddingBottom: footerHeight };
+    return {
+      paddingBottom: interpolate(animatedIndex.value, [0, 1], [footerHeight, bottomInset], "clamp"),
+    };
+  });
   return (
     <BottomSheet
       ref={ref}
       index={0}
-      snapPoints={SHEET_SNAP_POINTS}
+      snapPoints={snapPoints}
       animatedIndex={animatedIndex}
+      animatedPosition={animatedPosition}
       onChange={onIndexChange}
       onAnimate={(from: number, to: number) => devTiming("VoiceAskTiming", "tray animation start", { from, to })}
       enableDynamicSizing={false}
+      // No rubber-band past 50% (Redmi uplift Stage 2): a content drag that
+      // gorhom treated as an over-drag moved the tray a little and sprang it
+      // back instead of scrolling. Full-screen expansion is driven by the
+      // handle (useExpandOverdragGestureHandlers measures the drag itself)
+      // and by an upward fling on the list (ChatSheetContent).
+      enableOverDrag={false}
+      enableContentPanningGesture={gesturesEnabled}
+      enableHandlePanningGesture={gesturesEnabled}
       keyboardBehavior="interactive"
       // "restore" (the library's own default-adjacent option — snap back to
       // wherever the sheet was before the keyboard opened, once it closes)
@@ -299,7 +403,10 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           above — see the long comment on that prop for the real root cause;
           this `onFocus` call only does anything useful once that prop stops
           the library's own keyboard math from overriding it. */}
-      <View style={styles.header}>{composeBarSlot}</View>
+      <View style={{ height: contentAreaHeight }}>
+      <View style={styles.header} onLayout={handleHeaderLayout}>
+        {composeBarSlot}
+      </View>
 
       {/* IDLE PEEK ISOLATION, REVISED — was a full conditional mount/unmount
           (`{sheetIndex > 0 && !contentHidden && (<View>...)}`), which is
@@ -325,8 +432,16 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
           functional bug. PADDING & CLEARANCE: `body`'s `marginTop` (16dp,
           below) is a real flex margin, not a clipping trick — the list can
           structurally never render behind the sticky header above it. */}
-      <View
-        style={[styles.body, (sheetIndex === 0 || contentHidden) && styles.bodyHidden]}
+      <Animated.View
+        style={[
+          styles.body,
+          // The body ends at the dock's top edge: the list's last item and
+          // the download card stay above it. The bottom safe-area inset is
+          // part of the dock's measured height — counted once, there. With
+          // no dock (typing — the body is hidden then anyway) it's the inset.
+          bodyPaddingStyle,
+          (sheetIndex === 0 || contentHidden) && styles.bodyHidden,
+        ]}
         pointerEvents={sheetIndex === 0 || contentHidden ? "none" : undefined}
       >
         {/* Monochromatic glass container: one translucent, bordered box
@@ -339,34 +454,38 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
             padded content, same as any other flex box in this app. */}
         <View style={styles.textContainerBox}>{content}</View>
 
-        <View style={{ paddingBottom: bottomInset }}>
-          <ModelDownloadCard modelDownload={modelDownload} />
-        </View>
+        <ModelDownloadCard modelDownload={modelDownload} />
+      </Animated.View>
       </View>
     </BottomSheet>
   );
 });
 
 const styles = StyleSheet.create({
+  // Xayra 2.0: the reading tray is a quiet slate surface lifted off the
+  // black canvas by its colour and a faint top edge — no card, no shadow.
   background: {
-    // True jet black / matches the canvas exactly — deliberately NOT the
-    // app's usual slate `colors.background`.
-    backgroundColor: "#000000",
+    backgroundColor: xayraColors.surface,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    borderTopWidth: 1,
+    borderColor: xayraColors.lineStrong,
   },
   handleWrap: {
-    backgroundColor: "#000000",
     alignItems: "center",
   },
+  // 8 + 5 + 7 = 20dp, the same height as before, so the compose field (and
+  // with it the keyboard clearance) sits exactly where it did.
   dragHandleHitArea: {
     paddingTop: spacing.sm,
-    paddingBottom: spacing.sm,
+    paddingBottom: 7,
     paddingHorizontal: spacing.xl,
   },
   dragHandle: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: "rgba(255,255,255,0.3)",
+    width: 44,
+    height: 5,
+    borderRadius: 3,
+    backgroundColor: xayraColors.handle,
   },
   // No vertical padding of its own — ComposeBar's row already has a fixed
   // 40dp height, and the drag handle above (handleComponent) already
@@ -387,19 +506,12 @@ const styles = StyleSheet.create({
   bodyHidden: {
     opacity: 0,
   },
-  // MONOCHROMATIC GLASS: a single translucent, subtly-bordered box wrapping
-  // the Q&A history list — `flex: 1` and `overflow: "hidden"` are additive
-  // to the requested spec (not part of it), needed for a real scrollable
-  // list to actually fill the box's height and for its content to respect
-  // the box's own rounded corners.
+  // Xayra 2.0: borderless — the list sits straight on the tray surface (the
+  // old translucent bordered "glass" box is gone). `flex: 1` and
+  // `overflow: "hidden"` keep the scrollable list filling and clipped.
   textContainerBox: {
     flex: 1,
     position: "relative",
-    backgroundColor: "rgba(18, 18, 26, 0.65)",
-    borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.12)",
-    borderRadius: 18,
-    padding: 16,
     overflow: "hidden",
   },
 });

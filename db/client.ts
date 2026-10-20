@@ -1,10 +1,8 @@
-import { ANDROID_DATABASE_PATH, open, type DB } from "@op-engineering/op-sqlite";
-import * as FileSystem from "expo-file-system/legacy";
+import { isSQLCipher, open, type DB } from "@op-engineering/op-sqlite";
 import { drizzle, type OPSQLiteDatabase } from "drizzle-orm/op-sqlite";
 
 import { EMBEDDING_DIMENSIONS, generateEmbeddingLocal } from "../services/ai/localEmbeddings";
 import { devTiming } from "../services/ai/perf";
-import { getOrCreateDatabaseKey } from "../services/crypto/keyManager";
 import {
   DISPOSABLE_DATABASE_NAME,
   getDisposableVaultKey,
@@ -12,13 +10,19 @@ import {
   resolveVaultMode,
 } from "../services/dev/disposableVault";
 import {
+  assertEstablishedVault,
+  encryptedVaultDirectory,
+  prepareNormalVault,
+  VAULT_DATABASE_NAME as ENCRYPTED_VAULT_DATABASE_NAME,
+} from "../services/vault/vaultActivation";
+import { VaultStateError } from "../services/vault/vaultErrors";
+import { toRawSqlcipherKey } from "../services/vault/vaultKey";
+import {
   NOTE_EMBEDDINGS_TABLE_SQL,
   NOTES_FTS_TABLE_SQL,
   NOTES_FTS_TRIGGERS_SQL,
 } from "./schema";
 import * as schema from "./schema";
-
-const DATABASE_NAME = "silent-confidant.sqlite";
 
 type DatabaseHandle = {
   db: DB;
@@ -43,21 +47,14 @@ type GlobalWithDb = typeof globalThis & {
 
 const globalWithDb = globalThis as GlobalWithDb;
 
-/**
- * Whether the encrypted database file already exists (op-sqlite's default
- * Android location). Decides whether a missing key may be created: only for a
- * brand-new vault — see keyManager.ts. If the check itself fails it throws, so
- * an uncertain answer can never authorise minting a key.
- */
-async function databaseFileExists(): Promise<boolean> {
-  // op-sqlite types its path constants as `any`; narrow before use.
-  const base: unknown = ANDROID_DATABASE_PATH;
-  if (typeof base !== "string" || base.length === 0) {
-    throw new Error("op-sqlite did not report its Android database directory.");
-  }
-  const directory = base.endsWith("/") ? base : `${base}/`;
-  const info = await FileSystem.getInfoAsync(`file://${directory}${DATABASE_NAME}`);
-  return info.exists;
+/** The encrypted vault's file name and directory (services/vault/vaultActivation.ts).
+ * The legacy plaintext vault in op-sqlite's default directory is never opened
+ * by the app again once migrated. */
+export const VAULT_DATABASE_NAME = ENCRYPTED_VAULT_DATABASE_NAME;
+
+/** The encrypted vault's directory as a bare path with a trailing slash. */
+export function vaultDirectoryPath(): string {
+  return `${encryptedVaultDirectory()}/`;
 }
 
 /**
@@ -82,19 +79,32 @@ async function databaseFileExists(): Promise<boolean> {
  * `execute()`/`transaction()` calls — deferred pending a more careful
  * design, not attempted again in this session.
  */
-/** The normal vault: persistent, biometric-gated key (keyManager.ts). */
+/** The normal vault: genuinely encrypted (SQLCipher, raw 256-bit key from
+ * keyManager.ts). vaultActivation.ts creates it, migrates a legacy plaintext
+ * vault into it, or confirms the committed one — and refuses any state it
+ * can't prove safe. */
 async function openNormalVault(): Promise<DB> {
-  const vaultExists = await databaseFileExists();
-  devTiming("Vault", "open", { vaultExists });
-  const encryptionKey = await getOrCreateDatabaseKey({ allowCreate: !vaultExists });
-  return open({ name: DATABASE_NAME, encryptionKey });
+  const params = await prepareNormalVault();
+  devTiming("Vault", "open", { location: "files/vault" });
+  const db = open(params);
+  try {
+    await assertEstablishedVault(db);
+  } catch (err) {
+    db.close();
+    throw err;
+  }
+  return db;
 }
 
 /** Xayra Dev's disposable test vault: separate folder and file, in-memory key,
- * never keyManager or the normal vault (services/dev/disposableVault.ts). */
+ * never keyManager or the normal vault (services/dev/disposableVault.ts).
+ * Encrypted with the same raw-key representation as the normal vault. */
 async function openDisposableVault(): Promise<DB> {
+  if (!isSQLCipher()) {
+    throw new VaultStateError("encryptionUnavailable", "sqlcipherMissing");
+  }
   const location = await prepareDisposableVaultStorage();
-  const encryptionKey = await getDisposableVaultKey();
+  const encryptionKey = toRawSqlcipherKey(await getDisposableVaultKey());
   devTiming("Vault", "open", { disposable: true });
   return open({ name: DISPOSABLE_DATABASE_NAME, location, encryptionKey });
 }
@@ -272,6 +282,16 @@ async function createCoreTables(db: DB): Promise<void> {
   // `note_id` above.
   try {
     await db.execute("ALTER TABLE todos ADD COLUMN google_calendar_event_id TEXT;");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (!/duplicate column/i.test(message)) {
+      throw err;
+    }
+  }
+  // Last content change (see db/schema.ts's `updatedAt` on todos) — nullable,
+  // same idempotent migration pattern.
+  try {
+    await db.execute("ALTER TABLE todos ADD COLUMN updated_at INTEGER;");
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     if (!/duplicate column/i.test(message)) {

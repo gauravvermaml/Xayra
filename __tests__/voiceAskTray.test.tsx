@@ -128,6 +128,7 @@ describe("capture end raises the tray once (Ask only)", () => {
     const events: string[] = [];
     const controller = new ManualUtteranceController({
       startRecording: async () => true,
+      discardRecording: async () => {},
       stopRecording: () => {
         events.push("stop requested");
         return new Promise((resolve) => (finishStop = resolve));
@@ -152,6 +153,7 @@ describe("capture end raises the tray once (Ask only)", () => {
     const controller = new ManualUtteranceController({
       startRecording: async () => true,
       stopRecording: async () => null,
+      discardRecording: async () => {},
       processUtterance: async () => {},
       onCaptureDiscarded: discarded,
     });

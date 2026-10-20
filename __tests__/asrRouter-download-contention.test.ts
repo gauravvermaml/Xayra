@@ -25,6 +25,7 @@ jest.mock("../services/ai/localWhisper", () => ({
 jest.mock("../services/ai/perf", () => ({
   logDuration: jest.fn(),
   nowMs: jest.fn(() => 0),
+  devTiming: jest.fn(),
 }));
 jest.mock("../services/ai/modelDownloadManager", () => ({
   getCurrentModelDownloadStatus: jest.fn(),

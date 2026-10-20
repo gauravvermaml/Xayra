@@ -85,6 +85,9 @@ export function NotesSheetContent({
       createdAt={item.createdAt}
       onPress={() => onSelectNote(item.id)}
       onDelete={() => onDeleteNote(item.id)}
+      // Archive's cards match Home's tray (Redmi uplift Stage 4): the quiet
+      // delete icon, not a red emoji circle. Delete still confirms first.
+      appearance="xayra"
     />
   );
 

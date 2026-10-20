@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AppState, type AppStateStatus } from "react-native";
 import { Buffer } from "buffer";
-import { requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
+import { getRecordingPermissionsAsync, requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
 import { activateKeepAwakeAsync, deactivateKeepAwake } from "expo-keep-awake";
-import AudioRecord from "@fugood/react-native-audio-pcm-stream";
-
-import { setMicInUse } from "./audioInputState";
+import { MicBusyError, openMicSession, stopMicSession } from "./micSession";
 import { pausePlayback } from "./player";
 import { stopSpeech } from "./tts";
 import { TrailingSilenceDetector } from "./silenceDetector";
@@ -29,6 +27,9 @@ export type ActiveModeCallbacks = {
   onUtterance: ActiveModeUtteranceHandler;
   onStateChange?: (state: ActiveModeState) => void;
   onError?: (error: unknown) => void;
+  /** A stop that was shown as failed (release unconfirmed) is now confirmed:
+   * Handsfree is off (Gate B). */
+  onStopConfirmed?: () => void;
 };
 
 /**
@@ -218,7 +219,8 @@ export class ActiveModeManager {
   private stopped = true;
 
   private chunks: Buffer[] = [];
-  private subscription: { remove: () => void } | null = null;
+  /** The native microphone session of this engagement (micSession). */
+  private micSessionId: number | null = null;
   private silenceCheckTimer: ReturnType<typeof setInterval> | null = null;
 
   // Speech / trailing-silence state for the current listen cycle — reset
@@ -266,18 +268,71 @@ export class ActiveModeManager {
     return this._state;
   }
 
+  /** The session is open (the microphone belongs to Handsfree). */
+  get isRunning(): boolean {
+    return !this.stopped;
+  }
+
+  /** Open, or opening: a start is in flight. What a toggle must treat as
+   * "on", so a second tap during the start turns Handsfree off rather than
+   * starting it twice. */
+  get isEngaged(): boolean {
+    return !this.stopped || this.startInFlight !== null;
+  }
+
+  /** Increments per start. A state report from an utterance of an earlier
+   * (stopped) session is ignored, so a late "speaking" can't relight a
+   * session the user already stopped — or a newer one. */
+  private session = 0;
+  private startInFlight: Promise<void> | null = null;
+  /** Stop was requested while the start was still opening the microphone. */
+  private stopRequestedDuringStart = false;
+
+  /** The last stop's native call threw, so the capture loop was never told
+   * to stop and the microphone may still be capturing. The session stays
+   * open (Handsfree still owns the microphone; nothing else may take it),
+   * nothing is captured or re-armed, and the next stop() retries. */
+  private stopFailedFlag = false;
+
+  get stopFailed(): boolean {
+    return this.stopFailedFlag;
+  }
+
   private setState(next: ActiveModeState): void {
     this._state = next;
     this.callbacks.onStateChange?.(next);
   }
 
-  private errorSubscription: { remove: () => void } | null = null;
-
   async start(): Promise<void> {
     if (!this.stopped) {
       return;
     }
-    const { granted } = await requestRecordingPermissionsAsync();
+    // One start at a time: a second call while the first is still opening
+    // the microphone joins it instead of opening a second native session.
+    if (this.startInFlight) {
+      return this.startInFlight;
+    }
+    this.stopRequestedDuringStart = false;
+    this.startInFlight = this.open().finally(() => {
+      this.startInFlight = null;
+    });
+    return this.startInFlight;
+  }
+
+  private async open(): Promise<void> {
+    // Check before asking, as the manual recorder does: requesting launches
+    // the system permission activity even when permission is already
+    // granted, which pauses the app — mid-start, that "background" was
+    // stopping the session it was starting (Stage 5b, seen on the emulator).
+    let granted = false;
+    try {
+      granted = (await getRecordingPermissionsAsync()).granted;
+    } catch {
+      // Unknown — fall through to the normal request.
+    }
+    if (!granted) {
+      granted = (await requestRecordingPermissionsAsync()).granted;
+    }
     if (!granted) {
       throw new Error("Microphone permission was not granted.");
     }
@@ -302,48 +357,90 @@ export class ActiveModeManager {
     // recording; a true background foreground-service is a separate,
     // materially larger native undertaking not implemented here.
     await activateKeepAwakeAsync(KEEP_AWAKE_TAG);
-    this.stopped = false;
-    setMicInUse(true);
+    // Stopped while opening: never open the microphone.
+    if (this.stopRequestedDuringStart) {
+      await deactivateKeepAwake(KEEP_AWAKE_TAG);
+      return;
+    }
 
     // The ONE native session for this entire Handsfree engagement — see
     // `capturing`'s own doc comment for why this is deliberately not
-    // repeated in `armListening()` anymore.
-    AudioRecord.init({ sampleRate: SAMPLE_RATE, channels: CHANNELS, bitsPerSample: BITS_PER_SAMPLE });
-    this.subscription?.remove();
-    this.subscription = AudioRecord.on("data", (base64Chunk: string) => this.handleAudioChunk(base64Chunk));
-    // Build 42 P1-5 fix — see recorder.ts's identical fix/doc comment.
-    // Requires the native patch adding this event; see
-    // patches/@fugood+react-native-audio-pcm-stream+1.1.4.patch.
-    this.errorSubscription?.remove();
-    this.errorSubscription = AudioRecord.on("error", (message: string) => {
-      console.error("[ActiveMode] Native recording error:", message);
-      this.callbacks.onError?.(new Error(`Native recording error: ${message}`));
-    });
-    AudioRecord.start();
+    // repeated in `armListening()` anymore. Through micSession (Gate B):
+    // the microphone is reported free only after its native release.
+    let id: number;
+    try {
+      id = await openMicSession(
+        "handsfree",
+        { sampleRate: SAMPLE_RATE, channels: CHANNELS, bitsPerSample: BITS_PER_SAMPLE },
+        {
+          onChunk: (base64Chunk) => this.handleAudioChunk(base64Chunk),
+          // Build 42 P1-5 fix — see recorder.ts's identical fix.
+          onError: (message) => {
+            console.error("[ActiveMode] Native recording error:", message);
+            this.callbacks.onError?.(new Error(`Native recording error: ${message}`));
+          },
+        },
+        { collect: false }
+      );
+    } catch (err) {
+      await deactivateKeepAwake(KEEP_AWAKE_TAG);
+      throw err;
+    }
+    this.micSessionId = id;
+    this.stopped = false;
+    this.session += 1;
 
     this.armListening();
   }
 
   async stop(): Promise<void> {
+    if (this.startInFlight) {
+      // Let the start finish its own async steps, then close whatever it
+      // opened (it opens nothing once this flag is seen).
+      this.stopRequestedDuringStart = true;
+      await this.startInFlight.catch(() => {});
+    }
     if (this.stopped) {
       return;
     }
-    this.stopped = true;
+    // Nothing more is captured, handed off or re-armed from here, whether
+    // or not the native stop below succeeds.
     this.capturing = false;
     this.clearSilenceCheck();
-    try {
-      AudioRecord.stop();
-    } catch {
-      // Already stopped — fine.
-    }
-    this.subscription?.remove();
-    this.subscription = null;
-    this.errorSubscription?.remove();
-    this.errorSubscription = null;
     this.chunks = [];
-    setMicInUse(false);
+    const id = this.micSessionId;
+    const result = id !== null ? await stopMicSession(id, { discard: true }) : null;
+    if (result && result.kind !== "released") {
+      // Stop request failed (still capturing), or the native release is
+      // unconfirmed / failed: the microphone is NOT reported free and the
+      // session stays open, shown as a failed stop; the next stop() retries
+      // (Stage 5b, Gate B).
+      this.stopFailedFlag = true;
+      if (result.kind === "stopFailed") throw result.error;
+      if (result.kind === "releaseUnconfirmed" && id !== null) {
+        // When the native side confirms later, the failed stop clears by
+        // itself — for this session only.
+        void result.eventual.then((final) => this.onLateRelease(id, final.kind === "released"));
+      }
+      throw new MicBusyError(result.kind);
+    }
+    this.stopFailedFlag = false;
+    this.stopped = true;
+    this.micSessionId = null;
     await deactivateKeepAwake(KEEP_AWAKE_TAG);
     this.setState("idle");
+  }
+
+  /** A stop shown as failed because release was unconfirmed: confirmed
+   * now. Ignored if this session was stopped meanwhile or a newer one opened. */
+  private onLateRelease(id: number, released: boolean): void {
+    if (!released || this.micSessionId !== id || this.stopped || !this.stopFailedFlag) return;
+    this.stopFailedFlag = false;
+    this.stopped = true;
+    this.micSessionId = null;
+    void deactivateKeepAwake(KEEP_AWAKE_TAG);
+    this.setState("idle");
+    this.callbacks.onStopConfirmed?.();
   }
 
   /** The native "data" event handler — split out of `start()` so it reads
@@ -384,7 +481,7 @@ export class ActiveModeManager {
    * act on.
    */
   cancelCurrentUtterance(): boolean {
-    if (this.stopped || !this.capturing || !this.detector.hasDetectedSpeech) {
+    if (this.stopped || this.stopFailedFlag || !this.capturing || !this.detector.hasDetectedSpeech) {
       return false;
     }
     this.armListening();
@@ -396,7 +493,7 @@ export class ActiveModeManager {
    * longer touches `AudioRecord` at all; the native session is opened once,
    * in `start()`, and stays open until `stop()`. */
   private armListening(): void {
-    if (this.stopped) {
+    if (this.stopped || this.stopFailedFlag) {
       return;
     }
     this.chunks = [];
@@ -453,13 +550,19 @@ export class ActiveModeManager {
     }
 
     this.setState("processing");
+    const session = this.session;
+    const isCurrent = () => !this.stopped && !this.stopFailedFlag && this.session === session;
     try {
       const uri = await writePcmChunksAsWav(chunks, "active-mode");
-      await this.callbacks.onUtterance(uri, (state) => this.setState(state));
+      // Reports from this utterance only count while its session is still
+      // the open one.
+      await this.callbacks.onUtterance(uri, (state) => {
+        if (isCurrent()) this.setState(state);
+      });
     } catch (err) {
       this.callbacks.onError?.(err);
     } finally {
-      if (!this.stopped) {
+      if (isCurrent()) {
         this.armListening();
       }
     }
@@ -468,9 +571,18 @@ export class ActiveModeManager {
 
 export type UseActiveMode = {
   isActive: boolean;
+  /** A start is opening the microphone (not yet listening). Shown as
+   * "starting", and it already counts as Handsfree for microphone
+   * ownership — a second tap now turns Handsfree off. */
+  isStarting: boolean;
+  /** The last stop couldn't tell the microphone to stop: Handsfree is still
+   * on and may still be capturing. Stopping again retries. */
+  stopFailed: boolean;
   state: ActiveModeState;
   toggle: () => Promise<void>;
-  stop: () => Promise<void>;
+  /** Resolves true once the microphone was told to stop (Handsfree off);
+   * false if the native stop failed and Handsfree is still on. */
+  stop: () => Promise<boolean>;
   /** See ActiveModeManager.cancelCurrentUtterance's own doc comment. */
   cancelCurrentUtterance: () => boolean;
 };
@@ -484,7 +596,12 @@ export type UseActiveMode = {
 export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiveMode {
   const [isActive, setIsActive] = useState(false);
   const [state, setState] = useState<ActiveModeState>("idle");
+  const [isStarting, setIsStarting] = useState(false);
+  const [stopFailed, setStopFailed] = useState(false);
   const managerRef = useRef<ActiveModeManager | null>(null);
+  // The background listener is registered once; it reaches the latest stop
+  // (and its failure handling) through this ref.
+  const stopRef = useRef<() => Promise<boolean>>(async () => true);
   const onUtteranceRef = useRef(onUtterance);
   onUtteranceRef.current = onUtterance;
 
@@ -493,6 +610,12 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
       onUtterance: (uri, reportState) => onUtteranceRef.current(uri, reportState),
       onStateChange: setState,
       onError: (err) => console.error("[ActiveMode] error", err),
+      // The display catches up on its own — no second Stop needed.
+      onStopConfirmed: () => {
+        setStopFailed(false);
+        setIsActive(false);
+        releaseWakeChime();
+      },
     });
     managerRef.current = manager;
     return () => {
@@ -513,39 +636,71 @@ export function useActiveMode(onUtterance: ActiveModeUtteranceHandler): UseActiv
    */
   useEffect(() => {
     const subscription = AppState.addEventListener("change", (nextState: AppStateStatus) => {
-      if (nextState === "background") {
-        void managerRef.current?.stop().then(() => setIsActive(false));
+      // Only an open session is stopped here. Engaging Handsfree itself
+      // passes through "background" for a moment (the microphone-permission
+      // check pauses the activity — confirmed on the emulator: background
+      // then active, mid-start), so a start in flight is left to finish and
+      // re-check the app state itself (see `start` below).
+      if (nextState === "background" && managerRef.current?.isRunning) {
+        void stopRef.current();
       }
     });
     return () => subscription.remove();
   }, []);
 
+  // `isActive` always mirrors the controller (its session is open) — never
+  // assumed from which call returned last, so a Stop during a start can't
+  // leave the UI showing "on".
   const start = useCallback(async () => {
     // Fire-and-forget, not awaited: loading a ~10KB local asset is fast, but
     // there's no reason to make engaging Handsfree wait on it, and a chime
     // that's still loading the first time is a cosmetic miss, not a bug.
     preloadWakeChime();
-    await managerRef.current?.start();
-    setIsActive(true);
+    setIsStarting(true);
+    try {
+      await managerRef.current?.start();
+      // Left the app while the start was opening the microphone: leaving
+      // the app turns Handsfree off, as it always has.
+      if (AppState.currentState === "background") {
+        await managerRef.current?.stop().catch((err) => console.warn("[ActiveMode] Stopping the microphone failed", err));
+      }
+    } finally {
+      setIsStarting(false);
+      setStopFailed(managerRef.current?.stopFailed ?? false);
+      setIsActive(managerRef.current?.isRunning ?? false);
+    }
   }, []);
 
+  // A failed native stop leaves Handsfree on, marked `stopFailed` (the
+  // microphone may still be capturing); calling stop again retries.
   const stop = useCallback(async () => {
-    await managerRef.current?.stop();
-    setIsActive(false);
-    releaseWakeChime();
+    try {
+      await managerRef.current?.stop();
+    } catch (err) {
+      console.warn("[ActiveMode] Stopping the microphone failed", err);
+    }
+    const running = managerRef.current?.isRunning ?? false;
+    setStopFailed(managerRef.current?.stopFailed ?? false);
+    setIsActive(running);
+    if (!running) releaseWakeChime();
+    return !running;
   }, []);
 
+  // Decided by the controller, not the last render: a second tap while the
+  // first start is still opening the microphone turns Handsfree off.
   const toggle = useCallback(async () => {
-    if (isActive) {
+    if (managerRef.current?.isEngaged) {
       await stop();
     } else {
       await start();
     }
-  }, [isActive, start, stop]);
+  }, [start, stop]);
+
+  stopRef.current = stop;
 
   const cancelCurrentUtterance = useCallback(() => {
     return managerRef.current?.cancelCurrentUtterance() ?? false;
   }, []);
 
-  return { isActive, state, toggle, stop, cancelCurrentUtterance };
+  return { isActive, isStarting, stopFailed, state, toggle, stop, cancelCurrentUtterance };
 }

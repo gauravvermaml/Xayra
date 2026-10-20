@@ -1,5 +1,6 @@
 import { StyleSheet, Text, View, type StyleProp, type ViewStyle } from "react-native";
 import { TouchableOpacity } from "react-native-gesture-handler";
+import { Feather } from "@expo/vector-icons";
 
 import { colors, radius, spacing, typography } from "../../constants/theme";
 import { DEFAULT_REMINDER_TIME } from "../../db/schema";
@@ -158,22 +159,28 @@ export function CalendarTaskCard({
         </Text>
         <View style={styles.chipRow}>
           {hasExplicitTime && <Text style={styles.timeChip}>{formatTime12h(item.notificationTime)}</Text>}
-          {isRecurring && <Text style={styles.recurrenceChip}>🔁</Text>}
+          {isRecurring && (
+            <View accessible accessibilityLabel="Repeats" style={styles.recurrenceChip}>
+              <Feather name="repeat" size={12} color={colors.textMuted} />
+            </View>
+          )}
           {variant === "full" && isOverdue && <Text style={styles.overdueChip}>Overdue</Text>}
         </View>
         {variant === "full" && item.noteId && onOpenSourceNote && (
           <TouchableOpacity onPress={() => onOpenSourceNote(item.noteId as string)} hitSlop={8}>
-            <Text style={styles.sourceLink}>🎙️ Source Note</Text>
+            <View style={styles.sourceLinkRow}>
+              <Feather name="mic" size={12} color={colors.accent} />
+              <Text style={styles.sourceLink}>Source note</Text>
+            </View>
           </TouchableOpacity>
         )}
       </View>
       {variant === "full" && onSendToCalendar && (
         // On/off toggle, not a one-shot "send" — tapping again once linked
         // removes it from Calendar (BACKLOG.md's own recorded decision).
-        // 🗓️ (outline-reading emoji) vs 📅 (filled) is the only signal for
-        // which state it's in; dimmed further via `opacity` when linked so
-        // the two are distinguishable even for someone who can't tell the
-        // two calendar emoji apart at a glance.
+        // Linked vs not: a different icon (calendar vs calendar-with-check
+        // shape, here "calendar" / "check-square") AND colour — never colour
+        // alone (Redmi uplift Stage 4: line icons, as on Home).
         <TouchableOpacity
           onPress={() => onSendToCalendar(item)}
           hitSlop={10}
@@ -183,9 +190,11 @@ export function CalendarTaskCard({
             item.googleCalendarEventId ? `Remove "${item.text}" from Google Calendar` : `Send "${item.text}" to Google Calendar`
           }
         >
-          <Text style={[styles.calendarIcon, item.googleCalendarEventId && styles.calendarIconActive]}>
-            {item.googleCalendarEventId ? "📅" : "🗓️"}
-          </Text>
+          <Feather
+            name={item.googleCalendarEventId ? "check-square" : "calendar"}
+            size={17}
+            color={item.googleCalendarEventId ? colors.accent : colors.textMuted}
+          />
         </TouchableOpacity>
       )}
       {variant === "full" && onLongPressDelete && (
@@ -205,7 +214,7 @@ export function CalendarTaskCard({
           accessibilityRole="button"
           accessibilityLabel={`Delete "${item.text}"`}
         >
-          <Text style={styles.deleteIcon}>🗑️</Text>
+          <Feather name="trash-2" size={17} color={colors.textMuted} />
         </TouchableOpacity>
       )}
     </TouchableOpacity>
@@ -275,7 +284,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   recurrenceChip: {
-    fontSize: 11,
+    justifyContent: "center",
   },
   overdueChip: {
     color: colors.danger,
@@ -287,30 +296,25 @@ const styles = StyleSheet.create({
     borderRadius: radius.sm,
     overflow: "hidden",
   },
+  sourceLinkRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+  },
   sourceLink: {
+    ...typography.caption,
     color: colors.accent,
-    fontSize: 11,
-    fontWeight: "600",
   },
   calendarButton: {
     alignSelf: "flex-start",
     marginLeft: spacing.xs,
     padding: 2,
   },
-  calendarIcon: {
-    fontSize: 14,
-    opacity: 0.6,
-  },
-  calendarIconActive: {
-    opacity: 1,
-  },
+
   deleteButton: {
     alignSelf: "flex-start",
     marginLeft: spacing.xs,
     padding: 2,
   },
-  deleteIcon: {
-    fontSize: 14,
-    opacity: 0.6,
-  },
+
 });

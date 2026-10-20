@@ -1,6 +1,7 @@
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
-import { colors, spacing } from "../constants/theme";
+import { spacing } from "../constants/theme";
+import { MIN_TOUCH_TARGET, xayraColors, xayraType } from "../constants/xayraTheme";
 import type { RagCitation } from "../services/ai/rag";
 
 /** Same format as the note screen's own timestamp ("7 Oct 2026, 9:32 pm"). */
@@ -20,17 +21,44 @@ function formatRecordedAt(createdAt: number): string {
  * to check themselves.
  */
 export function RelatedNotesSection({ notes, onOpen }: { notes: RagCitation[]; onOpen: (noteId: string) => void }) {
+  return <NoteRows label="Related notes" kind="related" notes={notes} onOpen={onOpen} />;
+}
+
+/**
+ * The notes a VERIFIED answer rests on (RagAnswer.citations) — "Sources",
+ * same rows as Related notes, so a summary or any grounded answer shows
+ * what it came from, dated (Redmi uplift Stage 3; it was a row of bare
+ * "[Note N]" chips beside Listen). Only ever given citations that passed
+ * Grounding v1 — never related notes.
+ */
+export function SourcesSection({ notes, onOpen }: { notes: RagCitation[]; onOpen: (noteId: string) => void }) {
+  return <NoteRows label="Sources" kind="source" notes={notes} onOpen={onOpen} />;
+}
+
+function NoteRows({
+  label,
+  kind,
+  notes,
+  onOpen,
+}: {
+  label: string;
+  kind: "related" | "source";
+  notes: RagCitation[];
+  onOpen: (noteId: string) => void;
+}) {
   if (notes.length === 0) {
     return null;
   }
   return (
     <View style={styles.section}>
-      <Text style={styles.label}>Related notes</Text>
+      <Text style={styles.label}>{label}</Text>
       {notes.map((note) => (
         <Pressable
           key={note.noteId}
-          testID={`related-note-${note.noteId}`}
+          testID={`${kind}-note-${note.noteId}`}
           accessibilityRole="button"
+          accessibilityLabel={`${kind === "source" ? "Source" : "Related"} note, ${formatRecordedAt(note.createdAt)}`}
+          accessibilityHint="Opens the note"
           onPress={() => onOpen(note.noteId)}
           style={styles.row}
         >
@@ -46,26 +74,28 @@ export function RelatedNotesSection({ notes, onOpen }: { notes: RagCitation[]; o
 
 const styles = StyleSheet.create({
   section: {
-    marginTop: spacing.sm + 2,
-    gap: spacing.xs,
+    marginTop: spacing.sm,
+    marginBottom: spacing.sm,
+    gap: 2,
   },
+  // Sentence case, like every other label in Xayra 2.0.
   label: {
-    color: colors.textMuted,
-    fontSize: 11,
-    fontWeight: "600",
-    letterSpacing: 0.4,
-    textTransform: "uppercase",
+    ...xayraType.roleLabel,
+    color: xayraColors.textFaint,
   },
   row: {
+    minHeight: MIN_TOUCH_TARGET,
+    justifyContent: "center",
     paddingVertical: spacing.xs,
   },
   date: {
-    color: colors.accent,
-    fontSize: 13,
-    fontWeight: "600",
+    ...xayraType.chip,
+    color: xayraColors.lilacText,
   },
   excerpt: {
-    color: colors.textMuted,
-    fontSize: 12,
+    ...xayraType.meta,
+    fontSize: 14,
+    lineHeight: 20,
+    color: xayraColors.textMuted,
   },
 });

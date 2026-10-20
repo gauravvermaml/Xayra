@@ -25,7 +25,9 @@ export const AUTO_STOP_TRAILING_SILENCE_MS: Record<UtteranceMode, number> = {
   record: 2200,
 };
 
-export type ManualUtterancePhase = "idle" | "starting" | "recording" | "processing";
+/** `cancelling`: Cancel was tapped while recording — the microphone is
+ * being closed and the utterance thrown away; nothing will be processed. */
+export type ManualUtterancePhase = "idle" | "starting" | "recording" | "processing" | "cancelling";
 
 export type ManualUtteranceSnapshot = {
   phase: ManualUtterancePhase;
@@ -40,6 +42,9 @@ export type ManualUtteranceDeps = {
   startRecording: (options: StartRecordingOptions) => Promise<boolean | void>;
   /** Stops capture and returns the WAV uri (null if nothing was recording). */
   stopRecording: () => Promise<string | null>;
+  /** Stops capture and throws the audio away — no WAV is written. Also
+   * aborts a start that hasn't opened the microphone yet. */
+  discardRecording: () => Promise<void>;
   /** Runs the shared transcribe → save/answer pipeline for one utterance,
    * with the mode it was recorded in. Calls `release` once the note is
    * saved / the answer is ready, so speaking the result doesn't hold the
@@ -59,6 +64,10 @@ export type ManualUtteranceDeps = {
   /** The ended recording produced nothing to process (no audio / stop
    * failed), so whatever onCaptureEnd prepared should be undone. */
   onCaptureDiscarded?: () => void;
+  /** The microphone could not be stopped while cancelling. It may still be
+   * capturing, so the utterance stays in "recording" (Finish and Cancel
+   * still apply) rather than claiming the microphone is free. */
+  onCancelCleanupError?: (error: unknown) => void;
 };
 
 export class ManualUtteranceController {
@@ -66,6 +75,9 @@ export class ManualUtteranceController {
   private phase: ManualUtterancePhase = "idle";
   private mode: UtteranceMode | null = null;
   private disposed = false;
+  /** Increments per start, so a Cancel aimed at one recording can never
+   * land on a later one. */
+  private currentUtteranceId = 0;
 
   constructor(deps: ManualUtteranceDeps) {
     this.deps = deps;
@@ -73,6 +85,11 @@ export class ManualUtteranceController {
 
   get snapshot(): ManualUtteranceSnapshot {
     return { phase: this.phase, mode: this.mode };
+  }
+
+  /** The id of the most recently started utterance. */
+  get utteranceId(): number {
+    return this.currentUtteranceId;
   }
 
   private set(phase: ManualUtterancePhase, mode: UtteranceMode | null): void {
@@ -95,30 +112,97 @@ export class ManualUtteranceController {
     if (this.phase !== "idle" || this.disposed) {
       return;
     }
+    this.currentUtteranceId += 1;
+    const utteranceId = this.currentUtteranceId;
     this.set("starting", mode);
     try {
       const started = await this.deps.startRecording({
         autoStopAfterSilenceMs: AUTO_STOP_TRAILING_SILENCE_MS[mode],
-        onAutoStop: () => void this.finish("silence"),
+        // Bound to this utterance: a late silence callback can never
+        // finish a newer recording.
+        onAutoStop: () => void this.finish("silence", utteranceId),
       });
+      // Cancelled while the microphone was opening: if it opened anyway
+      // (the start was past its abort point), close it and throw it away.
+      if (this.isCancelling()) {
+        if (started !== false) await this.discardQuietly();
+        this.set("idle", null);
+        return;
+      }
       if (started === false || this.disposed) {
         if (!this.disposed) this.set("idle", null);
         return;
       }
       this.set("recording", mode);
     } catch (err) {
+      const wasCancelled = this.isCancelling();
       this.set("idle", null);
-      throw err;
+      // A start the user already cancelled has nothing left to report.
+      if (!wasCancelled) throw err;
+    }
+  }
+
+  /**
+   * Cancel during recording: closes the microphone and throws the
+   * utterance away — never transcribed, saved or asked. Shares the
+   * synchronous phase gate with `finish`, so whichever of Cancel, a tap or
+   * the silence detector comes first wins and the others are no-ops. Once
+   * capture has ended (processing), this does nothing: the processing
+   * Cancel applies from there. `utteranceId`, when given, must still be the
+   * current utterance. Returns whether this call cancelled it; the
+   * controller is idle again by the time a recording cancel resolves —
+   * unless the microphone couldn't be stopped, in which case the utterance
+   * goes back to "recording" (the microphone may still be capturing, so it
+   * is never reported free) and this returns false.
+   */
+  async cancel(utteranceId?: number): Promise<boolean> {
+    if (this.disposed) return false;
+    if (utteranceId !== undefined && utteranceId !== this.currentUtteranceId) return false;
+    if (this.phase === "starting") {
+      // start() finishes the cleanup once the microphone call returns.
+      this.set("cancelling", this.mode);
+      await this.discardQuietly();
+      return true;
+    }
+    if (this.phase !== "recording") return false;
+    const mode = this.mode;
+    this.set("cancelling", mode);
+    if (!(await this.discardQuietly())) {
+      this.set("recording", mode);
+      return false;
+    }
+    this.set("idle", null);
+    return true;
+  }
+
+  /** Read through a method: the phase changes across awaits, which a
+   * direct comparison's narrowing can't see. */
+  private isCancelling(): boolean {
+    return this.phase === "cancelling";
+  }
+
+  /** False if the microphone could not be stopped. */
+  private async discardQuietly(): Promise<boolean> {
+    try {
+      await this.deps.discardRecording();
+      return true;
+    } catch (err) {
+      this.deps.onCancelCleanupError?.(err);
+      return false;
     }
   }
 
   /**
    * Finishes the recording now — from a tap or the silence detector,
    * whichever comes first; the other is then a no-op. The mode is the one
-   * captured at `start`, never re-read.
+   * captured at `start`, never re-read. `utteranceId`, when given, must
+   * still be the current utterance.
    */
-  async finish(trigger: FinishTrigger): Promise<void> {
+  async finish(trigger: FinishTrigger, utteranceId?: number): Promise<void> {
     if (this.phase !== "recording" || !this.mode || this.disposed) {
+      return;
+    }
+    if (utteranceId !== undefined && utteranceId !== this.currentUtteranceId) {
       return;
     }
     const mode = this.mode;
@@ -148,13 +232,6 @@ export class ManualUtteranceController {
     }
   }
 
-  /** The recording was stopped elsewhere and thrown away (e.g. leaving the
-   * screen) — forget it without processing. */
-  abandon(): void {
-    if (this.phase === "recording" || this.phase === "starting") {
-      this.set("idle", null);
-    }
-  }
 }
 
 export type CentralTapAction =
@@ -189,6 +266,21 @@ export function decideCentralTap(state: {
   if (state.isHandsfreeActive) return "cancel-handsfree-capture";
   if (state.isRecorderTransitioning) return "ignore";
   return "start-manual";
+}
+
+/**
+ * The controls under the emblem during a manual recording: Cancel while it
+ * is capturing; Finish too, but only when the emblem — whose tap is the
+ * normal Finish — is hidden on a constrained screen. Never for Handsfree,
+ * which keeps its own tap-to-discard.
+ */
+export function recordingActionsFor(state: {
+  isCapturing: boolean;
+  isHandsfreeActive: boolean;
+  emblemHidden: boolean;
+}): { cancel: boolean; finish: boolean } {
+  const cancel = state.isCapturing && !state.isHandsfreeActive;
+  return { cancel, finish: cancel && state.emblemHidden };
 }
 
 /**

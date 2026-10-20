@@ -93,6 +93,22 @@ describe("which process can be a disposable vault", () => {
     expect(await freshProcess().resolveVaultMode()).toBe("disposable");
   });
 
+  it("Xayra Test (.devtest) counts as a development package; its marker must name it", async () => {
+    mockPackage = "com.anonymous.silentconfidant.devtest";
+    mockFiles.set(MARKER, JSON.stringify({ version: 1, package: "com.anonymous.silentconfidant.devtest" }));
+    expect(await freshProcess().resolveVaultMode()).toBe("disposable");
+    // A marker naming another package (e.g. copied from Xayra Dev) is ignored.
+    mockFiles.set(MARKER, JSON.stringify({ version: 1, package: DEV }));
+    expect(await freshProcess().resolveVaultMode()).toBe("normal");
+  });
+
+  it("entering writes the running package's own name into the marker", async () => {
+    mockPackage = "com.anonymous.silentconfidant.devtest";
+    const vault = freshProcess();
+    await vault.enterDisposableModeOnNextStart(vault.DISPOSABLE_CONFIRMATION);
+    expect(JSON.parse(mockFiles.get(MARKER)!).package).toBe("com.anonymous.silentconfidant.devtest");
+  });
+
   it.each([
     ["malformed JSON", "{not json"],
     ["wrong version", JSON.stringify({ version: 2, package: DEV })],

@@ -2,6 +2,8 @@ import { Pressable, StyleSheet, Text } from "react-native";
 import * as Haptics from "expo-haptics";
 import Animated, { Easing, useAnimatedStyle, useSharedValue, withSpring, withTiming } from "react-native-reanimated";
 
+import { MIN_TOUCH_TARGET, xayraColors, xayraType } from "../constants/xayraTheme";
+
 const PRESSED_SCALE = 0.9;
 
 /**
@@ -11,7 +13,22 @@ const PRESSED_SCALE = 0.9;
  * and a spring back on release. `onCancel` fires on the normal press —
  * nothing waits for the animation.
  */
-export function CancelProcessingButton({ onCancel }: { onCancel: () => void }) {
+export function CancelProcessingButton({
+  onCancel,
+  testID = "cancel-processing",
+  accessibilityLabel = "Cancel",
+  label = "Cancel",
+  tone = "outline",
+}: {
+  onCancel: () => void;
+  testID?: string;
+  accessibilityLabel?: string;
+  /** Visible text. "Finish" is the only other use (recording, when the
+   * emblem is hidden). */
+  label?: string;
+  /** "filled" sets the primary of a Finish / Cancel pair apart. */
+  tone?: "outline" | "filled";
+}) {
   const scale = useSharedValue(1);
   const animatedStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
 
@@ -25,37 +42,62 @@ export function CancelProcessingButton({ onCancel }: { onCancel: () => void }) {
 
   return (
     <Pressable
-      testID="cancel-processing"
+      testID={testID}
       onPress={onCancel}
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
-      hitSlop={12}
+      hitSlop={(MIN_TOUCH_TARGET - BUTTON_HEIGHT) / 2}
       accessibilityRole="button"
-      accessibilityLabel="Cancel"
+      accessibilityLabel={accessibilityLabel}
     >
       {({ pressed }) => (
-        <Animated.View style={[styles.button, pressed && styles.buttonPressed, animatedStyle]}>
-          <Text style={styles.text}>Cancel</Text>
+        <Animated.View
+          style={[
+            styles.button,
+            tone === "filled" && styles.buttonFilled,
+            pressed && (tone === "filled" ? styles.buttonFilledPressed : styles.buttonPressed),
+            animatedStyle,
+          ]}
+        >
+          <Text style={[styles.text, tone === "filled" && styles.textFilled]}>{label}</Text>
         </Animated.View>
       )}
     </Pressable>
   );
 }
 
+const BUTTON_HEIGHT = 40;
+
+/** Xayra 2.0: the same quiet outlined pill as Listen. */
 const styles = StyleSheet.create({
   button: {
-    paddingHorizontal: 14,
-    paddingVertical: 6,
+    minHeight: BUTTON_HEIGHT,
+    paddingHorizontal: 18,
     borderRadius: 999,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: "rgba(255,255,255,0.35)",
+    borderWidth: 1,
+    borderColor: xayraColors.outline,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  /** The primary of a Finish / Cancel pair (Stage 5d): solid lilac with
+   * dark text, so it reads as the main action next to the outline Cancel
+   * (the earlier 13% lilac tint was too close to it). */
+  buttonFilled: {
+    backgroundColor: xayraColors.lilac,
+    borderColor: xayraColors.lilac,
+  },
+  buttonFilledPressed: {
+    backgroundColor: xayraColors.lilacText,
+  },
+  textFilled: {
+    color: xayraColors.surface,
+    fontWeight: "600",
   },
   buttonPressed: {
-    backgroundColor: "rgba(255,255,255,0.12)",
+    backgroundColor: xayraColors.line,
   },
   text: {
-    color: "rgba(255,255,255,0.8)",
-    fontSize: 12,
-    fontWeight: "600",
+    ...xayraType.chip,
+    color: xayraColors.text,
   },
 });

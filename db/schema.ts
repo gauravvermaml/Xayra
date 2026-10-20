@@ -189,6 +189,11 @@ export const todos = sqliteTable("todos", {
    * not portable data a restore on a different device (or a different
    * signed-in account on this one) could meaningfully reuse. */
   googleCalendarEventId: text("google_calendar_event_id"),
+  /** When this to-do's content was last changed on this phone (ms since
+   * epoch); null for rows from before it existed. Drive backup merges use it
+   * like notes' `updated_at` — the newer edit wins — so a phone holding an
+   * older copy of a to-do can't overwrite another phone's later change. */
+  updatedAt: integer("updated_at"),
 });
 
 /**

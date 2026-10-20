@@ -2,10 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Alert, AppState, type AppStateStatus } from "react-native";
 import { Buffer } from "buffer";
 import { getRecordingPermissionsAsync, requestRecordingPermissionsAsync, setAudioModeAsync } from "expo-audio";
-import AudioRecord from "@fugood/react-native-audio-pcm-stream";
-
 import { logDuration, nowMs } from "../ai/perf";
-import { isMicInUse, setMicInUse } from "./audioInputState";
+import {
+  abandonMicAudio,
+  getMicSnapshot,
+  MicBusyError,
+  openMicSession,
+  stopMicSession,
+  type CapturedAudio,
+  type FinalStopResult,
+} from "./micSession";
 import { pausePlayback } from "./player";
 import { TrailingSilenceDetector } from "./silenceDetector";
 import { stopSpeech } from "./tts";
@@ -35,15 +41,30 @@ export type VoiceRecorder = {
    * the native session opened — no capture is left running. */
   startRecording: (options?: StartRecordingOptions) => Promise<boolean>;
   stopRecording: () => Promise<string | null>;
+  /** Cancel: stops capture and throws the audio away — no WAV is written,
+   * so there is no file to clean up. Aborts a start that hasn't opened the
+   * microphone yet. If the native stop call itself throws, the microphone
+   * was never told to stop, so nothing is reported free: the recording is
+   * left exactly as it was and the error is rethrown. A no-op when nothing
+   * is recording or a stop is in flight. */
+  discardRecording: () => Promise<void>;
 };
 
 /**
- * The native module's `stop()` just flips a flag — its background read loop
- * notices and exits asynchronously, so one more `data` chunk can arrive
- * after `stop()` returns. Waiting briefly before finalizing avoids losing
- * the tail end of the recording.
+ * How long a finished recording waits for the microphone's native release to
+ * be confirmed before it is given up (micSession re-checks every 5 s). Until
+ * then nothing is transcribed, saved or asked.
  */
-const STOP_DRAIN_MS = 200;
+const RELEASE_CONFIRM_WAIT_MS = 20000;
+
+/** Shown when a recording's audio may be missing a part (Gate B). */
+function warnIfIncomplete(audio: CapturedAudio | null): void {
+  if (!audio || audio.complete) return;
+  Alert.alert(
+    "Recording May Be Incomplete",
+    "Part of this recording may be missing. If this note looks wrong, please try recording it again."
+  );
+}
 /** How often the auto-stop check runs — same cadence as Handsfree's. */
 const SILENCE_POLL_INTERVAL_MS = 200;
 
@@ -59,9 +80,8 @@ export function useVoiceRecorder(): VoiceRecorder {
   // render, which isn't fast enough to block a second tap fired in the
   // same event-loop turn as the first.
   const isBusyRef = useRef(false);
-  const chunksRef = useRef<Buffer[]>([]);
-  const subscriptionRef = useRef<{ remove: () => void } | null>(null);
-  const errorSubscriptionRef = useRef<{ remove: () => void } | null>(null);
+  /** The native microphone session of the current recording. */
+  const sessionIdRef = useRef<number | null>(null);
   // Kept in step with `isRecording` synchronously (not on render), so a
   // stop requested from the auto-stop timer and one from a tap in the same
   // moment can't both get through.
@@ -85,22 +105,16 @@ export function useVoiceRecorder(): VoiceRecorder {
   useEffect(
     () => () => {
       // Whoever owned this recorder is gone: never leave its capture open.
+      // micSession lives on and finishes confirming the release; the
+      // microphone stays "in use" until it has.
       startAbortRef.current = true;
       clearAutoStop();
-      if (isRecordingRef.current) {
-        try {
-          AudioRecord.stop();
-        } catch {
-          // Already stopped.
-        }
-        isRecordingRef.current = false;
-        chunksRef.current = [];
-        setMicInUse(false);
+      const id = sessionIdRef.current;
+      sessionIdRef.current = null;
+      if (id !== null) {
+        void stopMicSession(id, { discard: true });
       }
-      subscriptionRef.current?.remove();
-      subscriptionRef.current = null;
-      errorSubscriptionRef.current?.remove();
-      errorSubscriptionRef.current = null;
+      isRecordingRef.current = false;
     },
     [clearAutoStop]
   );
@@ -193,10 +207,16 @@ export function useVoiceRecorder(): VoiceRecorder {
         return false;
       }
 
-      chunksRef.current = [];
+      // This recorder's own earlier session whose stop request failed: the
+      // tap to record first retries closing it.
+      const stuck = sessionIdRef.current;
+      if (stuck !== null && getMicSnapshot().phase === "stopFailed") {
+        const retried = await stopMicSession(stuck, { discard: true });
+        if (retried.kind === "stopFailed") throw new MicBusyError("stopFailed");
+        sessionIdRef.current = null;
+      }
+
       backgroundedDuringRecordingRef.current = false;
-      subscriptionRef.current?.remove();
-      errorSubscriptionRef.current?.remove();
 
       // Auto-finish uses the same adaptive speech / trailing-silence
       // detector as Handsfree (silenceDetector.ts). It never fires before
@@ -207,37 +227,39 @@ export function useVoiceRecorder(): VoiceRecorder {
       const detector = autoStopMs ? new TrailingSilenceDetector({ trailingSilenceMs: autoStopMs }) : null;
       detector?.reset(Date.now());
 
-      AudioRecord.init({
-        sampleRate: SAMPLE_RATE,
-        channels: CHANNELS,
-        bitsPerSample: BITS_PER_SAMPLE,
-      });
-      subscriptionRef.current = AudioRecord.on("data", (base64Chunk) => {
-        const chunk = Buffer.from(base64Chunk, "base64");
-        chunksRef.current.push(chunk);
-        const rms = computeRms(chunk);
-        setAmplitude(rms);
-        detector?.push(rms, Date.now());
-      });
-      // Build 42 P1-5 fix: the native module previously had no error
-      // channel at all — a mid-recording mic-permission revocation or
-      // native `AudioRecord` failure was invisible end-to-end (`isRecording`
-      // stayed true, no alert fired, and `stopRecording()` would happily
-      // finalize whatever partial/empty chunks had arrived into a normal-
-      // looking WAV file). Requires the native patch adding this event —
-      // see patches/@fugood+react-native-audio-pcm-stream+1.1.4.patch.
-      errorSubscriptionRef.current = AudioRecord.on("error", (message) => {
-        console.error("[AudioRecorder] Native recording error:", message);
-        Alert.alert(
-          "Recording Error",
-          "Something went wrong while recording — this note may be incomplete or empty. Please try again."
-        );
-      });
-
-      AudioRecord.start();
+      // The microphone session (micSession keeps every chunk, in order,
+      // for stopRecording); the live chunks drive metering and auto-finish.
+      const id = await openMicSession(
+        "manual",
+        { sampleRate: SAMPLE_RATE, channels: CHANNELS, bitsPerSample: BITS_PER_SAMPLE },
+        {
+          onChunk: (base64Chunk) => {
+            const rms = computeRms(Buffer.from(base64Chunk, "base64"));
+            setAmplitude(rms);
+            detector?.push(rms, Date.now());
+          },
+          // Build 42 P1-5: a mid-recording mic-permission revocation or
+          // native `AudioRecord` failure is surfaced, never finalized as if
+          // nothing happened.
+          onError: (message) => {
+            console.error("[AudioRecorder] Native recording error:", message);
+            Alert.alert(
+              "Recording Error",
+              "Something went wrong while recording — this note may be incomplete or empty. Please try again."
+            );
+          },
+        },
+        { collect: true }
+      );
+      sessionIdRef.current = id;
+      // Cancelled (or the screen went away) while the session was opening.
+      if (startAbortRef.current) {
+        sessionIdRef.current = null;
+        void stopMicSession(id, { discard: true });
+        return false;
+      }
       isRecordingRef.current = true;
       setIsRecording(true);
-      setMicInUse(true);
 
       if (detector) {
         autoStopTimerRef.current = setInterval(() => {
@@ -272,26 +294,58 @@ export function useVoiceRecorder(): VoiceRecorder {
     setIsTransitioning(true);
     clearAutoStop();
     try {
-      AudioRecord.stop();
-      // Let any in-flight final chunk land before we stop listening.
-      await new Promise((resolve) => setTimeout(resolve, STOP_DRAIN_MS));
-      subscriptionRef.current?.remove();
-      subscriptionRef.current = null;
-      errorSubscriptionRef.current?.remove();
-      errorSubscriptionRef.current = null;
+      const id = sessionIdRef.current;
+      // Resolves once the native release is confirmed (or reports why it
+      // couldn't be): the audio comes back complete, or marked incomplete.
+      const stopped = id !== null ? await stopMicSession(id) : null;
+      if (stopped?.kind === "stopFailed") {
+        // The capture was never told to stop: still recording.
+        throw new MicBusyError("stopFailed");
+      }
+      // Capture has stopped. No fixed wait: the tail of the recording is
+      // every chunk up to the native lastSeq, drained by micSession once the
+      // release is confirmed (Gate B step 5 — this used to be a 200 ms guess).
+      sessionIdRef.current = null;
       isRecordingRef.current = false;
       setIsRecording(false);
       setAmplitude(0);
-      setMicInUse(false);
+
+      // Release not confirmed yet: nothing is transcribed, saved or asked
+      // until it is. The audio waits in memory only (micSession).
+      let result: FinalStopResult | null =
+        stopped?.kind === "releaseUnconfirmed" ? null : (stopped as FinalStopResult | null);
+      if (stopped?.kind === "releaseUnconfirmed" && id !== null) {
+        result = await Promise.race([
+          stopped.eventual,
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), RELEASE_CONFIRM_WAIT_MS)),
+        ]);
+        if (!result) abandonMicAudio(id);
+      }
+      if (stopped && (!result || result.kind !== "released")) {
+        // Never confirmed, or the release failed: this recording is not
+        // processed (its in-memory audio is dropped) and the microphone
+        // stays marked busy until the native side answers.
+        Alert.alert(
+          "Recording Not Saved",
+          result?.kind === "releaseFailed"
+            ? "Xayra couldn’t close the microphone, so this recording wasn’t processed. Close and reopen Xayra."
+            : "The microphone didn’t close in time, so this recording wasn’t processed. Please try again in a moment."
+        );
+        return null;
+      }
 
       const finalizeStart = nowMs();
-      const chunks = chunksRef.current;
-      chunksRef.current = [];
+      // Missing parts are left out of the WAV but never hidden: an
+      // incomplete recording (release confirmed, some chunks lost) is still
+      // processed — what was captured is the user's words — with a warning.
+      const audio = result ? result.audio : null;
+      const chunks = audio?.chunks ?? [];
 
       const uri = await writePcmChunksAsWav(chunks, "note");
       logDuration("Audio I/O — WAV finalize (concat + base64 write)", finalizeStart);
 
       console.log("[AudioRecorder] File written:", uri);
+      warnIfIncomplete(audio);
 
       if (backgroundedDuringRecordingRef.current) {
         backgroundedDuringRecordingRef.current = false;
@@ -317,6 +371,38 @@ export function useVoiceRecorder(): VoiceRecorder {
     }
   }, [clearAutoStop]);
 
+  const discardRecording = useCallback(async () => {
+    if (isBusyRef.current && !isRecordingRef.current) {
+      startAbortRef.current = true;
+      return;
+    }
+    if (isBusyRef.current || !isRecordingRef.current) {
+      return;
+    }
+    isBusyRef.current = true;
+    setIsTransitioning(true);
+    clearAutoStop();
+    try {
+      const id = sessionIdRef.current;
+      // Nothing captured is kept. micSession reports the microphone free
+      // only once the native release is confirmed.
+      const result = id !== null ? await stopMicSession(id, { discard: true }) : null;
+      if (result?.kind === "stopFailed") {
+        // The capture was never told to stop: the recording is left as it
+        // was, and the caller hears about it.
+        throw result.error instanceof Error ? result.error : new MicBusyError("stopFailed");
+      }
+      sessionIdRef.current = null;
+      isRecordingRef.current = false;
+      backgroundedDuringRecordingRef.current = false;
+      setIsRecording(false);
+      setAmplitude(0);
+    } finally {
+      isBusyRef.current = false;
+      setIsTransitioning(false);
+    }
+  }, [clearAutoStop]);
+
   return {
     isRecording,
     isTransitioning,
@@ -324,5 +410,6 @@ export function useVoiceRecorder(): VoiceRecorder {
     requestPermissions,
     startRecording,
     stopRecording,
+    discardRecording,
   };
 }

@@ -3,13 +3,11 @@ import { GoogleSignin, isSuccessResponse } from "@react-native-google-signin/goo
 import type { Recurrence } from "../../db/schema";
 import { assertNetworkFeatureAllowed } from "../dev/disposableVault";
 import type { ToDo } from "../todos/todoManager";
-import {
-  CALENDAR_EVENTS_SCOPE,
-  DriveSyncError,
-  ensureConfigured,
-  requireAccessToken,
-  withDeveloperErrorHandling,
-} from "./driveSync";
+import { devTiming } from "../ai/perf";
+// DriveSyncError comes from driveErrors, not driveSync: it's extended while
+// this module loads, and driveSync may still be mid-load (see driveErrors.ts).
+import { DriveSyncError, googleStatusMessage } from "./driveErrors";
+import { CALENDAR_EVENTS_SCOPE, ensureConfigured, requestScope, requireAccessToken, withDeveloperErrorHandling } from "./driveSync";
 
 /**
  * Push-to-Google-Calendar — one-way sync (Xayra pushes; an edit made
@@ -66,7 +64,11 @@ async function ensureCalendarAccess(): Promise<string> {
         throw new CalendarSyncError("Google sign-in was cancelled.");
       }
     }
-    await GoogleSignin.addScopes({ scopes: [CALENDAR_EVENTS_SCOPE] });
+    if (!(await requestScope(CALENDAR_EVENTS_SCOPE))) {
+      throw new CalendarSyncError(
+        "Xayra can't add this to Google Calendar without permission. Try again and allow Google Calendar access."
+      );
+    }
     return requireAccessToken();
   });
 }
@@ -78,7 +80,8 @@ async function calendarFetch(url: string, accessToken: string, init?: RequestIni
   });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
-    throw new CalendarSyncError(`Google Calendar request failed (${res.status}): ${body || res.statusText}`);
+    devTiming("Calendar", "request failed", { status: res.status, detail: body.slice(0, 300) });
+    throw new CalendarSyncError(googleStatusMessage("Google Calendar", res.status, body));
   }
   return res;
 }
@@ -190,6 +193,7 @@ export async function deleteCalendarEvent(eventId: string): Promise<void> {
   });
   if (!res.ok && res.status !== 404 && res.status !== 410) {
     const body = await res.text().catch(() => "");
-    throw new CalendarSyncError(`Google Calendar delete failed (${res.status}): ${body || res.statusText}`);
+    devTiming("Calendar", "delete failed", { status: res.status, detail: body.slice(0, 300) });
+    throw new CalendarSyncError(googleStatusMessage("Google Calendar", res.status, body));
   }
 }

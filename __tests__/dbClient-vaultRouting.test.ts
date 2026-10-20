@@ -1,34 +1,52 @@
 /**
  * db/client.ts opens exactly one vault per process, chosen by the resolved
- * vault mode: the normal vault through keyManager's persistent key, or the
- * Xayra Dev disposable vault with its own file, folder and in-memory key —
- * never both, and the disposable path never touches keyManager or the
- * normal vault file.
+ * vault mode: the normal vault through vaultActivation.ts (encrypted, raw
+ * key), or the Xayra Dev disposable vault with its own file, folder and
+ * in-memory key — encrypted with the same key representation, never both,
+ * and the disposable path never touches the normal vault.
  */
 let mockMode: "normal" | "disposable" = "normal";
-let mockVaultFileExists = true;
+let mockSqlcipher = true;
+let mockSchemaObjects = 3;
 
+const mockClose = jest.fn();
 const mockOpen = jest.fn((_options: { name: string; location?: string; encryptionKey: string }) => ({
-  execute: jest.fn(async () => ({ rows: [] })),
+  execute: jest.fn(async (sql: string) =>
+    sql === "SELECT count(*) FROM sqlite_master" ? { rows: [{ n: mockSchemaObjects }] } : { rows: [] }
+  ),
   transaction: jest.fn(),
-  close: jest.fn(),
+  close: mockClose,
 }));
 jest.mock("@op-engineering/op-sqlite", () => ({
-  ANDROID_DATABASE_PATH: "/data/user/0/app/databases/",
+  isSQLCipher: () => mockSqlcipher,
   open: mockOpen,
 }));
 jest.mock("drizzle-orm/op-sqlite", () => ({ drizzle: jest.fn(() => ({})) }));
-const mockGetInfoAsync = jest.fn(async (_uri: string) => ({ exists: mockVaultFileExists }));
-jest.mock("expo-file-system/legacy", () => ({ getInfoAsync: mockGetInfoAsync }));
 jest.mock("../services/ai/localEmbeddings", () => ({ EMBEDDING_DIMENSIONS: 384, generateEmbeddingLocal: jest.fn() }));
 jest.mock("../services/ai/perf", () => ({ devTiming: jest.fn() }));
-const mockGetKey = jest.fn(async (_options?: { allowCreate?: boolean }) => "normal-persistent-key");
-jest.mock("../services/crypto/keyManager", () => ({ getOrCreateDatabaseKey: mockGetKey }));
+const mockPrepareNormal = jest.fn(async () => ({
+  name: "xayra.sqlite",
+  location: "/data/user/0/app/files/vault",
+  encryptionKey: `x'${"b".repeat(64)}'`,
+}));
+jest.mock("../services/vault/vaultActivation", () => {
+  const actual = jest.requireActual("../services/vault/vaultActivation");
+  return {
+    VAULT_DATABASE_NAME: "xayra.sqlite",
+    encryptedVaultDirectory: () => "/data/user/0/app/files/vault",
+    prepareNormalVault: mockPrepareNormal,
+    assertEstablishedVault: actual.assertEstablishedVault,
+  };
+});
+jest.mock("../services/crypto/keyManager", () => ({
+  isWellFormedDatabaseKey: (key: string) => /^[0-9a-f]{64}$/.test(key),
+}));
 const mockPrepareDisposable = jest.fn(async () => "/data/user/0/app/files/disposable-vault");
 jest.mock("../services/dev/disposableVault", () => ({
   DISPOSABLE_DATABASE_NAME: "xayra-disposable.sqlite",
+  isRunningDevPackage: () => true,
   resolveVaultMode: jest.fn(async () => mockMode),
-  getDisposableVaultKey: jest.fn(async () => "disposable-memory-key"),
+  getDisposableVaultKey: jest.fn(async () => "c".repeat(64)),
   prepareDisposableVaultStorage: mockPrepareDisposable,
 }));
 
@@ -44,7 +62,8 @@ function freshClient(): typeof import("../db/client") {
 beforeEach(() => {
   jest.clearAllMocks();
   mockMode = "normal";
-  mockVaultFileExists = true;
+  mockSqlcipher = true;
+  mockSchemaObjects = 3;
   jest.spyOn(console, "warn").mockImplementation(() => undefined);
   jest.spyOn(console, "log").mockImplementation(() => undefined);
 });
@@ -54,37 +73,47 @@ afterEach(() => {
 });
 
 describe("vault routing", () => {
-  it("normal, existing vault: persistent key, read-only (no key creation), normal file", async () => {
+  it("normal: opens exactly what vaultActivation prepared (files/vault, raw key)", async () => {
     await freshClient().getRawDatabase();
-    expect(mockGetKey).toHaveBeenCalledWith({ allowCreate: false });
+    expect(mockPrepareNormal).toHaveBeenCalledTimes(1);
     expect(mockOpen).toHaveBeenCalledTimes(1);
-    expect(mockOpen.mock.calls[0][0]).toEqual({ name: "silent-confidant.sqlite", encryptionKey: "normal-persistent-key" });
+    expect(mockOpen.mock.calls[0][0]).toEqual({
+      name: "xayra.sqlite",
+      location: "/data/user/0/app/files/vault",
+      encryptionKey: `x'${"b".repeat(64)}'`,
+    });
     expect(mockPrepareDisposable).not.toHaveBeenCalled();
   });
 
-  it("normal, first run (no vault file): key creation allowed", async () => {
-    mockVaultFileExists = false;
-    await freshClient().getRawDatabase();
-    expect(mockGetKey).toHaveBeenCalledWith({ allowCreate: true });
-  });
-
-  it("normal: a key failure opens nothing — no fallback vault of any kind", async () => {
-    mockGetKey.mockRejectedValueOnce(new Error("key unavailable"));
+  it("normal: a preparation failure opens nothing — no fallback vault of any kind", async () => {
+    mockPrepareNormal.mockRejectedValueOnce(new Error("key unavailable"));
     await expect(freshClient().getRawDatabase()).rejects.toThrow("key unavailable");
     expect(mockOpen).not.toHaveBeenCalled();
     expect(mockPrepareDisposable).not.toHaveBeenCalled();
   });
 
-  it("disposable: its own file, folder and key; never keyManager or the normal vault file", async () => {
+  it("normal: a committed vault that opens EMPTY (file re-created) is refused and closed", async () => {
+    mockSchemaObjects = 0;
+    await expect(freshClient().getRawDatabase()).rejects.toMatchObject({ name: "VaultStateError", kind: "conflict" });
+    expect(mockClose).toHaveBeenCalled();
+  });
+
+  it("disposable: its own file and folder, a raw in-memory key; never the normal vault", async () => {
     mockMode = "disposable";
     await freshClient().getRawDatabase();
     expect(mockOpen).toHaveBeenCalledTimes(1);
     expect(mockOpen.mock.calls[0][0]).toEqual({
       name: "xayra-disposable.sqlite",
       location: "/data/user/0/app/files/disposable-vault",
-      encryptionKey: "disposable-memory-key",
+      encryptionKey: `x'${"c".repeat(64)}'`,
     });
-    expect(mockGetKey).not.toHaveBeenCalled();
-    expect(mockGetInfoAsync).not.toHaveBeenCalled(); // the normal vault file isn't even checked
+    expect(mockPrepareNormal).not.toHaveBeenCalled();
+  });
+
+  it("disposable: refuses to open without SQLCipher", async () => {
+    mockMode = "disposable";
+    mockSqlcipher = false;
+    await expect(freshClient().getRawDatabase()).rejects.toMatchObject({ kind: "encryptionUnavailable" });
+    expect(mockOpen).not.toHaveBeenCalled();
   });
 });

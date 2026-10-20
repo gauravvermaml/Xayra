@@ -151,6 +151,25 @@ export function useChatSession(): ChatSession {
     [speakingMessageId, playMessageSpeech]
   );
 
+  // Which exchange currently holds "sending". A cancelled exchange releases
+  // it the moment it's cancelled (a new question can start immediately);
+  // an older exchange finishing later can never release a newer one's.
+  const sendingOwnerRef = useRef(0);
+  const nextExchangeRef = useRef(1);
+  const beginSending = useCallback((): number => {
+    const owner = nextExchangeRef.current++;
+    sendingOwnerRef.current = owner;
+    isSendingRef.current = true;
+    setIsSending(true);
+    return owner;
+  }, []);
+  const endSending = useCallback((owner: number) => {
+    if (sendingOwnerRef.current !== owner) return;
+    sendingOwnerRef.current = 0;
+    isSendingRef.current = false;
+    setIsSending(false);
+  }, []);
+
   const pendingAskRef = useRef<PendingAsk | null>(null);
   const beginPendingAsk = useCallback((): PendingAsk => {
     const pending: PendingAsk = { userId: Crypto.randomUUID(), assistantId: Crypto.randomUUID() };
@@ -169,7 +188,12 @@ export function useChatSession(): ChatSession {
   }, []);
 
   const runRagExchange = useCallback(
-    async (query: string, signal?: CancelSignal, pending?: PendingAsk): Promise<{ assistantId: string; text: string }> => {
+    async (
+      query: string,
+      signal?: CancelSignal,
+      pending?: PendingAsk,
+      owner?: number
+    ): Promise<{ assistantId: string; text: string }> => {
       const userMessage: ChatMessage = { id: pending?.userId ?? Crypto.randomUUID(), role: "user", text: query };
       const assistantId = pending?.assistantId ?? Crypto.randomUUID();
       const assistantMessage: ChatMessage = { id: assistantId, role: "assistant", text: "", isStreaming: true };
@@ -184,9 +208,25 @@ export function useChatSession(): ChatSession {
 
       let pendingText = "";
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
+      // Cancel acts on the screen at once — the exchange's bubbles go and
+      // "sending" is released before the pipeline underneath has even
+      // noticed — and from then on nothing this exchange produces (streamed
+      // text, the final answer) may touch the conversation (Redmi
+      // uplift Stage 1: the pending question stayed visible for seconds).
+      let cancelledHere = false;
+      signal?.onCancel(() => {
+        cancelledHere = true;
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        pendingText = "";
+        setMessages((prev) => prev.filter((message) => message.id !== assistantId && message.id !== userMessage.id));
+        if (owner !== undefined) endSending(owner);
+      });
       const flushPendingText = () => {
         flushTimer = null;
-        if (!pendingText) {
+        if (!pendingText || cancelledHere) {
           return;
         }
         const textToAppend = pendingText;
@@ -200,6 +240,7 @@ export function useChatSession(): ChatSession {
         const answer = await generateRAGAnswer(
           query,
           (chunk) => {
+            if (cancelledHere) return;
             pendingText += chunk;
             if (!flushTimer) {
               flushTimer = setTimeout(flushPendingText, STREAM_FLUSH_INTERVAL_MS);
@@ -213,7 +254,7 @@ export function useChatSession(): ChatSession {
         }
         // Cancelled while the answer was being finished: it must never
         // appear (handled exactly like a cancel mid-generation, below).
-        if (signal?.cancelled) {
+        if (signal?.cancelled || cancelledHere) {
           throw new LlamaCancelledError();
         }
         updateMessage(assistantId, {
@@ -228,7 +269,7 @@ export function useChatSession(): ChatSession {
           clearTimeout(flushTimer);
           flushTimer = null;
         }
-        if (err instanceof LlamaCancelledError) {
+        if (err instanceof LlamaCancelledError || cancelledHere) {
           // Build 39: the user themselves tapped cancel mid-answer — remove
           // both the optimistic user turn and the streaming placeholder
           // entirely rather than showing an error bubble. They asked for
@@ -249,7 +290,7 @@ export function useChatSession(): ChatSession {
         throw err;
       }
     },
-    [updateMessage, isChatModelMissingError]
+    [updateMessage, isChatModelMissingError, endSending]
   );
 
   const ask = useCallback(
@@ -258,21 +299,19 @@ export function useChatSession(): ChatSession {
       if (!query || isSendingRef.current || !isModelReady) {
         return { assistantId: "", text: "" };
       }
-      isSendingRef.current = true;
+      const owner = beginSending();
       void stopSpeech();
       setSpeakingMessageId(null);
-      setIsSending(true);
       try {
-        const { assistantId, text } = await runRagExchange(query, signal, pending);
+        const { assistantId, text } = await runRagExchange(query, signal, pending, owner);
         return { assistantId, text };
       } catch {
         return { assistantId: "", text: "" };
       } finally {
-        isSendingRef.current = false;
-        setIsSending(false);
+        endSending(owner);
       }
     },
-    [isModelReady, runRagExchange]
+    [isModelReady, runRagExchange, beginSending, endSending]
   );
 
   const submitQuery = useCallback(
@@ -282,25 +321,24 @@ export function useChatSession(): ChatSession {
         return;
       }
 
-      isSendingRef.current = true;
+      const owner = beginSending();
       void stopSpeech();
       setSpeakingMessageId(null);
-      setIsSending(true);
 
       try {
-        const { assistantId, text } = await runRagExchange(query, signal);
-        if (source === "voice") {
+        const { assistantId, text } = await runRagExchange(query, signal, undefined, owner);
+        // A cancelled request never speaks.
+        if (source === "voice" && !signal?.cancelled) {
           playMessageSpeech({ id: assistantId, text });
         }
       } catch {
         // Errors are already recorded into the assistant bubble by
         // runRagExchange — nobody here needs to Alert on top of that.
       } finally {
-        isSendingRef.current = false;
-        setIsSending(false);
+        endSending(owner);
       }
     },
-    [isModelReady, runRagExchange, playMessageSpeech]
+    [isModelReady, runRagExchange, playMessageSpeech, beginSending, endSending]
   );
 
   return {

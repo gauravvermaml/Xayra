@@ -2,7 +2,7 @@
   "expo": {
     "name": "Xayra",
     "slug": "silent-confidant",
-    "version": "1.0.42",
+    "version": "1.0.43",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -21,15 +21,13 @@
         "backgroundColor": "#0E0F12"
       },
       "predictiveBackGestureEnabled": false,
-      "versionCode": 50,
+      "versionCode": 51,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.USE_BIOMETRIC",
         "android.permission.USE_FINGERPRINT",
         "android.permission.RECORD_AUDIO",
-        "android.permission.MODIFY_AUDIO_SETTINGS",
-        "android.permission.FOREGROUND_SERVICE",
-        "android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"
+        "android.permission.MODIFY_AUDIO_SETTINGS"
       ],
       "blockedPermissions": [
         "android.permission.SYSTEM_ALERT_WINDOW",
@@ -49,7 +47,8 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow Xayra to access your microphone to record voice notes."
+          "microphonePermission": "Allow Xayra to access your microphone to record voice notes.",
+          "enableBackgroundPlayback": false
         }
       ],
       "onnxruntime-react-native",
@@ -85,7 +84,31 @@
           "color": "#0E0F12"
         }
       ],
-      "expo-font",
+      [
+        "expo-font",
+        {
+          "android": {
+            "fonts": [
+              {
+                "fontFamily": "PlusJakartaSans",
+                "fontDefinitions": [
+                  { "path": "./assets/fonts/plusjakartasans_medium.ttf", "weight": 500 },
+                  { "path": "./assets/fonts/plusjakartasans_semibold.ttf", "weight": 600 },
+                  { "path": "./assets/fonts/plusjakartasans_bold.ttf", "weight": 700 }
+                ]
+              },
+              {
+                "fontFamily": "DMSans",
+                "fontDefinitions": [
+                  { "path": "./assets/fonts/dmsans_regular.ttf", "weight": 400 },
+                  { "path": "./assets/fonts/dmsans_medium.ttf", "weight": 500 },
+                  { "path": "./assets/fonts/dmsans_semibold.ttf", "weight": 600 }
+                ]
+              }
+            ]
+          }
+        }
+      ],
       "expo-asset",
       "@react-native-community/datetimepicker"
     ],
