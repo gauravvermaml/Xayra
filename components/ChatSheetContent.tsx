@@ -1,9 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ActivityIndicator, Animated, FlatList, Pressable, StyleSheet, Text, View } from "react-native";
+import {
+  ActivityIndicator,
+  Animated,
+  FlatList,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
 import { Feather } from "@expo/vector-icons";
 
 import { MarkdownText } from "./MarkdownText";
+import { devTiming } from "../services/ai/perf";
+import { classifyListDrag, upwardReleaseSpeed, type DragSample } from "../utils/trayGesture";
 import { useReduceMotion } from "../hooks/useReduceMotion";
 import { NoteCard } from "./NoteCard";
 import { RelatedNotesSection } from "./RelatedNotesSection";
@@ -158,7 +171,11 @@ export type ChatSheetContentProps = {
    * the right (and simpler) choice for a static full-screen overlay with
    * no sheet-drag gesture to coordinate with. */
   usePlainList?: boolean;
+  /** A quick upward fling on the list (Redmi uplift Stage 2): the tray
+   * opens the full-screen view. Slow drags just scroll. */
+  onFlingUp?: () => void;
 };
+
 
 /**
  * The sheet's ONE drawer list — Record mode's notes and Ask mode's Q&A
@@ -198,6 +215,7 @@ export function ChatSheetContent({
   onShowCitation,
   listBottomPadding,
   usePlainList,
+  onFlingUp,
 }: ChatSheetContentProps) {
   // Two separate, exactly-typed refs rather than one shared union-typed
   // ref — `FlatList` and `BottomSheetFlatList` both expose `scrollToOffset`,
@@ -217,6 +235,41 @@ export function ChatSheetContent({
   const scrollToTop = () => {
     plainListRef.current?.scrollToOffset({ offset: 0, animated: true });
     sheetListRef.current?.scrollToOffset({ offset: 0, animated: true });
+  };
+
+  // Ask mode keeps the newest exchange in view — but only when a NEW
+  // exchange arrives. It used to scroll to the top on every content-size
+  // change, which includes the list measuring more rows as you scroll down:
+  // a downward scroll moved a little, then snapped back to the top (Redmi
+  // uplift Stage 2 — the "spring-back" that blocked scrolling).
+  const newestExchangeId = mode === "ask" && messages.length > 0 ? messages[messages.length - (messages.length % 2 === 0 ? 2 : 1)]?.id : null;
+  useEffect(() => {
+    if (newestExchangeId) scrollToTop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [newestExchangeId]);
+
+  // Fling detection on the tray's own list (not the full-screen overlay's).
+  const dragStartRef = useRef<DragSample | null>(null);
+  const handleScrollBeginDrag = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    dragStartRef.current = { offsetY: e.nativeEvent.contentOffset.y, at: Date.now() };
+  };
+  const handleScrollEndDrag = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const start = dragStartRef.current;
+    dragStartRef.current = null;
+    if (!start) return;
+    const velocityY = e.nativeEvent.velocity?.y ?? 0;
+    const result = classifyListDrag(
+      start,
+      { offsetY: e.nativeEvent.contentOffset.y, at: Date.now() },
+      upwardReleaseSpeed(velocityY, Platform.OS)
+    );
+    devTiming("TrayGesture", "list drag end", {
+      result: result ?? "none",
+      moved: Math.round(e.nativeEvent.contentOffset.y - start.offsetY),
+      ms: Date.now() - start.at,
+      velocityY: Math.round(velocityY * 100) / 100,
+    });
+    if (result === "flingUp") onFlingUp?.();
   };
 
   const handleAllowCellularDownload = () => {
@@ -383,7 +436,6 @@ export function ChatSheetContent({
           contentContainerStyle={messageListContentContainerStyle}
           data={data}
           keyExtractor={(item) => (item.kind === "note" ? item.note.id : item.message.id)}
-          onContentSizeChange={mode === "ask" ? scrollToTop : undefined}
           ListEmptyComponent={emptyComponent}
           renderItem={renderItem}
         />
@@ -394,7 +446,8 @@ export function ChatSheetContent({
           contentContainerStyle={messageListContentContainerStyle}
           data={data}
           keyExtractor={(item) => (item.kind === "note" ? item.note.id : item.message.id)}
-          onContentSizeChange={mode === "ask" ? scrollToTop : undefined}
+          onScrollBeginDrag={onFlingUp ? handleScrollBeginDrag : undefined}
+          onScrollEndDrag={onFlingUp ? handleScrollEndDrag : undefined}
           ListEmptyComponent={emptyComponent}
           renderItem={renderItem}
         />

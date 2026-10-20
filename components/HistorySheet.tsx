@@ -1,6 +1,6 @@
-import { createContext, forwardRef, useCallback, useContext, useMemo } from "react";
+import { forwardRef, useCallback, useMemo } from "react";
 import { type LayoutChangeEvent, Pressable, StyleSheet, useWindowDimensions, View } from "react-native";
-import BottomSheet, { BottomSheetFooter, type BottomSheetFooterProps, type BottomSheetProps } from "@gorhom/bottom-sheet";
+import BottomSheet, { type BottomSheetProps } from "@gorhom/bottom-sheet";
 import Animated, { interpolate, type SharedValue, useAnimatedStyle } from "react-native-reanimated";
 
 import { ModelDownloadCard } from "./ModelDownloadCard";
@@ -159,9 +159,17 @@ export type HistorySheetProps = {
   /** Rest snap point in px, measured by app/index.tsx (handle + compose
    * field + gap + dock). */
   restHeight: number;
-  /** The dock, rendered as the sheet's footer (bottom-pinned at every
-   * stage); null while typing. */
-  footer: React.ReactNode | null;
+  /** Whether the dock is shown below the tray's content (Redmi uplift
+   * Stage 2: the dock is a fixed screen element drawn by app/index.tsx, no
+   * longer this sheet's footer — gorhom moved the footer with its own
+   * container, which left the dock lifted by a keyboard's height on the
+   * Redmi). The sheet only keeps the body clear of it. */
+  reserveFooter: boolean;
+  /** False while the full-screen view covers the tray (Redmi uplift Stage
+   * 2): a swipe on the full-screen list reached this sheet underneath and
+   * dragged it down to rest unseen, so closing the full-screen view landed
+   * on the rest stage instead of the 50% tray it opened from. */
+  gesturesEnabled: boolean;
   /** The footer's measured height (bottom inset included) — the body ends
    * above it, so the list and its last item never run under the dock. */
   footerHeight: number;
@@ -219,7 +227,8 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     modelDownload,
     bottomInset,
     restHeight,
-    footer,
+    reserveFooter,
+    gesturesEnabled,
     footerHeight,
     footerYieldsAtHalf,
     onHeaderLayout,
@@ -275,26 +284,11 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
   const { height: windowHeight } = useWindowDimensions();
   const contentAreaHeight = Math.max(0, windowHeight * 0.5 - SHEET_HANDLE_HEIGHT);
 
-  // The dock as the sheet's footer: gorhom keeps it pinned to the bottom of
-  // the visible sheet at every stage. Omitted entirely while typing.
-  // gorhom treats `footerComponent` as a component type, so its identity
-  // must never change while shown (a new function would remount the dock on
-  // every keystroke elsewhere on the screen). The dock element reaches it
-  // through FooterContext instead.
-  const renderFooter = useCallback(
-    (props: BottomSheetFooterProps) => (
-      <BottomSheetFooter {...props}>
-        <FooterSlot />
-      </BottomSheetFooter>
-    ),
-    []
-  );
   const handleHeaderLayout = useCallback(
     (e: LayoutChangeEvent) => onHeaderLayout(Math.round(e.nativeEvent.layout.height)),
     [onHeaderLayout]
   );
-  const footerVisible = footer !== null;
-  const footerHiddenAtHalf = footerYieldsAtHalf && sheetIndex === 1;
+  const footerVisible = reserveFooter;
   // Body bottom padding: the dock's height, or — when it yields at 50% —
   // interpolated with the live tray position down to the inset alone.
   const bodyPaddingStyle = useAnimatedStyle(() => {
@@ -304,32 +298,23 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       paddingBottom: interpolate(animatedIndex.value, [0, 1], [footerHeight, bottomInset], "clamp"),
     };
   });
-  const footerFadeStyle = useAnimatedStyle(() => ({
-    opacity: footerYieldsAtHalf ? interpolate(animatedIndex.value, [0.4, 1], [1, 0], "clamp") : 1,
-  }));
-
-  const footerContent = footerVisible ? (
-    <Animated.View
-      style={footerFadeStyle}
-      pointerEvents={footerHiddenAtHalf ? "none" : "auto"}
-      importantForAccessibility={footerHiddenAtHalf ? "no-hide-descendants" : "auto"}
-      accessibilityElementsHidden={footerHiddenAtHalf}
-    >
-      {footer}
-    </Animated.View>
-  ) : null;
-
   return (
-    <FooterContext.Provider value={footerContent}>
     <BottomSheet
       ref={ref}
       index={0}
       snapPoints={snapPoints}
-      footerComponent={footerVisible ? renderFooter : undefined}
       animatedIndex={animatedIndex}
       onChange={onIndexChange}
       onAnimate={(from: number, to: number) => devTiming("VoiceAskTiming", "tray animation start", { from, to })}
       enableDynamicSizing={false}
+      // No rubber-band past 50% (Redmi uplift Stage 2): a content drag that
+      // gorhom treated as an over-drag moved the tray a little and sprang it
+      // back instead of scrolling. Full-screen expansion is driven by the
+      // handle (useExpandOverdragGestureHandlers measures the drag itself)
+      // and by an upward fling on the list (ChatSheetContent).
+      enableOverDrag={false}
+      enableContentPanningGesture={gesturesEnabled}
+      enableHandlePanningGesture={gesturesEnabled}
       keyboardBehavior="interactive"
       // "restore" (the library's own default-adjacent option — snap back to
       // wherever the sheet was before the keyboard opened, once it closes)
@@ -454,15 +439,8 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       </Animated.View>
       </View>
     </BottomSheet>
-    </FooterContext.Provider>
   );
 });
-
-const FooterContext = createContext<React.ReactNode | null>(null);
-
-function FooterSlot() {
-  return <>{useContext(FooterContext)}</>;
-}
 
 const styles = StyleSheet.create({
   // Xayra 2.0: the reading tray is a quiet slate surface lifted off the

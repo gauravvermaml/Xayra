@@ -40,7 +40,8 @@ async function renderSheet(sheetIndex: number): Promise<ReactTestRenderer> {
         modelDownload={{ status: "ready" } as never}
         bottomInset={24}
         restHeight={180}
-        footer={<Text>dock</Text>}
+        reserveFooter
+        gesturesEnabled
         footerHeight={90}
         footerYieldsAtHalf={false}
         onHeaderLayout={jest.fn()}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LayoutChangeEvent } from "react-native";
-import { Alert, Dimensions, Image, Keyboard, PixelRatio, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { Alert, AppState, Dimensions, Image, Keyboard, PixelRatio, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import { getRecordingPermissionsAsync } from "expo-audio";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -428,12 +428,34 @@ export default function HomeScreen() {
   // the keyboard up while `isComposing` clears. "Typing" for the dock and
   // the Handsfree status means either.
   const [isKeyboardVisible, setIsKeyboardVisible] = useState(false);
+  const keyboardVisibleRef = useRef(false);
   useEffect(() => {
-    const show = Keyboard.addListener("keyboardDidShow", () => setIsKeyboardVisible(true));
-    const hide = Keyboard.addListener("keyboardDidHide", () => setIsKeyboardVisible(false));
+    const show = Keyboard.addListener("keyboardDidShow", () => {
+      keyboardVisibleRef.current = true;
+      setIsKeyboardVisible(true);
+    });
+    const hide = Keyboard.addListener("keyboardDidHide", () => {
+      keyboardVisibleRef.current = false;
+      setIsKeyboardVisible(false);
+      // Redmi uplift Stage 2: the tray kept the position it was pushed to
+      // while the keyboard was up (a keyboard's height too high — the dock,
+      // switch and emblem all followed it; reproduced on the emulator). A
+      // re-snap to the same stage, once the keyboard is gone, recomputes it
+      // against the full screen. The stage itself never changes here.
+      requestAnimationFrame(() => sheetRef.current?.snapToIndex(requestedSheetIndexRef.current));
+    });
+    // A keyboard-hidden event missed while the app was away must not keep
+    // the screen in its typing layout (dock hidden) after coming back.
+    const appState = AppState.addEventListener("change", (state) => {
+      if (state !== "active") return;
+      const visible = Keyboard.isVisible();
+      keyboardVisibleRef.current = visible;
+      setIsKeyboardVisible(visible);
+    });
     return () => {
       show.remove();
       hide.remove();
+      appState.remove();
     };
   }, []);
   const isTyping = isComposing || isKeyboardVisible;
@@ -484,13 +506,27 @@ export default function HomeScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const sheetRef = useRef<BottomSheet>(null);
+  /** Every app-driven tray snap: remembers the stage asked for. */
+  const snapSheet = useCallback((index: number) => {
+    requestedSheetIndexRef.current = index;
+    sheetRef.current?.snapToIndex(index);
+  }, []);
   const sheetAnimatedIndex = useSharedValue(0);
   // Mirrors sheetAnimatedIndex into plain JS state — HistorySheet needs this
   // (not just the Reanimated shared value) to actually skip rendering its
   // body at index 0 (see STRICT LAYOUT HIERARCHY), which has to be a real
   // React conditional, not something achievable from a UI-thread value alone.
   const [sheetIndex, setSheetIndex] = useState(0);
-  const handleSheetIndexChange = useCallback((index: number) => setSheetIndex(index), []);
+  const sheetIndexRef = useRef(0);
+  // The stage the tray was last asked to reach (by the app or a gesture) —
+  // what a re-snap after the keyboard closes restores, so it never undoes a
+  // snap still animating (e.g. the collapse a recording starts with).
+  const requestedSheetIndexRef = useRef(0);
+  const handleSheetIndexChange = useCallback((index: number) => {
+    sheetIndexRef.current = index;
+    requestedSheetIndexRef.current = index;
+    setSheetIndex(index);
+  }, []);
 
   // MONOCHROMATIC GLASS EXPAND/COLLAPSE: `expandProgress` (0 = tray, 1 =
   // fully expanded) is dragged continuously by BOTH the tray's own handle
@@ -507,9 +543,28 @@ export default function HomeScreen() {
   // yes/no — hiding the floating pill cluster below — updated via
   // `handleExpandSettle`, fired the instant a drag's release DECIDES which
   // way it's settling, not once the spring animation actually finishes.
+  // The dock's anchor (Redmi uplift Stage 2): the canvas height measured
+  // while the keyboard is down. The dock is drawn at the bottom of that, so
+  // the keyboard or any tray movement can never lift it — with the keyboard
+  // up it simply sits underneath.
+  const [stableCanvasHeight, setStableCanvasHeight] = useState(0);
+  const handleCanvasLayout = useCallback((e: LayoutChangeEvent) => {
+    const height = Math.round(e.nativeEvent.layout.height);
+    setStableCanvasHeight((prev) => (!keyboardVisibleRef.current || height > prev ? height : prev));
+  }, []);
+
   const [isTextBoxExpanded, setIsTextBoxExpanded] = useState(false);
   const expandProgress = useSharedValue(0);
   const handleExpandSettle = useCallback((expanded: boolean) => setIsTextBoxExpanded(expanded), []);
+  // An upward fling on the 50% tray's conversation opens the full-screen
+  // view (Redmi uplift Stage 2) — the same end state as dragging the handle
+  // past halfway. Only from the 50% stage. (A downward drag at the top of
+  // the list already settles the tray: gorhom hands it to the sheet.)
+  const handleConversationFlingUp = useCallback(() => {
+    if (sheetIndexRef.current !== 1) return;
+    expandProgress.value = withTiming(1, { duration: 240 });
+    setIsTextBoxExpanded(true);
+  }, [expandProgress]);
 
   // ---- Android Back (Stage 5c) ---------------------------------------------
   // The topmost thing open closes first; only a home screen with nothing
@@ -567,7 +622,7 @@ export default function HomeScreen() {
         Keyboard.dismiss();
         return true;
       case "collapse-tray":
-        sheetRef.current?.snapToIndex(0);
+        snapSheet(0);
         return true;
       case "system":
         return false;
@@ -680,6 +735,10 @@ export default function HomeScreen() {
     bottom:
       interpolate(sheetAnimatedIndex.value, [0, 1], [sheetRestPx.value, sheetHalfPxValue.value], "clamp") +
       MODE_SWITCH_BOTTOM_GAP,
+    // Gone as soon as the full-screen view starts opening (Redmi uplift
+    // Stage 2: on Android the elevated switch painted over the growing
+    // full-screen tray mid-drag).
+    opacity: interpolate(expandProgress.value, [0, 0.08], [1, 0], "clamp"),
   }));
 
   // The emblem zone takes the space actually left between the header and
@@ -704,9 +763,19 @@ export default function HomeScreen() {
   // keyboard and returns the sheet to its resting peek. Both calls are
   // harmless no-ops when already dismissed/collapsed, so this doesn't need
   // to first check whether either is actually open.
+  //
+  // Not while the full-screen view is open (Redmi uplift Stage 2): nothing
+  // behind it is backdrop, but a touch on its list's empty space (a short
+  // list doesn't claim the touch) fell through to this canvas — and since
+  // the canvas is the whole screen, even a swipe counted as a press. It
+  // quietly collapsed the tray underneath, so closing the full-screen view
+  // landed on the rest stage instead of the 50% tray it opened from.
+  const isTextBoxExpandedRef = useRef(false);
+  isTextBoxExpandedRef.current = isTextBoxExpanded;
   const handleBackdropPress = useCallback(() => {
+    if (isTextBoxExpandedRef.current) return;
     Keyboard.dismiss();
-    sheetRef.current?.snapToIndex(0);
+    snapSheet(0);
   }, []);
 
   // Catches up any note saved while the embedding model wasn't available
@@ -778,7 +847,7 @@ export default function HomeScreen() {
         // Back to the resting peek — unless the keyboard is open (typed notes
         // keep it up for the next one): the peek sits behind the keyboard, so
         // snapping there hid the input and its Send button.
-        if (!Keyboard.isVisible()) sheetRef.current?.snapToIndex(0);
+        if (!Keyboard.isVisible()) snapSheet(0);
         savedNote = true;
         // So the Record-mode drawer list shows the new note immediately,
         // not just after the next screen-focus refresh.
@@ -841,7 +910,7 @@ export default function HomeScreen() {
       // still moves right away rather than only after the note/answer
       // pipeline finishes. A manual voice Ask already raised it when its
       // recording ended — not again, so a manual drag isn't overridden.
-      if (!voiceAsk) sheetRef.current?.snapToIndex(1);
+      if (!voiceAsk) snapSheet(1);
       const intent: "RECORD" | "ASK" = mode === "record" ? "RECORD" : "ASK";
       try {
         setProcessingLabel(intent === "RECORD" ? "note" : "query");
@@ -1302,7 +1371,7 @@ export default function HomeScreen() {
         devTiming("VoiceAskTiming", "capture end — tray snap requested");
         pendingVoiceAskRef.current = reserveVoiceAsk(mode, {
           beginPendingAsk: () => chatSessionRef.current.beginPendingAsk(),
-          raiseTray: () => sheetRef.current?.snapToIndex(1),
+          raiseTray: () => snapSheet(1),
         });
       },
       onCaptureDiscarded: () => {
@@ -1414,7 +1483,7 @@ export default function HomeScreen() {
       endComposingForCapture();
       // Starting a recording collapses the sheet to its resting peek
       // immediately.
-      sheetRef.current?.snapToIndex(0);
+      snapSheet(0);
       try {
         // Build 39: the PCM recorder starts FIRST, then Tier 1 — confirmed
         // on-device (Pixel 9) that reconfiguring the audio session
@@ -1799,6 +1868,12 @@ export default function HomeScreen() {
     [activeMode.isActive, activeMode.isStarting, activeMode.state, pendingCount, insets.bottom, handleToggleHandsfree, handleOpenTodos, handleOpenQuickMenu, handleDockHeight]
   );
 
+  const isDockShown = !isTyping && !isTextBoxExpanded;
+  const dockHiddenAtHalf = dockYieldsAtHalf && sheetIndex === 1;
+  const dockFadeStyle = useAnimatedStyle(() => ({
+    opacity: dockYieldsAtHalf ? interpolate(sheetAnimatedIndex.value, [0.4, 1], [1, 0], "clamp") : 1,
+  }));
+
   // Opens a note's detail modal — shared by a chat citation chip's tap AND
   // a row tap in the Record-mode notes list (ChatSheetContent's
   // `onShowCitation` prop is reused for both, same `(noteId: string) => void`
@@ -1842,7 +1917,7 @@ export default function HomeScreen() {
   // HistorySheet's `contentHidden` prop instead, entirely independent of
   // which index the sheet is actually at.
   const handleInputFocus = useCallback(() => {
-    sheetRef.current?.snapToIndex(1);
+    snapSheet(1);
     setIsComposing(true);
   }, []);
   // Blur (tapping away without submitting) un-hides the list again — a
@@ -1901,6 +1976,7 @@ export default function HomeScreen() {
         freezing the entire To-Dos screen (no scroll, no tap, nothing). */}
     <Pressable
       style={styles.canvas}
+      onLayout={handleCanvasLayout}
       onPress={handleBackdropPress}
       pointerEvents={isTodosVisible ? "none" : "auto"}
       // A tap-to-dismiss surface only: not an accessibility element, so it
@@ -2022,7 +2098,8 @@ export default function HomeScreen() {
         modelDownload={chatSession.modelDownload}
         bottomInset={insets.bottom}
         restHeight={restHeight}
-        footer={!isTyping && !isTextBoxExpanded ? dock : null}
+        reserveFooter={isDockShown}
+        gesturesEnabled={!isTextBoxExpanded}
         footerHeight={dockHeight}
         footerYieldsAtHalf={dockYieldsAtHalf}
         onHeaderLayout={handleComposeHeaderLayout}
@@ -2066,9 +2143,30 @@ export default function HomeScreen() {
             onToggleSpeech={chatSession.toggleSpeech}
             onShowCitation={handleShowCitation}
             listBottomPadding={TRAY_LIST_END_PADDING}
+            onFlingUp={handleConversationFlingUp}
           />
         }
       />
+
+      {/* The dock: a fixed screen element anchored to the bottom of the
+          keyboard-down canvas (Redmi uplift Stage 2) — never the tray's
+          footer, so recording, processing, the tray, the keyboard or a
+          stale keyboard-era layout can't lift it. Hidden while typing and
+          in the full-screen view, as before. */}
+      {isDockShown && (
+        <Animated.View
+          pointerEvents={dockHiddenAtHalf ? "none" : "box-none"}
+          importantForAccessibility={dockHiddenAtHalf ? "no-hide-descendants" : "auto"}
+          accessibilityElementsHidden={dockHiddenAtHalf}
+          style={[
+            styles.dockAnchor,
+            stableCanvasHeight > 0 ? { top: stableCanvasHeight - dockHeight } : { bottom: 0 },
+            dockFadeStyle,
+          ]}
+        >
+          {dock}
+        </Animated.View>
+      )}
 
       {/* Build 20 HARDENED NAV BAR SURFACE: app.json's
           android.navigationBarColor already sets #1C1C1E at the OS level,
@@ -2292,6 +2390,11 @@ const styles = StyleSheet.create({
     color: ERROR_TEXT,
     textAlign: "center",
     paddingHorizontal: 32,
+  },
+  dockAnchor: {
+    position: "absolute",
+    left: 0,
+    right: 0,
   },
   navBarInset: {
     position: "absolute",

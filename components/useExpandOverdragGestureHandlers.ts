@@ -1,5 +1,7 @@
 import { useCallback } from "react";
 import {
+  ANIMATION_SOURCE,
+  ANIMATION_STATUS,
   GESTURE_SOURCE,
   useBottomSheetInternal,
   useGestureEventsHandlersDefault,
@@ -58,6 +60,9 @@ export type ExpandOverdragGestureHandlersParams = {
    * normal 20%-50% range. */
   onExpandSettle: (expanded: boolean) => void;
 };
+
+/** How close (px) a resting position must be to a detent to count as on it. */
+const ON_DETENT_TOLERANCE_PX = 0.5;
 
 /**
  * Builds a `gestureEventsHandlersHook` for `<BottomSheet>` — a public
@@ -126,7 +131,11 @@ export function createExpandOverdragGestureHandlersHook({
       handleOnEnd: defaultOnEnd,
       handleOnFinalize: defaultOnFinalize,
     } = useGestureEventsHandlersDefault();
-    const { animatedPosition, animatedDetentsState } = useBottomSheetInternal();
+    const { animatedPosition, animatedDetentsState, animatedAnimationState, animateToPosition } =
+      useBottomSheetInternal();
+    // Where the sheet was when ANY drag (handle or content) began — to tell
+    // a release that moved the sheet from one that only scrolled the list.
+    const gestureStartPosition = useSharedValue(0);
 
     // Where THIS drag started, captured independently of the library's own
     // private start-position bookkeeping (a closed-over value inside
@@ -154,6 +163,7 @@ export function createExpandOverdragGestureHandlersHook({
     const handleOnStart: GestureEventHandlerCallbackType = useCallback(
       (source, payload) => {
         "worklet";
+        gestureStartPosition.value = animatedPosition.value;
         if (source === GESTURE_SOURCE.HANDLE) {
           dragStartPosition.value = animatedPosition.value;
           const highest = animatedDetentsState.value.highestDetentPosition;
@@ -162,7 +172,7 @@ export function createExpandOverdragGestureHandlersHook({
         }
         defaultOnStart(source, payload);
       },
-      [defaultOnStart, animatedPosition, animatedDetentsState, dragStartPosition, startedAtHighestDetent]
+      [defaultOnStart, animatedPosition, animatedDetentsState, dragStartPosition, startedAtHighestDetent, gestureStartPosition]
     );
 
     const handleOnChange: GestureEventHandlerCallbackType = useCallback(
@@ -210,8 +220,36 @@ export function createExpandOverdragGestureHandlersHook({
           }
         }
         defaultOnEnd(source, payload);
+        // Redmi uplift Stage 2: with over-drag off, a drag past 50% is
+        // clamped EXACTLY onto the 50% detent, so gorhom's release finds
+        // nothing to animate and returns — and gorhom only records its
+        // current stage (and fires `onChange`) when an animation completes.
+        // It then still believed it was at rest: the app hid the tray's body,
+        // and the next re-evaluation (opening the full-screen view) quietly
+        // moved the tray back down. A zero-distance settle onto the same
+        // detent completes normally and records the stage. Only when this
+        // drag actually moved the sheet — a list scroll leaves it alone.
+        const position = animatedPosition.value;
+        const detents = animatedDetentsState.value.detents;
+        if (
+          animatedAnimationState.value.status !== ANIMATION_STATUS.RUNNING &&
+          detents !== undefined &&
+          Math.abs(position - gestureStartPosition.value) > ON_DETENT_TOLERANCE_PX
+        ) {
+          const detent = detents.find((d) => Math.abs(d - position) <= ON_DETENT_TOLERANCE_PX);
+          if (detent !== undefined) animateToPosition(detent, ANIMATION_SOURCE.GESTURE, 0);
+        }
       },
-      [defaultOnEnd, expandProgress, rawOverdragPx]
+      [
+        defaultOnEnd,
+        expandProgress,
+        rawOverdragPx,
+        animatedPosition,
+        animatedDetentsState,
+        animatedAnimationState,
+        animateToPosition,
+        gestureStartPosition,
+      ]
     );
 
     const handleOnFinalize: GestureEventHandlerCallbackType = useCallback(
