@@ -14,6 +14,8 @@ import { useFocusEffect, useRouter } from "expo-router";
 import Constants from "expo-constants";
 
 import { colors, radius, spacing, typography } from "../constants/theme";
+import { xayraFonts } from "../constants/xayraTheme";
+import { BackLink } from "../components/ui/BackLink";
 import { listNotes, purgeAllNotes } from "../services/notes/noteManager";
 import {
   BackupAccountMismatchError,
@@ -444,17 +446,11 @@ export default function SettingsScreen() {
         showsVerticalScrollIndicator={false}
       >
         <View style={styles.header}>
-          <Pressable
-            onPress={() => router.back()}
-            hitSlop={12}
-            style={({ pressed }) => [styles.backButton, pressed && styles.backButtonPressed]}
-          >
-            <Text style={styles.backButtonText}>‹ Back</Text>
-          </Pressable>
+          <BackLink onPress={() => router.back()} />
           <Text style={styles.title}>Settings</Text>
         </View>
 
-        <Text style={styles.groupLabel}>Cloud Backup</Text>
+        <Text style={styles.groupLabel}>Cloud backup</Text>
         <View style={styles.card}>
           <View style={styles.cardHeaderRow}>
             <View style={styles.statusDotWrap}>
@@ -582,7 +578,7 @@ export default function SettingsScreen() {
 
         {status.isConnected ? (
           <>
-            <Text style={[styles.groupLabel, styles.sectionSpacing]}>Privacy & Security</Text>
+            <Text style={[styles.groupLabel, styles.sectionSpacing]}>Privacy & security</Text>
             <View style={styles.card}>
               <Text style={styles.cardTitle}>Extra Privacy</Text>
               <Text style={styles.metaText}>
@@ -666,7 +662,7 @@ export default function SettingsScreen() {
           onCancel={() => setCodePrompt(null)}
         />
 
-        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Storage & Stats</Text>
+        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Storage & stats</Text>
         <View style={styles.card}>
           <View style={styles.metricRow}>
             <Text style={styles.metricLabel}>Notes stored locally</Text>
@@ -690,7 +686,7 @@ export default function SettingsScreen() {
           )}
         </View>
 
-        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Data & Privacy</Text>
+        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Data & privacy</Text>
         <View style={styles.card}>
           <Text style={styles.metaText}>
             Your notes, to-dos and search index are stored encrypted on this phone. Any older voice recordings kept
@@ -756,28 +752,14 @@ const styles = StyleSheet.create({
   header: {
     marginBottom: spacing.lg,
   },
-  backButton: {
-    alignSelf: "flex-start",
-    marginBottom: spacing.md,
-    paddingVertical: spacing.xs,
-  },
-  backButtonPressed: {
-    opacity: 0.6,
-  },
-  backButtonText: {
-    color: colors.accent,
-    fontSize: 15,
-    fontWeight: "600",
-  },
   title: {
     color: colors.textPrimary,
     ...typography.title,
   },
+  // Sentence case, like every label in Xayra 2.0 (Redmi uplift Stage 4).
   groupLabel: {
     color: colors.textMuted,
-    ...typography.caption,
-    textTransform: "uppercase",
-    letterSpacing: 0.6,
+    ...typography.label,
     marginBottom: spacing.sm,
     marginLeft: spacing.xs,
   },
@@ -816,6 +798,7 @@ const styles = StyleSheet.create({
     ...typography.heading,
   },
   cardSubtitle: {
+    fontFamily: xayraFonts.ui,
     color: colors.textMuted,
     fontSize: 13,
     marginTop: 2,
@@ -835,15 +818,18 @@ const styles = StyleSheet.create({
     marginBottom: spacing.sm,
   },
   metricLabel: {
+    fontFamily: xayraFonts.ui,
     color: colors.textMuted,
     fontSize: 13,
   },
   metricValue: {
+    fontFamily: xayraFonts.ui,
     color: colors.textSecondary,
     fontSize: 13,
     fontWeight: "600",
   },
   metaText: {
+    fontFamily: xayraFonts.ui,
     color: colors.textMuted,
     fontSize: 13,
     marginTop: spacing.md,
@@ -856,6 +842,7 @@ const styles = StyleSheet.create({
     marginBottom: spacing.lg,
   },
   toggleLabel: {
+    fontFamily: xayraFonts.ui,
     color: colors.textPrimary,
     fontSize: 14,
     fontWeight: "600",
@@ -868,6 +855,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   primaryButtonText: {
+    fontFamily: xayraFonts.display,
     color: colors.onAccent,
     fontSize: 15,
     fontWeight: "700",
@@ -888,6 +876,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   secondaryButtonText: {
+    fontFamily: xayraFonts.display,
     color: colors.accent,
     fontSize: 15,
     fontWeight: "700",
@@ -909,6 +898,7 @@ const styles = StyleSheet.create({
     marginTop: spacing.sm,
   },
   dangerButtonText: {
+    fontFamily: xayraFonts.display,
     color: colors.danger,
     fontSize: 15,
     fontWeight: "700",
@@ -927,6 +917,7 @@ const styles = StyleSheet.create({
     marginTop: 0,
   },
   versionFooter: {
+    fontFamily: xayraFonts.ui,
     color: colors.textMuted,
     fontSize: 12,
     textAlign: "center",
