@@ -49,3 +49,38 @@ export function emblemFit(i: EmblemFitInput): { zone: number; tier: EmblemTier }
 
 export const sameEmblemTier = (a: EmblemTier, b: EmblemTier) =>
   a.orbit === b.orbit && a.cue === b.cue && a.hidden === b.hidden;
+
+/**
+ * The tray's live height (Redmi uplift Stage 2 corrections): the canvas
+ * (keyboard down) less the sheet's live top edge, never below the rest
+ * stage. `staged` (the snap-point interpolation) stands in until both are
+ * known.
+ */
+export function liveTrayHeight(staged: number, canvasHeight: number, sheetTop: number, restHeight: number): number {
+  "worklet";
+  if (canvasHeight <= 0 || sheetTop <= 0 || sheetTop >= canvasHeight) return staged;
+  return Math.max(restHeight, canvasHeight - sheetTop);
+}
+
+/**
+ * The emblem zone from the space the tray actually leaves (Redmi uplift
+ * Stages 2–3): `base` is the room above the tray less the switch and the
+ * essentials under the emblem. As large as that allows, up to the home
+ * size — one rule at every tray position, so the thinking emblem at 50%
+ * stays as close to the home emblem as the screen permits (there was a
+ * separate, smaller 50% cap), and a tray off its snap point can neither
+ * squeeze the emblem into the switch nor leave it tiny in empty space.
+ * `fallback` stands in until the space is measured.
+ */
+export function fittedEmblemZone(
+  fallback: number,
+  maxZone: number,
+  base: number,
+  trayHeight: number,
+  cue: number,
+  room: number
+): number {
+  "worklet";
+  if (base <= 0) return fallback;
+  return Math.max(0, Math.min(maxZone, (base - trayHeight - cue) / room));
+}

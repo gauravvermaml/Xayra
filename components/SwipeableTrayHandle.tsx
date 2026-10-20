@@ -12,7 +12,16 @@ const SWIPE_VELOCITY_THRESHOLD = 500;
  * (`sheetAnimationConfigs` in app/index.tsx) — the point of driving this
  * handle continuously at all is that the 50%↔100% transition should feel
  * like the SAME gesture language as that native drag, not a different one. */
-const SETTLE_SPRING = { damping: 24, stiffness: 260, mass: 0.9, overshootClamping: false };
+export const SETTLE_SPRING = { damping: 24, stiffness: 260, mass: 0.9, overshootClamping: false };
+
+/** Where a released drag settles the full-screen view: a fast flick goes
+ * its way; otherwise whichever side of halfway it was let go on. */
+export function releaseExpandTarget(progress: number, velocityY: number): 0 | 1 {
+  "worklet";
+  if (velocityY <= -SWIPE_VELOCITY_THRESHOLD) return 1;
+  if (velocityY >= SWIPE_VELOCITY_THRESHOLD) return 0;
+  return progress >= 0.5 ? 1 : 0;
+}
 
 /**
  * Settles the full-screen reading view open (true) or closed (false) from
@@ -98,9 +107,7 @@ export function SwipeableTrayHandle({ progress, dragDistance, onSettle, style }:
       progress.value = clamp01(startProgress.value - event.translationY / dragDistance);
     })
     .onEnd((event) => {
-      const flickOpen = event.velocityY <= -SWIPE_VELOCITY_THRESHOLD;
-      const flickClose = event.velocityY >= SWIPE_VELOCITY_THRESHOLD;
-      const target = flickOpen ? 1 : flickClose ? 0 : progress.value >= 0.5 ? 1 : 0;
+      const target = releaseExpandTarget(progress.value, event.velocityY);
       progress.value = withSpring(target, SETTLE_SPRING);
       runOnJS(onSettle)(target === 1);
     });

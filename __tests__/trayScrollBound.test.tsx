@@ -36,6 +36,7 @@ async function renderSheet(sheetIndex: number): Promise<ReactTestRenderer> {
         composeBarSlot={<Text>field</Text>}
         content={<View testID="tray-list" />}
         animatedIndex={sharedValue(sheetIndex)}
+        animatedPosition={sharedValue(0)}
         sheetIndex={sheetIndex}
         modelDownload={{ status: "ready" } as never}
         bottomInset={24}

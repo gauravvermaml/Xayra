@@ -9,6 +9,7 @@ import {
   type GestureEventsHandlersHookType,
 } from "@gorhom/bottom-sheet";
 import { runOnJS, useSharedValue, withSpring, type SharedValue } from "react-native-reanimated";
+import { isExpandOrigin } from "../utils/trayGestureRegions";
 
 /** Same spring physics as HistorySheet's own native 0%→50% sheet bounce
  * (`sheetAnimationConfigs` in app/index.tsx) — the whole point of this file
@@ -59,6 +60,12 @@ export type ExpandOverdragGestureHandlersParams = {
    * fires at all for an ordinary drag that never left the sheet's own
    * normal 20%-50% range. */
   onExpandSettle: (expanded: boolean) => void;
+  /** Height (px) of the top of the sheet's content — the header holding the
+   * compose bar. A content drag that BEGINS there counts as a handle drag
+   * and can open the full-screen view; one that begins in the list below
+   * only scrolls (Redmi uplift Stage 2 corrections: the approved gesture
+   * map — handle and compose bar expand, notes/answers scroll). */
+  expandOriginHeight: SharedValue<number>;
 };
 
 /** How close (px) a resting position must be to a detent to count as on it. */
@@ -123,6 +130,7 @@ export function createExpandOverdragGestureHandlersHook({
   expandProgress,
   expandDragDistance,
   onExpandSettle,
+  expandOriginHeight,
 }: ExpandOverdragGestureHandlersParams): GestureEventsHandlersHookType {
   return function useExpandOverdragGestureHandlers() {
     const {
@@ -136,6 +144,9 @@ export function createExpandOverdragGestureHandlersHook({
     // Where the sheet was when ANY drag (handle or content) began — to tell
     // a release that moved the sheet from one that only scrolled the list.
     const gestureStartPosition = useSharedValue(0);
+    // Whether THIS drag may open the full-screen view: the handle, or a
+    // content drag that started on the header (compose bar).
+    const expandEligible = useSharedValue(false);
 
     // Where THIS drag started, captured independently of the library's own
     // private start-position bookkeeping (a closed-over value inside
@@ -164,7 +175,14 @@ export function createExpandOverdragGestureHandlersHook({
       (source, payload) => {
         "worklet";
         gestureStartPosition.value = animatedPosition.value;
-        if (source === GESTURE_SOURCE.HANDLE) {
+        // `y` is where the finger is now, relative to the content view;
+        // less the travel so far, it is where the drag began.
+        expandEligible.value = isExpandOrigin(
+          source === GESTURE_SOURCE.HANDLE ? "handle" : "content",
+          payload.y - payload.translationY,
+          expandOriginHeight.value
+        );
+        if (expandEligible.value) {
           dragStartPosition.value = animatedPosition.value;
           const highest = animatedDetentsState.value.highestDetentPosition;
           startedAtHighestDetent.value =
@@ -172,14 +190,23 @@ export function createExpandOverdragGestureHandlersHook({
         }
         defaultOnStart(source, payload);
       },
-      [defaultOnStart, animatedPosition, animatedDetentsState, dragStartPosition, startedAtHighestDetent, gestureStartPosition]
+      [
+        defaultOnStart,
+        animatedPosition,
+        animatedDetentsState,
+        dragStartPosition,
+        startedAtHighestDetent,
+        gestureStartPosition,
+        expandEligible,
+        expandOriginHeight,
+      ]
     );
 
     const handleOnChange: GestureEventHandlerCallbackType = useCallback(
       (source, payload) => {
         "worklet";
         defaultOnChange(source, payload);
-        if (source === GESTURE_SOURCE.HANDLE && startedAtHighestDetent.value) {
+        if (expandEligible.value && startedAtHighestDetent.value) {
           const highestSnapPoint = animatedDetentsState.value.highestDetentPosition;
           if (highestSnapPoint !== undefined) {
             const rawDraggedPosition = dragStartPosition.value + payload.translationY;
@@ -189,13 +216,13 @@ export function createExpandOverdragGestureHandlersHook({
           }
         }
       },
-      [defaultOnChange, animatedDetentsState, dragStartPosition, expandProgress, rawOverdragPx, startedAtHighestDetent]
+      [defaultOnChange, animatedDetentsState, dragStartPosition, expandProgress, rawOverdragPx, startedAtHighestDetent, expandEligible]
     );
 
     const handleOnEnd: GestureEventHandlerCallbackType = useCallback(
       (source, payload) => {
         "worklet";
-        if (source === GESTURE_SOURCE.HANDLE) {
+        if (expandEligible.value) {
           const settledProgress = expandProgress.value;
           // Only ever fires for a drag that genuinely entered the overdrag
           // range at all — an ordinary 20%-50% release (`settledProgress`
@@ -249,6 +276,7 @@ export function createExpandOverdragGestureHandlersHook({
         animatedAnimationState,
         animateToPosition,
         gestureStartPosition,
+        expandEligible,
       ]
     );
 

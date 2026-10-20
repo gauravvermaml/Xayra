@@ -29,7 +29,7 @@ jest.mock("react-native-reanimated", () => {
 jest.mock("react-native-gesture-handler", () => {
   const { View } = jest.requireActual("react-native");
   const chain: Record<string, () => unknown> = {};
-  for (const name of ["onStart", "onUpdate", "onEnd"]) chain[name] = () => chain;
+  for (const name of ["onStart", "onUpdate", "onEnd", "manualActivation", "onTouchesDown", "onTouchesMove"]) chain[name] = () => chain;
   return { Gesture: { Pan: () => chain }, GestureDetector: ({ children }: { children: React.ReactNode }) => children, View };
 });
 
@@ -152,7 +152,7 @@ describe("full-screen Collapse", () => {
     let tree!: ReactTestRenderer;
     await act(async () => {
       tree = create(
-        <ExpandedTextOverlay topInset={24} bottomInset={24} progress={progress as never} dragDistance={274} onSettle={onSettle}>
+        <ExpandedTextOverlay topInset={24} bottomInset={24} progress={progress as never} dragDistance={274} onSettle={onSettle} listScrollOffset={{ value: 0 } as never}>
           {null}
         </ExpandedTextOverlay>
       );

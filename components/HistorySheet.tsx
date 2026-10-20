@@ -1,7 +1,7 @@
 import { forwardRef, useCallback, useMemo } from "react";
 import { type LayoutChangeEvent, Pressable, StyleSheet, useWindowDimensions, View } from "react-native";
 import BottomSheet, { type BottomSheetProps } from "@gorhom/bottom-sheet";
-import Animated, { interpolate, type SharedValue, useAnimatedStyle } from "react-native-reanimated";
+import Animated, { interpolate, type SharedValue, useAnimatedStyle, useSharedValue } from "react-native-reanimated";
 
 import { ModelDownloadCard } from "./ModelDownloadCard";
 import { createExpandOverdragGestureHandlersHook } from "./useExpandOverdragGestureHandlers";
@@ -120,6 +120,10 @@ export type HistorySheetProps = {
   content: React.ReactNode;
   onIndexChange?: BottomSheetProps["onChange"];
   animatedIndex: SharedValue<number>;
+  /** The sheet's live top edge (px from the top of its container) — the
+   * one source the home layout positions Record/Ask and fits the emblem
+   * against (Redmi uplift Stage 2 corrections). */
+  animatedPosition: SharedValue<number>;
   /** Current snap index, tracked in JS state (app/index.tsx) alongside
    * `animatedIndex` — needed here to actually NOT RENDER the segment pill
    * and history content at index 0 (IDLE PEEK ISOLATION), rather than just
@@ -222,6 +226,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
     content,
     onIndexChange,
     animatedIndex,
+    animatedPosition,
     sheetIndex,
     contentHidden,
     modelDownload,
@@ -260,9 +265,18 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
   // the same way its own `handleComponent` (`renderHandle`, below) does —
   // see useExpandOverdragGestureHandlers.ts's own doc comment for the full
   // mechanism.
+  // The header (compose bar) is a drag origin for the full-screen view, like
+  // the handle; the list below it scrolls (Redmi uplift Stage 2 corrections).
+  const headerHeight = useSharedValue(0);
   const expandGestureHandlersHook = useMemo(
-    () => createExpandOverdragGestureHandlersHook({ expandProgress, expandDragDistance, onExpandSettle }),
-    [expandProgress, expandDragDistance, onExpandSettle]
+    () =>
+      createExpandOverdragGestureHandlersHook({
+        expandProgress,
+        expandDragDistance,
+        onExpandSettle,
+        expandOriginHeight: headerHeight,
+      }),
+    [expandProgress, expandDragDistance, onExpandSettle, headerHeight]
   );
 
   const renderHandle = useCallback(() => <SheetDragHandle onPress={handleTapDragHandle} />, [handleTapDragHandle]);
@@ -285,8 +299,12 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
   const contentAreaHeight = Math.max(0, windowHeight * 0.5 - SHEET_HANDLE_HEIGHT);
 
   const handleHeaderLayout = useCallback(
-    (e: LayoutChangeEvent) => onHeaderLayout(Math.round(e.nativeEvent.layout.height)),
-    [onHeaderLayout]
+    (e: LayoutChangeEvent) => {
+      const height = Math.round(e.nativeEvent.layout.height);
+      headerHeight.value = height;
+      onHeaderLayout(height);
+    },
+    [onHeaderLayout, headerHeight]
   );
   const footerVisible = reserveFooter;
   // Body bottom padding: the dock's height, or — when it yields at 50% —
@@ -304,6 +322,7 @@ export const HistorySheet = forwardRef<BottomSheet, HistorySheetProps>(function 
       index={0}
       snapPoints={snapPoints}
       animatedIndex={animatedIndex}
+      animatedPosition={animatedPosition}
       onChange={onIndexChange}
       onAnimate={(from: number, to: number) => devTiming("VoiceAskTiming", "tray animation start", { from, to })}
       enableDynamicSizing={false}

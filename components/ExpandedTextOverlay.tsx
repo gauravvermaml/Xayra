@@ -1,9 +1,19 @@
 import { useState } from "react";
 import { PixelRatio, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
 import { Feather } from "@expo/vector-icons";
-import Animated, { interpolate, runOnJS, useAnimatedReaction, useAnimatedStyle, type SharedValue } from "react-native-reanimated";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
+import Animated, {
+  interpolate,
+  runOnJS,
+  useAnimatedReaction,
+  useAnimatedStyle,
+  useSharedValue,
+  withSpring,
+  type SharedValue,
+} from "react-native-reanimated";
 
-import { settleExpandProgress, SwipeableTrayHandle } from "./SwipeableTrayHandle";
+import { pullDownDecision } from "../utils/trayGestureRegions";
+import { releaseExpandTarget, settleExpandProgress, SETTLE_SPRING, SwipeableTrayHandle } from "./SwipeableTrayHandle";
 import { MIN_TOUCH_TARGET, xayraColors, xayraRadius, xayraType } from "../constants/xayraTheme";
 
 export type ExpandedTextOverlayProps = {
@@ -36,6 +46,10 @@ export type ExpandedTextOverlayProps = {
    * — rendered as a fresh element here, independent of HistorySheet's own
    * copy of the same content (see this file's own doc comment for why). */
   children: React.ReactNode;
+  /** The list's scroll offset (written by the list, see ChatSheetContent's
+   * `listScrollOffset`). At the top, a downward drag on the list collapses
+   * this view, like pulling a sheet down; anywhere else the list scrolls. */
+  listScrollOffset: SharedValue<number>;
 };
 
 /** Below this, the overlay is fully hidden and non-interactive, and its
@@ -112,7 +126,15 @@ const OPACITY_RAMP_END = 0.15;
  * genuinely matching the sheet's own native drag feel rather than
  * approximating it with a tuned entrance animation.
  */
-export function ExpandedTextOverlay({ topInset, bottomInset, progress, dragDistance, onSettle, children }: ExpandedTextOverlayProps) {
+export function ExpandedTextOverlay({
+  topInset,
+  bottomInset,
+  progress,
+  dragDistance,
+  onSettle,
+  children,
+  listScrollOffset,
+}: ExpandedTextOverlayProps) {
   const { width } = useWindowDimensions();
   const compactCollapse =
     width < COLLAPSE_COMPACT_BELOW_WIDTH && PixelRatio.getFontScale() + 0.01 >= COLLAPSE_COMPACT_FROM_FONT_SCALE;
@@ -126,6 +148,38 @@ export function ExpandedTextOverlay({ topInset, bottomInset, progress, dragDista
       }
     }
   );
+
+  // PULL-DOWN HANDOFF (Redmi uplift Stage 2 corrections): a drag on the list
+  // scrolls it; once the list is at its top, continued downward travel pulls
+  // the view down instead — no handle needed, as with a map's bottom sheet.
+  // Manual activation keeps the list in charge until that moment: upward
+  // travel fails this gesture at once (it's a scroll), and a tap never
+  // activates it. When it activates, the list stops scrolling.
+  const touchStartY = useSharedValue(0);
+  const pullBase = useSharedValue(0);
+  const pullDown = Gesture.Pan()
+    .manualActivation(true)
+    .onTouchesDown((e) => {
+      touchStartY.value = e.allTouches[0]?.absoluteY ?? 0;
+    })
+    .onTouchesMove((e, state) => {
+      const touch = e.allTouches[0];
+      if (!touch) return;
+      const decision = pullDownDecision(touch.absoluteY - touchStartY.value, listScrollOffset.value);
+      if (decision === "fail") state.fail();
+      else if (decision === "activate") state.activate();
+    })
+    .onStart((e) => {
+      pullBase.value = e.translationY;
+    })
+    .onUpdate((e) => {
+      progress.value = Math.min(1, Math.max(0, 1 - (e.translationY - pullBase.value) / dragDistance));
+    })
+    .onEnd((e) => {
+      const target = releaseExpandTarget(progress.value, e.velocityY);
+      progress.value = withSpring(target, SETTLE_SPRING);
+      runOnJS(onSettle)(target === 1);
+    });
 
   const containerStyle = useAnimatedStyle(() => ({
     opacity: interpolate(progress.value, [0, OPACITY_RAMP_END], [0, 1], "clamp"),
@@ -167,7 +221,9 @@ export function ExpandedTextOverlay({ topInset, bottomInset, progress, dragDista
             exactly — see that file's `listClearance`/`trayHandleRow` styles
             for the full reasoning. `children` only mounts once interactive
             (see this file's own top doc comment for why). */}
-        <View style={styles.listClearance}>{interactive ? children : null}</View>
+        <GestureDetector gesture={pullDown}>
+          <View style={styles.listClearance}>{interactive ? children : null}</View>
+        </GestureDetector>
       </View>
     </Animated.View>
   );

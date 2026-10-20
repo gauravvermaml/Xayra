@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LayoutChangeEvent } from "react-native";
-import { Alert, AppState, Dimensions, Image, Keyboard, PixelRatio, Pressable, StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import { Alert, AppState, Dimensions, Image, Keyboard, PixelRatio, Pressable, StyleSheet, Text, TextInput, useWindowDimensions, View } from "react-native";
 import * as FileSystem from "expo-file-system/legacy";
 import { getRecordingPermissionsAsync } from "expo-audio";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -109,7 +109,14 @@ import {
 import { wordCount } from "../services/logging/redact";
 import { getGreetingFirstName } from "../services/sync/driveSync";
 import { getTimeBasedGreeting } from "../utils/greeting";
-import { emblemFit, FULL_EMBLEM_TIER, sameEmblemTier, type EmblemTier } from "../utils/emblemLayout";
+import {
+  emblemFit,
+  fittedEmblemZone,
+  FULL_EMBLEM_TIER,
+  liveTrayHeight,
+  sameEmblemTier,
+  type EmblemTier,
+} from "../utils/emblemLayout";
 import { dockYieldsAtHalf as dockYieldsAtHalfFor } from "../utils/readingViewport";
 import { userFacingMessage } from "../services/errors/userMessage";
 
@@ -128,11 +135,13 @@ const STATUS_HINT_OFFSET = -4;
  * hardware Back, unless touched first (see `isComposeGuarded`). */
 const COMPOSE_UNCOVER_DELAY_MS = 400;
 
-/** Emblem zone limits (canvas row P): full size at the tray's rest stage,
- * the compact answer-ready size at 50%, and a floor below which it stops
- * shrinking. The actual size comes from the measured space (see zone0/zone1). */
+/** Emblem zone limits (canvas row P): the home size — the ceiling at every
+ * tray position, 50% included (Redmi uplift Stage 3: the thinking emblem
+ * stays near home size) — and a floor below which it stops shrinking. The
+ * actual size comes from the measured space (see emblemZoneSize). Until
+ * that is measured, the first frame uses the initial size. */
 const EMBLEM_ZONE_MAX_REST = 248;
-const EMBLEM_ZONE_MAX_HALF = 168;
+const EMBLEM_ZONE_INITIAL = 168;
 const EMBLEM_ZONE_MIN = 64;
 /** Extra room, as a multiple of the zone, kept for the orbit rings that
  * reach beyond it — full orbit, and the reduced one (no dotted ring or teal
@@ -437,6 +446,16 @@ export default function HomeScreen() {
     const hide = Keyboard.addListener("keyboardDidHide", () => {
       keyboardVisibleRef.current = false;
       setIsKeyboardVisible(false);
+      // A keyboard closed on its own (Android Back, the keyboard's own
+      // hide key) left the field focused: still "composing", so the dock
+      // stayed hidden and the tray's list blank with no keyboard on screen
+      // (Redmi 09:10; reproduced on the emulator). Closing the keyboard ends
+      // composing — the draft text stays. Blurred on the next frame, and
+      // only a field that still has focus: calling Keyboard.dismiss() from
+      // inside this event hung the app on the emulator (ANR twice, right
+      // after Back closed the keyboard), and a second hide event must find
+      // nothing left to do.
+      requestAnimationFrame(() => TextInput.State.currentlyFocusedInput()?.blur());
       // Redmi uplift Stage 2: the tray kept the position it was pushed to
       // while the keyboard was up (a keyboard's height too high — the dock,
       // switch and emblem all followed it; reproduced on the emulator). A
@@ -512,6 +531,7 @@ export default function HomeScreen() {
     sheetRef.current?.snapToIndex(index);
   }, []);
   const sheetAnimatedIndex = useSharedValue(0);
+  const sheetAnimatedPosition = useSharedValue(0);
   // Mirrors sheetAnimatedIndex into plain JS state — HistorySheet needs this
   // (not just the Reanimated shared value) to actually skip rendering its
   // body at index 0 (see STRICT LAYOUT HIERARCHY), which has to be a real
@@ -556,15 +576,9 @@ export default function HomeScreen() {
   const [isTextBoxExpanded, setIsTextBoxExpanded] = useState(false);
   const expandProgress = useSharedValue(0);
   const handleExpandSettle = useCallback((expanded: boolean) => setIsTextBoxExpanded(expanded), []);
-  // An upward fling on the 50% tray's conversation opens the full-screen
-  // view (Redmi uplift Stage 2) — the same end state as dragging the handle
-  // past halfway. Only from the 50% stage. (A downward drag at the top of
-  // the list already settles the tray: gorhom hands it to the sheet.)
-  const handleConversationFlingUp = useCallback(() => {
-    if (sheetIndexRef.current !== 1) return;
-    expandProgress.value = withTiming(1, { duration: 240 });
-    setIsTextBoxExpanded(true);
-  }, [expandProgress]);
+  // The full-screen list's scroll offset: at its top, a downward drag on
+  // the list collapses the view (ExpandedTextOverlay).
+  const overlayListOffset = useSharedValue(0);
 
   // ---- Android Back (Stage 5c) ---------------------------------------------
   // The topmost thing open closes first; only a home screen with nothing
@@ -697,6 +711,23 @@ export default function HomeScreen() {
     sheetRestPx.value = withTiming(restHeight, { duration: 220 });
   }, [restHeight, sheetRestPx]);
 
+  // THE TRAY'S LIVE HEIGHT — the single owner of the home screen's vertical
+  // geometry (Redmi uplift Stage 2 corrections). Record/Ask, the centre
+  // area's clearance and the emblem's fit all read it, so they can't
+  // disagree: before, each assumed the tray sat exactly on a snap point, and
+  // whenever it didn't (a keyboard-era position, seen on the Redmi) the
+  // emblem ran under the switch and the switch under the dock. Measured from
+  // gorhom's own live top edge against the keyboard-down canvas; until both
+  // are known, the snap-point interpolation stands in.
+  const canvasHeightSV = useSharedValue(0);
+  useEffect(() => {
+    canvasHeightSV.value = stableCanvasHeight;
+  }, [stableCanvasHeight, canvasHeightSV]);
+  const liveSheetPx = useDerivedValue(() => {
+    const staged = interpolate(sheetAnimatedIndex.value, [0, 1], [sheetRestPx.value, sheetHalfPxValue.value], "clamp");
+    return liveTrayHeight(staged, canvasHeightSV.value, sheetAnimatedPosition.value, sheetRestPx.value);
+  });
+
   // Xayra 2.0: the Record/Ask switch sits centred just above the tray and
   // follows it (drawerFloatingStackAnimatedStyle below). Its measured height
   // feeds the centre area's clearance, so the emblem never runs into it.
@@ -715,9 +746,7 @@ export default function HomeScreen() {
   // emblem never ends up crowded against — or covered by — either one once
   // the sheet auto-peeks to 50% during an ASK request.
   const centerAreaAnimatedStyle = useAnimatedStyle(() => ({
-    paddingBottom:
-      interpolate(sheetAnimatedIndex.value, [0, 1], [sheetRestPx.value, sheetHalfPxValue.value], "clamp") +
-      modeSwitchReserve.value,
+    paddingBottom: liveSheetPx.value + modeSwitchReserve.value,
   }));
 
   // Build 23 POSITION FLOATING PILLS (live-tracked): found by testing on a
@@ -732,9 +761,7 @@ export default function HomeScreen() {
   // there's no text input or keyboard interaction in this stack at all, just
   // a plain shared-value interpolation against the sheet's own index.
   const drawerFloatingStackAnimatedStyle = useAnimatedStyle(() => ({
-    bottom:
-      interpolate(sheetAnimatedIndex.value, [0, 1], [sheetRestPx.value, sheetHalfPxValue.value], "clamp") +
-      MODE_SWITCH_BOTTOM_GAP,
+    bottom: liveSheetPx.value + MODE_SWITCH_BOTTOM_GAP,
     // Gone as soon as the full-screen view starts opening (Redmi uplift
     // Stage 2: on Android the elevated switch painted over the growing
     // full-screen tray mid-drag).
@@ -751,11 +778,20 @@ export default function HomeScreen() {
     (e: LayoutChangeEvent) => setCenterRegionHeight(Math.round(e.nativeEvent.layout.height)),
     []
   );
-  const zoneRest = useSharedValue(EMBLEM_ZONE_MAX_HALF);
-  const zoneHalf = useSharedValue(EMBLEM_ZONE_MAX_HALF);
-  const emblemZoneSize = useDerivedValue(() =>
-    interpolate(sheetAnimatedIndex.value, [0, 1], [zoneRest.value, zoneHalf.value], "clamp")
-  );
+  const zoneRest = useSharedValue(EMBLEM_ZONE_INITIAL);
+  const zoneHalf = useSharedValue(EMBLEM_ZONE_INITIAL);
+  // What the emblem's fit needs besides the tray's height (set with the
+  // stage targets below): the room above the tray less the switch and the
+  // essentials under the emblem, and each stage's cue height and orbit room.
+  const zoneBudget = useSharedValue({ base: 0, maxZone: EMBLEM_ZONE_MAX_REST, cueRest: 0, cueHalf: 0, roomRest: ORBIT_ROOM, roomHalf: ORBIT_ROOM });
+  const emblemZoneSize = useDerivedValue(() => {
+    const t = sheetAnimatedIndex.value;
+    const staged = interpolate(t, [0, 1], [zoneRest.value, zoneHalf.value], "clamp");
+    const b = zoneBudget.value;
+    const cue = interpolate(t, [0, 1], [b.cueRest, b.cueHalf], "clamp");
+    const room = interpolate(t, [0, 1], [b.roomRest, b.roomHalf], "clamp");
+    return fittedEmblemZone(staged, b.maxZone, b.base, liveSheetPx.value, cue, room);
+  });
 
   // BACKDROP TAP TO DISMISS: tapping anywhere on the canvas outside the
   // sheet/compose bar/center button (all of which are Pressables of their
@@ -1805,7 +1841,17 @@ export default function HomeScreen() {
         reducedOrbitRoom: ORBIT_ROOM_REDUCED,
       });
     const rest = fit(restHeight, EMBLEM_ZONE_MAX_REST);
-    const half = fit(sheetHalfPx, EMBLEM_ZONE_MAX_HALF);
+    // The 50% stage gets the same ceiling as rest (Redmi uplift Stage 3:
+    // the thinking emblem stays near home size wherever the space allows).
+    const half = fit(sheetHalfPx, EMBLEM_ZONE_MAX_REST);
+    zoneBudget.value = {
+      base: centerRegionHeight - reserve - essentialBelow,
+      maxZone: Math.min(EMBLEM_ZONE_MAX_REST, widthCap),
+      cueRest: rest.tier.cue ? cueBelow : 0,
+      cueHalf: half.tier.cue ? cueBelow : 0,
+      roomRest: rest.tier.orbit === "full" ? ORBIT_ROOM : ORBIT_ROOM_REDUCED,
+      roomHalf: half.tier.orbit === "full" ? ORBIT_ROOM : ORBIT_ROOM_REDUCED,
+    };
     zoneRest.value = withTiming(Math.round(rest.zone), { duration: 220 });
     zoneHalf.value = withTiming(Math.round(half.zone), { duration: 220 });
     setEmblemTiers((prev) =>
@@ -1822,6 +1868,7 @@ export default function HomeScreen() {
     sheetHalfPx,
     zoneRest,
     zoneHalf,
+    zoneBudget,
   ]);
   const emblemTier = sheetIndex === 0 ? emblemTiers.rest : emblemTiers.half;
   // Cancel while a manual recording is capturing (Handsfree keeps its own
@@ -2092,6 +2139,7 @@ export default function HomeScreen() {
       <HistorySheet
         ref={sheetRef}
         animatedIndex={sheetAnimatedIndex}
+        animatedPosition={sheetAnimatedPosition}
         sheetIndex={sheetIndex}
         contentHidden={isComposing}
         onIndexChange={handleSheetIndexChange}
@@ -2143,7 +2191,6 @@ export default function HomeScreen() {
             onToggleSpeech={chatSession.toggleSpeech}
             onShowCitation={handleShowCitation}
             listBottomPadding={TRAY_LIST_END_PADDING}
-            onFlingUp={handleConversationFlingUp}
           />
         }
       />
@@ -2205,6 +2252,7 @@ export default function HomeScreen() {
         progress={expandProgress}
         dragDistance={EXPAND_DRAG_DISTANCE}
         onSettle={handleExpandSettle}
+        listScrollOffset={overlayListOffset}
       >
         <ChatSheetContent
           mode={inputMode}
@@ -2222,6 +2270,7 @@ export default function HomeScreen() {
           onShowCitation={handleShowCitation}
           listBottomPadding={insets.bottom + OVERLAY_LIST_END_PADDING}
           usePlainList
+          listScrollOffset={overlayListOffset}
         />
       </ExpandedTextOverlay>
 

@@ -5,7 +5,6 @@ import {
   FlatList,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
-  Platform,
   Pressable,
   StyleSheet,
   Text,
@@ -15,8 +14,7 @@ import { BottomSheetFlatList } from "@gorhom/bottom-sheet";
 import { Feather } from "@expo/vector-icons";
 
 import { MarkdownText } from "./MarkdownText";
-import { devTiming } from "../services/ai/perf";
-import { classifyListDrag, upwardReleaseSpeed, type DragSample } from "../utils/trayGesture";
+import type { SharedValue } from "react-native-reanimated";
 import { useReduceMotion } from "../hooks/useReduceMotion";
 import { NoteCard } from "./NoteCard";
 import { RelatedNotesSection } from "./RelatedNotesSection";
@@ -171,9 +169,10 @@ export type ChatSheetContentProps = {
    * the right (and simpler) choice for a static full-screen overlay with
    * no sheet-drag gesture to coordinate with. */
   usePlainList?: boolean;
-  /** A quick upward fling on the list (Redmi uplift Stage 2): the tray
-   * opens the full-screen view. Slow drags just scroll. */
-  onFlingUp?: () => void;
+  /** The plain list's scroll offset, written on every scroll — the
+   * full-screen view reads it to hand a downward drag at the top of the
+   * list over to collapsing (Redmi uplift Stage 2 corrections). */
+  listScrollOffset?: SharedValue<number>;
 };
 
 
@@ -215,7 +214,7 @@ export function ChatSheetContent({
   onShowCitation,
   listBottomPadding,
   usePlainList,
-  onFlingUp,
+  listScrollOffset,
 }: ChatSheetContentProps) {
   // Two separate, exactly-typed refs rather than one shared union-typed
   // ref — `FlatList` and `BottomSheetFlatList` both expose `scrollToOffset`,
@@ -248,29 +247,11 @@ export function ChatSheetContent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [newestExchangeId]);
 
-  // Fling detection on the tray's own list (not the full-screen overlay's).
-  const dragStartRef = useRef<DragSample | null>(null);
-  const handleScrollBeginDrag = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    dragStartRef.current = { offsetY: e.nativeEvent.contentOffset.y, at: Date.now() };
-  };
-  const handleScrollEndDrag = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    const start = dragStartRef.current;
-    dragStartRef.current = null;
-    if (!start) return;
-    const velocityY = e.nativeEvent.velocity?.y ?? 0;
-    const result = classifyListDrag(
-      start,
-      { offsetY: e.nativeEvent.contentOffset.y, at: Date.now() },
-      upwardReleaseSpeed(velocityY, Platform.OS)
-    );
-    devTiming("TrayGesture", "list drag end", {
-      result: result ?? "none",
-      moved: Math.round(e.nativeEvent.contentOffset.y - start.offsetY),
-      ms: Date.now() - start.at,
-      velocityY: Math.round(velocityY * 100) / 100,
-    });
-    if (result === "flingUp") onFlingUp?.();
-  };
+  const handlePlainListScroll = listScrollOffset
+    ? (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+        listScrollOffset.value = e.nativeEvent.contentOffset.y;
+      }
+    : undefined;
 
   const handleAllowCellularDownload = () => {
     void allowCellularDownloadAndResume();
@@ -436,6 +417,8 @@ export function ChatSheetContent({
           contentContainerStyle={messageListContentContainerStyle}
           data={data}
           keyExtractor={(item) => (item.kind === "note" ? item.note.id : item.message.id)}
+          onScroll={handlePlainListScroll}
+          scrollEventThrottle={handlePlainListScroll ? 16 : undefined}
           ListEmptyComponent={emptyComponent}
           renderItem={renderItem}
         />
@@ -446,8 +429,6 @@ export function ChatSheetContent({
           contentContainerStyle={messageListContentContainerStyle}
           data={data}
           keyExtractor={(item) => (item.kind === "note" ? item.note.id : item.message.id)}
-          onScrollBeginDrag={onFlingUp ? handleScrollBeginDrag : undefined}
-          onScrollEndDrag={onFlingUp ? handleScrollEndDrag : undefined}
           ListEmptyComponent={emptyComponent}
           renderItem={renderItem}
         />
