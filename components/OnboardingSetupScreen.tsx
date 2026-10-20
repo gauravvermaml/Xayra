@@ -441,7 +441,8 @@ const styles = StyleSheet.create({
   },
   retryButtonText: {
     ...typography.label,
-    color: colors.textPrimary,
+    // Dark on the soft-red fill (Xayra 2.0 palette).
+    color: colors.onAccent,
   },
   stepRow: {
     flexDirection: "row",

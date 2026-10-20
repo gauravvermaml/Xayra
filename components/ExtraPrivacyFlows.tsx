@@ -400,7 +400,7 @@ const styles = StyleSheet.create({
   buttonCompact: { flex: 1 },
   buttonDisabled: { opacity: 0.4 },
   pressed: { opacity: 0.7 },
-  buttonLabel: { color: "#FFFFFF", fontSize: 16, fontWeight: "700" },
+  buttonLabel: { color: colors.onAccent, fontSize: 16, fontWeight: "700" },
   buttonLabelSecondary: { color: "#CBD5E1", fontWeight: "600" },
   dim: { flex: 1, backgroundColor: "rgba(0,0,0,0.7)", justifyContent: "center", paddingHorizontal: 20 },
   sheet: { backgroundColor: "#0E0F12", borderRadius: 20, padding: 22, gap: 14, borderWidth: 1, borderColor: "#1E293B" },

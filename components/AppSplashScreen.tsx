@@ -294,7 +294,7 @@ const styles = StyleSheet.create({
     textDecorationLine: "underline",
   },
   unlockLabel: {
-    color: "#FFFFFF",
+    color: colors.onAccent,
     fontSize: 16,
     fontWeight: "700",
   },

@@ -5,45 +5,41 @@
  * theme changes a one-file edit instead of a grep-and-replace across screens.
  */
 
-export const colors = {
-  // Base surfaces — deep charcoal/slate, darkest to most elevated. Chosen
-  // deliberately over flat pure black (#000): a slight blue-slate tint reads
-  // as richer and less "OLED void" while still being dark-mode-correct.
-  // Previously a few components (NoteDetailModal, SmartNudgeBanner) hardcoded
-  // their own near-identical slate palette locally instead of importing this
-  // one — this revision folds those into the same values so there's exactly
-  // one dark palette in the app, not two that drift over time.
-  background: "#0F172A",
-  surface: "#1E293B",
-  surfaceElevated: "#27324A",
-  surfaceActive: "#2E2A5C",
+import { xayraColors, xayraFonts } from "./xayraTheme";
 
-  // Borders — translucent white overlays rather than flat hex, so they read
-  // correctly against every surface tone above without needing a different
-  // border color per elevation level. Contrast comes from this subtle
-  // highlight plus surface layering, not heavy outlines or drop shadows.
-  border: "rgba(255, 255, 255, 0.08)",
-  borderStrong: "rgba(255, 255, 255, 0.16)",
+export const colors = {
+  // Redmi uplift Stage 4: the legacy names now carry the Xayra 2.0 values
+  // (constants/xayraTheme.ts — Soft Slate + Cool Lilac on true black), so
+  // every screen still on this module (To-Dos/Calendar, Archive, Settings,
+  // the note screen, onboarding, recovery flows) reads as the same product
+  // as Home. Names unchanged: no call site had to move.
+  background: xayraColors.background,
+  surface: xayraColors.surface,
+  surfaceElevated: xayraColors.field,
+  surfaceActive: "#24222F",
+
+  border: xayraColors.line,
+  borderStrong: xayraColors.lineStrong,
 
   // Text hierarchy.
-  textPrimary: "#F8FAFC",
-  textSecondary: "#B4B8C6",
-  textMuted: "#94A3B8",
+  textPrimary: xayraColors.text,
+  textSecondary: xayraColors.textSoft,
+  textMuted: xayraColors.textMuted,
 
-  // Single vibrant accent — reserved for active states, primary actions,
-  // and recording indicators. Everything else stays desaturated.
-  accent: "#6366F1",
-  accentMuted: "#363269",
-  onAccent: "#FFFFFF",
-  // Secondary brand glow — used only for the Xayra emblem's neon aura pulse
-  // (paired with `accent`), never as a general-purpose UI color.
+  // The single accent is Xayra 2.0's lilac. It is light, so content drawn
+  // ON an accent fill (onAccent) is dark — white on lilac would be ~1.6:1.
+  accent: xayraColors.lilac,
+  accentMuted: "#2C2840",
+  onAccent: "#17151F",
+  // Secondary brand glow — the emblem's aura only.
   accentCyan: "#4DF0FF",
 
-  // Status colors — used sparingly (connection dots, destructive actions).
-  success: "#34D399",
-  warning: "#FBBF24",
-  danger: "#F87171",
-  dangerMuted: "#3A2430",
+  // Status colors — used sparingly (connection dots, overdue, destructive
+  // actions); never the only cue.
+  success: "#7FD3A8",
+  warning: "#F1C66B",
+  danger: "#F2A5A5",
+  dangerMuted: "#3A2228",
 } as const;
 
 export const spacing = {
@@ -59,18 +55,20 @@ export const spacing = {
 export const radius = {
   sm: 8,
   md: 12,
-  lg: 16,
-  xl: 20,
+  lg: 18,
+  xl: 22,
   pill: 999,
 } as const;
 
+// Xayra 2.0 families: Plus Jakarta Sans for titles and headings, DM Sans for
+// everything read (the weights bundled in app.json).
 export const typography = {
-  title: { fontSize: 28, fontWeight: "700" as const, letterSpacing: -0.3 },
-  heading: { fontSize: 17, fontWeight: "700" as const },
-  subheading: { fontSize: 14, fontWeight: "600" as const },
-  body: { fontSize: 15, fontWeight: "400" as const, lineHeight: 21 },
-  label: { fontSize: 13, fontWeight: "600" as const },
-  caption: { fontSize: 12, fontWeight: "500" as const },
+  title: { fontFamily: xayraFonts.display, fontSize: 26, fontWeight: "700" as const, letterSpacing: -0.26 },
+  heading: { fontFamily: xayraFonts.display, fontSize: 17, fontWeight: "600" as const },
+  subheading: { fontFamily: xayraFonts.ui, fontSize: 14, fontWeight: "600" as const },
+  body: { fontFamily: xayraFonts.ui, fontSize: 15, fontWeight: "400" as const, lineHeight: 22 },
+  label: { fontFamily: xayraFonts.ui, fontSize: 13, fontWeight: "600" as const },
+  caption: { fontFamily: xayraFonts.ui, fontSize: 12, fontWeight: "500" as const },
 };
 
 /** Barely-there elevation — a soft, low-opacity shadow rather than the

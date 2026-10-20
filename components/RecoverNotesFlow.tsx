@@ -319,6 +319,6 @@ const styles = StyleSheet.create({
   },
   buttonSecondary: { backgroundColor: "transparent", borderWidth: 1, borderColor: "#334155" },
   pressed: { opacity: 0.7 },
-  buttonLabel: { color: "#FFFFFF", fontSize: 16, fontWeight: "700" },
+  buttonLabel: { color: colors.onAccent, fontSize: 16, fontWeight: "700" },
   buttonLabelSecondary: { color: "#CBD5E1", fontWeight: "600" },
 });
