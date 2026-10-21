@@ -28,7 +28,7 @@ body:
     id: version
     attributes:
       label: Xayra version
-      description: Settings shows the version, for example 2.0.0 (52).
+      description: Settings shows the version, for example 2.0.0.
     validations:
       required: true
   - type: input
