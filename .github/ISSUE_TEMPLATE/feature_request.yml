@@ -1,0 +1,21 @@
+name: Suggestion
+description: Suggest an improvement to Xayra.
+labels: [suggestion]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Suggestions are welcome. Opening an issue doesn't grant any rights to
+        Xayra's code (see LICENSE and CONTRIBUTING.md).
+  - type: textarea
+    id: problem
+    attributes:
+      label: What would you like Xayra to do?
+      description: The problem you'd like solved, in your own words.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Examples (made up, not your own notes), or how you work around it today.

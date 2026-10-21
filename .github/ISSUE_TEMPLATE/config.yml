@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security problem
+    url: https://github.com/gauravvermaml/Xayra/security/advisories/new
+    about: Report vulnerabilities privately. Please don't open a public issue.
