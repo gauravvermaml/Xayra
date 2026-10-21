@@ -79,4 +79,8 @@ under their own licences. They are not copied into this repository.
 | bge-small-en-v1.5 (BAAI), quantized ONNX | MIT |
 | Qwen2.5-1.5B-Instruct (Alibaba Cloud / Qwen team), fine-tuned by the Xayra developer for to-do extraction and answers | Apache License 2.0 |
 
-The fine-tuned model is a modified version of Qwen2.5-1.5B-Instruct.
+The fine-tuned model is a modified version of Qwen2.5-1.5B-Instruct. The
+modification notice and licence texts are in
+[`licenses/MODEL_NOTICE.md`](licenses/MODEL_NOTICE.md) and
+[`licenses/Qwen2.5-1.5B-Instruct-LICENSE.txt`](licenses/Qwen2.5-1.5B-Instruct-LICENSE.txt)
+(the Qwen repository's own Apache License 2.0 file, unchanged).
