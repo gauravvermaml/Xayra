@@ -73,6 +73,7 @@
     "eval": "tsx scripts/eval/runEval.ts"
   },
   "private": true,
+  "license": "UNLICENSED",
   "op-sqlite": {
     "sqliteVec": true,
     "fts5": true,

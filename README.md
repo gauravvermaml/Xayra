@@ -224,6 +224,15 @@ Then record a voice note or type a note, wait for it to reach "embedded" status,
 
 `PROJECT_STATE_HANDOFF.md` is this project's running build log — a detailed, reverse-chronological technical record of every build's changes, what was verified, and what's still outstanding. It's the source of truth for anything more granular than this document covers.
 
-## License
+## Licence
 
-MIT — see [LICENSE](LICENSE).
+Xayra is proprietary software. Copyright © 2026 Gaurav Verma. All rights reserved.
+
+This repository is public so the source can be read. It is not open source:
+no licence is granted to copy, modify, redistribute or commercially use
+Xayra's code, apart from viewing and forking on GitHub as GitHub's Terms of
+Service allow. See [LICENSE](LICENSE).
+
+Third-party components (the Expo project template, fonts, patched npm
+packages and the AI models the app downloads) keep their own licences; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
