@@ -14,6 +14,8 @@ import Animated, {
 import { Feather } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 
+import { isDevelopmentBuild } from "../services/ai/perf";
+
 /**
  * Isolated visual/physics prototype — no production imports, no shared
  * state, no wiring into app/index.tsx, HistorySheet.tsx, or the calendar
@@ -41,6 +43,16 @@ function successTap() {
 }
 
 export default function DesignSandboxScreen() {
+  // Development builds only (Gate 2): every route file under app/ is
+  // reachable by deep link (xayra://design-sandbox), and this prototype
+  // gallery is not part of the product. Same guard as app/design-system.tsx.
+  if (!isDevelopmentBuild()) {
+    return (
+      <View style={[styles.canvas, styles.unavailable]}>
+        <Text style={styles.screenTitle}>Unavailable</Text>
+      </View>
+    );
+  }
   return (
     <ScrollView style={styles.canvas} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
       <Text style={styles.screenTitle}>Design Sandbox</Text>
@@ -356,6 +368,10 @@ function OverlayPopTriggerPrototype() {
 }
 
 const styles = StyleSheet.create({
+  unavailable: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
   canvas: {
     flex: 1,
     backgroundColor: "#000000",
