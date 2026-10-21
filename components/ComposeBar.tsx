@@ -364,9 +364,15 @@ export const ComposeBar = memo(function ComposeBar({
               use: Enter always inserts a newline, the arrow is the only way
               to send. The keyboard is still dismissed by handleSubmit itself
               (Keyboard.dismiss()) on that explicit tap. */}
+          {/* Never `disabled` (Gate 3A): a disabled Pressable doesn't claim
+              the touch, so the second tap of a quick double tap on Send —
+              landing after the field had emptied — fell through to the home
+              canvas's tap-to-dismiss, closing the keyboard and dropping the
+              tray mid consecutive-note entry. It stays a touch target;
+              handleSubmit already ignores an empty or pending submit, and
+              TalkBack still hears it as disabled (accessibilityState). */}
           <Pressable
             onPress={handleSubmit}
-            disabled={!canSubmit}
             hitSlop={(MIN_TOUCH_TARGET - SEND_BUTTON_SIZE) / 2}
             testID="compose-submit"
             accessibilityRole="button"
@@ -375,7 +381,7 @@ export const ComposeBar = memo(function ComposeBar({
             style={({ pressed }) => [
               styles.submitButton,
               canSubmit ? styles.submitButtonReady : styles.submitButtonDisabled,
-              pressed && styles.submitButtonPressed,
+              pressed && canSubmit && styles.submitButtonPressed,
             ]}
           >
             <Feather name="arrow-up" size={20} color={canSubmit ? "#000000" : xayraColors.teal} />
