@@ -34,14 +34,16 @@
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE"
       ],
-      "package": "com.anonymous.silentconfidant"
+      "package": "com.anonymous.silentconfidant",
+      "allowBackup": false
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
       "./plugins/withAppShortcuts",
-      "expo-secure-store",
+      ["expo-secure-store", { "configureAndroidBackup": false }],
+      "./plugins/withNoSystemBackup",
       "expo-router",
       "expo-local-authentication",
       [
