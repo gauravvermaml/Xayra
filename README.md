@@ -104,7 +104,7 @@ side-loading and troubleshooting: [DEVELOPMENT.md](DEVELOPMENT.md).
 | [CHANGELOG.md](CHANGELOG.md) | Changes by version |
 | [SECURITY.md](SECURITY.md) | Reporting a vulnerability |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Contribution policy |
-| [BACKLOG.md](BACKLOG.md) | Open items and roadmap |
+| [BACKLOG.md](BACKLOG.md) | Open issues, known limitations and unapproved ideas |
 | [PROJECT_STATE_HANDOFF.md](PROJECT_STATE_HANDOFF.md) | Historical build log (through 1.0.42) |
 | [CLAUDE.md](CLAUDE.md) | Engineering rules for AI-assisted development |
 
