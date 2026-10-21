@@ -1,5 +1,10 @@
 # Google Play Store Listing — Xayra
 
+> **Out of date — historical draft for 1.0.0.** This is not the current Play
+> listing, and some of its wording (for example "100% privately" and "no cloud
+> servers") doesn't describe Xayra 2.0, which has optional Google Drive backup
+> and Calendar. The live listing is maintained in Google Play Console.
+
 ## App Name
 
 Xayra - My Pocket Companion
