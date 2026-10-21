@@ -10,7 +10,8 @@ import { DisposableVaultBanner } from "../components/DisposableVaultBanner";
 import { RecoverNotesFlow } from "../components/RecoverNotesFlow";
 import { resolveVaultMode, type VaultMode } from "../services/dev/disposableVault";
 import { clearRecoveryRecord, readRecoveryPhase } from "../services/recovery/originalVaultRecovery";
-import { cancelStaleDisposableReminders } from "../services/notifications/todoNotifications";
+import { cancelStaleDisposableReminders, reconcileToDoNotifications } from "../services/notifications/todoNotifications";
+import { listAllToDos } from "../services/todos/todoManager";
 import { OnboardingSetupScreen } from "../components/OnboardingSetupScreen";
 import { showToast, ToastHost } from "../components/Toast";
 import { releaseLocalLlamaOnBackground } from "../services/ai/localLlama";
@@ -240,7 +241,13 @@ export default function RootLayout() {
   const vaultOpen = setupComplete !== null;
   useEffect(() => {
     if (vaultOpen) {
-      void cancelStaleDisposableReminders().catch(() => {});
+      // Then re-arm pending future reminders from the encrypted to-dos: a
+      // force-stop removes an app's alarms, and reopening never restored
+      // them (Gate 2). Once per process, idempotent, never prompts.
+      void cancelStaleDisposableReminders()
+        .then(() => listAllToDos())
+        .then((todos) => reconcileToDoNotifications(todos))
+        .catch(() => {});
       // Only now may the download notification ask for permission: earlier,
       // its dialog would cancel the vault's fingerprint prompt.
       allowDownloadNotificationPermissionPrompt();

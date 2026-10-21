@@ -194,6 +194,48 @@ export async function cancelStaleDisposableReminders(): Promise<number> {
   return stale.length;
 }
 
+/**
+ * Which to-dos should have a reminder armed right now: not completed, and a
+ * trigger time still in the future. Completed ones never get one back (their
+ * reminder was cancelled on completion); past ones are left alone, exactly
+ * as scheduleToDoNotification itself does. Pure — tested directly.
+ */
+export function remindersToReconcile(todos: ToDo[], nowMs: number): ToDo[] {
+  return todos.filter(
+    (todo) => !todo.isCompleted && toLocalTriggerDate(todo.actionDate, todo.notificationTime).getTime() > nowMs
+  );
+}
+
+let reconcileStarted = false;
+
+/**
+ * Re-arms every pending, future reminder from the encrypted to-dos — run once
+ * per app process, after the vault opens (Gate 2). Android's force-stop
+ * (Settings, or some OEMs on swipe-away) removes an app's alarms; until now
+ * they came back only on a reboot or an app update, never on simply reopening
+ * Xayra, so reminders could silently not fire. Scheduling is idempotent: the
+ * same notification id replaces the stored request and its alarm (same
+ * PendingIntent), so nothing is ever duplicated. It never prompts for the
+ * notification permission — without it, nothing is scheduled, as before.
+ * A force-stopped app still can't fire anything until it is opened again;
+ * that is Android's rule.
+ */
+export async function reconcileToDoNotifications(todos: ToDo[], nowMs: number = Date.now()): Promise<number> {
+  if (reconcileStarted || Platform.OS !== "android") {
+    return 0;
+  }
+  reconcileStarted = true;
+  const permission = await Notifications.getPermissionsAsync().catch(() => null);
+  if (!permission?.granted) {
+    return 0;
+  }
+  const due = remindersToReconcile(todos, nowMs);
+  for (const todo of due) {
+    await scheduleToDoNotification(todo);
+  }
+  return due.length;
+}
+
 /** Call once at app startup (see app/index.tsx's prewarm effect) to request
  * the Android notification permission up front and prime the channel/tap
  * listener, rather than only doing it lazily the first time a to-do happens
