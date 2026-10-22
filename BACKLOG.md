@@ -62,6 +62,22 @@ Product constraint that still applies: **no Ask while the phone is locked**
 - **Documented false rejections:** F17, F9, F13 and U6, plus six incomplete
   or off-topic answers (see `PROJECT_STATE_HANDOFF.md` → "RC1 — Grounding
   v1").
+- **Found in the 2.0 Ask-quality pass** (synthetic set:
+  `scripts/eval/runAskQuality.ts`), documented rather than fixed because
+  each needs coreference — knowing who "he", "we" or "with me" refers to:
+  - **Pronoun misattribution (shown):** "Ronnie's house has three bedrooms
+    and he wants to repaint the hallway green" passes when the hallway is in
+    another person's note — a pronoun statement with no name or number isn't
+    tied to any note.
+  - **Companions in another sentence (withheld):** "Booked the Queenstown
+    ski trip… Dev and Anika are coming with me" can't answer "Who did I go
+    skiing with?"; relaxing this would also accept unrelated people from the
+    same note.
+  - **"Yes" to a general question (withheld):** "Has Ronnie been having
+    issues lately?" — the notes never say "issues", so a "Yes" is never
+    shown. The wh-form ("What problems has Ronnie had recently?") works.
+  - **"Lately" / "recently" aren't dated:** these words don't narrow
+    retrieval to recent notes, so an older note can be presented as recent.
 - **Constraint:** Grounding v1 is frozen. Change it only for an identified
   release-blocking failure. Validators validate and never rewrite; an
   unsupported answer is withheld, never fabricated or turned into "No".
