@@ -326,6 +326,16 @@ function parseEvidence(sentence: EvidenceSentence, lexicon: Set<string>): Parsed
 const DECLINE =
   /\b(?:no information|couldn['’]?t find|could not find|no mention|not mentioned|not specified|isn['’]?t specified|not recorded|no record|no details|(?:don['’]?t|do not|doesn['’]?t|does not|didn['’]?t|did not) (?:have|mention|say|specify|provide|record|note|include))\b/i;
 const LEADING_PARTICLE = /^\s*(?:yes|no)\b[\s,.:;!—–-]*/i;
+
+/** The answer's own wording for "the notes don't say" — "Your notes don't
+ * mention", "isn't recorded in your notes" — removed before word grounding
+ * counts content words: that phrasing is never in the notes, so a correct
+ * partial answer ("…Your notes don't mention how much the cabin cost.") was
+ * failing the ratio on it. Only the phrase goes; what follows it ("cabin",
+ * "cost") still counts. */
+export function withoutDeclinePhrasing(text: string): string {
+  return text.replace(new RegExp(DECLINE.source, "gi"), " ").replace(/\b(?:in\s+)?(?:your|the)\s+notes?\b/gi, " ");
+}
 /** "It was not this hot last year", "not as warm as" — a comparison, not a
  * claim that something didn't happen. */
 const COMPARATIVE_NEGATION = /\bnot\s+(?:as|so|this|that|quite|very|too)\b|\bthan\b/i;
@@ -428,6 +438,45 @@ const ASKS: { pattern: RegExp; type: "number" | "date" | "name" }[] = [
   { pattern: /^\s*(?:where|who|whom|whose|which)\b/i, type: "name" },
 ];
 
+/** "Who did I go with AND HOW MUCH was the cabin?" — where a second
+ * question starts inside one. */
+const COMPOUND_ASK = /,?\s+and\s+(?=(?:how|what|when|where|who|whom|whose|which|why)\b)/i;
+
+/** The value type a decline itself names: "…don't mention HOW MUCH the cabin
+ * cost" declines a number, whatever the question asked first. */
+function declinedAsk(text: string): "number" | "date" | "name" | null {
+  if (/\bhow\s+(?:much|many)\b/i.test(text)) return "number";
+  if (/\b(?:when|what\s+(?:date|day|time))\b/i.test(text)) return "date";
+  if (/\b(?:who|whom|whose|where)\b/i.test(text)) return "name";
+  return null;
+}
+
+const MONTH_NAME = `(${MONTHS.join("|")}|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)`;
+const FOLLOWED_BY_YEAR = String.raw`(?!,?\s*(?:19|20)\d{2})`;
+const DAY_MONTH = new RegExp(String.raw`\b(\d{1,2})(?:st|nd|rd|th)?\s+(?:of\s+)?${MONTH_NAME}\b${FOLLOWED_BY_YEAR}`, "gi");
+const MONTH_DAY = new RegExp(String.raw`\b${MONTH_NAME}\s+(\d{1,2})(?:st|nd|rd|th)?\b(?!:)${FOLLOWED_BY_YEAR}`, "gi");
+const monthNumber = (name: string) => MONTHS.findIndex((m) => m.startsWith(name.toLowerCase().slice(0, 3))) + 1;
+
+type MonthDay = { month: number; day: number; text: string };
+
+/** Day dates written WITHOUT a year ("28 November", "Nov 21st"). The date
+ * check covers dates with a year; these name a day just as firmly and
+ * were not checked at all, so a wrong day ("21 November" for a note's "28
+ * November") could be shown. */
+function yearlessDays(text: string): MonthDay[] {
+  const found: MonthDay[] = [];
+  for (const m of text.matchAll(DAY_MONTH)) found.push({ day: Number(m[1]), month: monthNumber(m[2]), text: m[0] });
+  for (const m of text.matchAll(MONTH_DAY)) found.push({ day: Number(m[2]), month: monthNumber(m[1]), text: m[0] });
+  return found.filter((d) => d.month > 0 && d.day >= 1 && d.day <= 31);
+}
+
+/** The sentence states that day: written in it (any format), or the date one
+ * of its clauses resolves to (its own or the recording day). */
+function namesDay(s: ParsedSentence, d: MonthDay): boolean {
+  if (yearlessDays(s.source.text).some((e) => e.month === d.month && e.day === d.day)) return true;
+  return s.source.dates.some((e) => e.period.precision === "day" && Number(e.period.start.slice(5, 7)) === d.month && Number(e.period.start.slice(8, 10)) === d.day);
+}
+
 export function validateRelationships(input: {
   answer: string;
   question: string;
@@ -455,6 +504,9 @@ export function validateRelationships(input: {
   const supporting = new Set<ParsedSentence>();
   // The sentences the CURRENT statement's values were anchored to.
   let anchors = new Set<ParsedSentence>();
+  // For each of the CURRENT statement's values and dates: every note holding
+  // a sentence that supports it (not only the first such sentence).
+  let holderNotes: Set<number>[] = [];
   const link = (statement: string, value: string, s: ParsedSentence) => {
     supporting.add(s);
     anchors.add(s);
@@ -465,22 +517,27 @@ export function validateRelationships(input: {
   for (const fact of facts) {
     const reject = (reason: string) => violations.push({ statement: fact.text, reason });
     anchors = new Set<ParsedSentence>();
+    holderNotes = [];
 
     if (fact.decline) {
       // A decline is accepted only when the evidence really lacks the asked
       // value: a sentence about the question's subject holding a value of the
-      // asked type contradicts it.
-      if (ask) {
+      // asked type contradicts it. The type is the one the decline itself
+      // names when it names one ("don't mention how much the cabin cost"):
+      // in "Who did I go with and how much was the cabin?" that is the
+      // number, not the "who" the question opens with.
+      const type = declinedAsk(fact.text) ?? ask?.type;
+      if (type) {
         const holder = sentences.find(
           (s) =>
             focus.some((f) => s.terms.includes(f)) &&
-            (ask.type === "number"
+            (type === "number"
               ? s.amounts.length + s.numbers.length > 0
-              : ask.type === "date"
+              : type === "date"
                 ? s.source.dates.some((d) => d.explicit)
                 : s.names.some((n) => !focus.includes(stem(n))))
         );
-        if (holder) reject(`says the notes lack this, but a note sentence about ${focus.join("/")} gives a ${ask.type}`);
+        if (holder) reject(`says the notes lack this, but a note sentence about ${focus.join("/")} gives a ${type}`);
       }
       continue;
     }
@@ -516,8 +573,12 @@ export function validateRelationships(input: {
       // "The plumber didn't charge anything" is never inferred from a missing
       // amount: a negative claim needs a negative sentence — or, for a
       // verification question, notes that date the event to another day.
-      const negative = sentences.find((s) => s.negated && binds(s, ""));
-      if (negative) link(fact.text, "negation", negative);
+      const negatives = sentences.filter((s) => s.negated && binds(s, ""));
+      const negative = negatives[0];
+      if (negative) {
+        link(fact.text, "negation", negative);
+        holderNotes.push(new Set(negatives.map((s) => s.source.noteIndex)));
+      }
       else if (eventEvidence?.kind !== "different-date") reject("states that something did not happen, but no note sentence says so");
     }
 
@@ -560,6 +621,19 @@ export function validateRelationships(input: {
         continue;
       }
       link(fact.text, v.label, dated[0]);
+      holderNotes.push(new Set(dated.map((s) => s.source.noteIndex)));
+    }
+
+    // A day written without a year must be stated by a sentence about the
+    // rest of this statement — never a day no note gives.
+    for (const d of yearlessDays(fact.text)) {
+      const stating = sentences.filter((s) => namesDay(s, d) && binds(s, ""));
+      if (stating.length === 0) {
+        reject(`"${d.text}" is not stated by any note sentence about this`);
+        continue;
+      }
+      link(fact.text, d.text, stating[0]);
+      holderNotes.push(new Set(stating.map((s) => s.source.noteIndex)));
     }
 
     // A comparison ("2024 was better than 2025") binds two dates to each
@@ -567,17 +641,22 @@ export function validateRelationships(input: {
     const distinctDates = new Set(fact.dates.map(describePeriod)).size;
     for (const d of fact.dates) {
       if (distinctDates >= 2 && values.length === 0) {
-        const holder = sentences.find((s) => dateSupported(d, s));
-        if (holder) link(fact.text, describePeriod(d), holder);
-        else reject(`${describePeriod(d)} is not established by any note`);
+        const establishing = sentences.filter((s) => dateSupported(d, s));
+        if (establishing.length > 0) {
+          link(fact.text, describePeriod(d), establishing[0]);
+          holderNotes.push(new Set(establishing.map((s) => s.source.noteIndex)));
+        } else reject(`${describePeriod(d)} is not established by any note`);
         continue;
       }
       const holders = sentences.filter((s) => dateSupported(d, s) && binds(s, ""));
       // A date that is only a note's recording day needs a shared predicate
       // word too — sharing a name or place is not enough.
-      const ok = holders.find((s) => explicitDate(d, s) || predicates.some((p) => hasTerm(s.terms, p)));
-      if (ok) link(fact.text, describePeriod(d), ok);
-      else reject(`${describePeriod(d)} is not recorded as the date of this event (${holders.length ? "only a note's recording date" : "no sentence"})`);
+      const accepted = holders.filter((s) => explicitDate(d, s) || predicates.some((p) => hasTerm(s.terms, p)));
+      const ok = accepted[0];
+      if (ok) {
+        link(fact.text, describePeriod(d), ok);
+        holderNotes.push(new Set(accepted.map((s) => s.source.noteIndex)));
+      } else reject(`${describePeriod(d)} is not recorded as the date of this event (${holders.length ? "only a note's recording date" : "no sentence"})`);
     }
 
     // Note-level coverage: a statement anchored to a note by its values may
@@ -587,15 +666,26 @@ export function validateRelationships(input: {
     // level rejected 9 correct answers that join neighbouring sentences).
     // Words found nowhere in the evidence are left to the other checks.
     // Possessive names are exempt, as everywhere here ("Eli's brother").
+    //
+    // A value can sit in more than one note ("Brunswick" in both the offer
+    // note and the housewarming note). The first-found anchor alone then
+    // wrongly rejected a statement wholly supported by the OTHER note (the
+    // 2.0 summary report). So a statement also passes when ONE note holds a
+    // supporting sentence for every one of its values and dates and every
+    // word of it that the evidence holds — never a combination across notes.
     if (anchors.size > 0) {
-      const anchorNotes = new Set([...anchors].map((s) => s.source.noteIndex));
-      for (const t of fact.terms) {
-        if (CALENDAR_WORDS.has(t) || fact.names.some((n) => n.possessive && stem(n.name) === t)) continue;
-        const holders = sentences.filter((s) => hasTerm(s.terms, t));
-        if (holders.length > 0 && !holders.some((s) => anchorNotes.has(s.source.noteIndex))) {
-          reject(`"${t}" comes from a different note than the rest of this statement`);
-        }
+      const borrowedFrom = (allowed: Set<number>) =>
+        fact.terms.filter((t) => {
+          if (CALENDAR_WORDS.has(t) || fact.names.some((n) => n.possessive && stem(n.name) === t)) return false;
+          const holders = sentences.filter((s) => hasTerm(s.terms, t));
+          return holders.length > 0 && !holders.some((s) => allowed.has(s.source.noteIndex));
+        });
+      let borrowed = borrowedFrom(new Set([...anchors].map((s) => s.source.noteIndex)));
+      if (borrowed.length > 0 && holderNotes.length > 0) {
+        const singleNotes = [...holderNotes[0]].filter((note) => holderNotes.every((notes) => notes.has(note)));
+        if (singleNotes.some((note) => borrowedFrom(new Set([note])).length === 0)) borrowed = [];
       }
+      for (const t of borrowed) reject(`"${t}" comes from a different note than the rest of this statement`);
     }
   }
 
@@ -680,13 +770,22 @@ function checkAskedRelationship(
   const askedTerms = focus.filter((f) => !anyNames.has(f) && !CALENDAR_WORDS.has(f) && !QUESTION_FRAME_TERMS.has(f));
   if (statements.length === 0 || askedNames.length === 0 || askedTerms.length === 0) return [];
 
-  const userIsSubject = USER_IS_SUBJECT.test(question);
-  const needed = userIsSubject ? askedTerms.length : 1;
+  // In a compound question ("Who did I go to the Grampians with and how much
+  // was the cabin?") only the clause about the user's own participation
+  // needs all its words in one sentence — the other clause asks a separate
+  // question. A single question is its own clause, so nothing changes there.
+  const clauses = question.split(COMPOUND_ASK);
+  const subjectClause = clauses.find((clause) => USER_IS_SUBJECT.test(clause));
+  const userIsSubject = subjectClause !== undefined;
+  const subjectTerms =
+    subjectClause === undefined ? [] : clauses.length === 1 ? askedTerms : askedTerms.filter((t) => hasTerm(contentTerms(subjectClause), t));
+  const needed = userIsSubject ? subjectTerms.length : 1;
+  const required = userIsSubject ? subjectTerms : askedTerms;
   const baseForms = (s: ParsedSentence) => [...new Set([...s.terms, ...s.tokens.map((t) => verbBase(t.word))])];
   const relationship = sentences.filter(
     (s) =>
       askedNames.some((n) => s.names.includes(n)) &&
-      askedTerms.filter((q) => hasTerm(baseForms(s), verbBase(q))).length >= needed
+      required.filter((q) => hasTerm(baseForms(s), verbBase(q))).length >= needed
   );
 
   if (relationship.length === 0) {

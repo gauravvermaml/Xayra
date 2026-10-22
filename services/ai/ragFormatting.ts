@@ -19,6 +19,7 @@ import {
   checkVerificationAnswer,
   validateRelationships,
   verificationAddendum,
+  withoutDeclinePhrasing,
   type EvidenceSentence,
   type RelationshipCheck,
 } from "./relationshipGrounding";
@@ -435,7 +436,7 @@ export function isAnswerGroundedInContext(answerText: string, contextText: strin
   if (isKnownRefusal(answerText)) {
     return true;
   }
-  const contentWords = extractContentWords(answerText);
+  const contentWords = extractContentWords(withoutDeclinePhrasing(answerText));
   if (contentWords.length === 0) {
     return true;
   }
