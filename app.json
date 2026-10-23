@@ -32,7 +32,8 @@
       "blockedPermissions": [
         "android.permission.SYSTEM_ALERT_WINDOW",
         "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE"
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "com.google.android.gms.permission.AD_ID"
       ],
       "package": "com.anonymous.silentconfidant",
       "allowBackup": false
@@ -115,6 +116,9 @@
       "@react-native-community/datetimepicker"
     ],
     "extra": {
+      "revenueCat": {
+        "androidApiKey": ""
+      },
       "router": {},
       "eas": {
         "projectId": "553e5d3d-2971-4de6-8309-3feb4f6cbe49"

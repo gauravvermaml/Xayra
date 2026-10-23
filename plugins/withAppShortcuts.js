@@ -18,7 +18,7 @@
  * OUTGOING activity's intent — i.e. the previous launch's shortcut. So the
  * shortcut targets ShortcutLaunchActivity instead: invisible, in its own
  * task (so CLEAR_TASK only clears that), it forwards the link to the
- * singleTask MainActivity and finishes. Warm: MainActivity gets onNewIntent
+ * singleTop MainActivity (CLEAR_TOP | SINGLE_TOP) and finishes. Warm: MainActivity gets onNewIntent
  * (a normal deep-link "url" event, no remount). Cold: MainActivity starts
  * with the link as its own initial intent.
  *
@@ -130,14 +130,17 @@ import android.os.Bundle
 /**
  * Receives a launcher shortcut in its own task (absorbing the NEW_TASK |
  * CLEAR_TASK Android adds to shortcut intents) and forwards the link to the
- * singleTask MainActivity: onNewIntent when Xayra is running, a normal
+ * singleTop MainActivity: onNewIntent when Xayra is running (CLEAR_TOP |
+ * SINGLE_TOP reuse the running instance, as singleTask did), a normal
  * launch when it isn't. Only shortcut links are forwarded.
  */
 class ${TRAMPOLINE} : Activity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     val data = intent?.data
-    val forward = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val forward = Intent(this, MainActivity::class.java).addFlags(
+      Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+    )
     if (data != null && data.host == "shortcut") {
       forward.action = Intent.ACTION_VIEW
       forward.data = data
@@ -183,6 +186,12 @@ function withAppShortcuts(config) {
 
   config = withAndroidManifest(config, (cfg) => {
     const activity = AndroidConfig.Manifest.getMainActivityOrThrow(cfg.modResults);
+    // singleTop, not Expo's default singleTask: returning to Xayra from the
+    // launcher icon while Google Play's purchase screen is open (e.g. after
+    // checking a bank app) must not clear that screen and cancel the purchase
+    // (RevenueCat's Android guidance). Shortcuts keep reusing the running
+    // activity through the trampoline's CLEAR_TOP | SINGLE_TOP.
+    activity.$["android:launchMode"] = "singleTop";
     const metaData = (activity["meta-data"] = activity["meta-data"] || []);
     if (!metaData.some((m) => m.$["android:name"] === "android.app.shortcuts")) {
       metaData.push({ $: { "android:name": "android.app.shortcuts", "android:resource": "@xml/shortcuts" } });
