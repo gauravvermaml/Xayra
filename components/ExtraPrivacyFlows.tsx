@@ -12,6 +12,7 @@ import {
 } from "../services/backup/recoveryCode";
 import { ProtectionChangeUnfinishedError, replaceExtraPrivacyCode, turnOnExtraPrivacy } from "../services/sync/driveSync";
 import { userFacingMessage } from "../services/errors/userMessage";
+import { restoreTitle } from "../services/sync/restoreSummary";
 
 /**
  * Extra Privacy — "Quiet Intelligence" flows.
@@ -267,8 +268,8 @@ export function ExtraPrivacySetup({ visible, mode, onClose }: { visible: boolean
  * only after the typo check passes. */
 /** A restore's outcome stays on screen until dismissed (a toast was easy to
  * miss for a result this important). Settings and Archive both use it. */
-export function showRestoreResult(result: { restoredCount: number; restoredToDoCount: number; message: string }): void {
-  Alert.alert(result.restoredCount || result.restoredToDoCount ? "Notes restored" : "Already up to date", result.message);
+export function showRestoreResult(result: { restoredCount: number; restoredToDoCount: number; updatedCount?: number; keptCount?: number; message: string }): void {
+  Alert.alert(restoreTitle(result), result.message);
 }
 
 export function RecoveryCodePrompt({

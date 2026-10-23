@@ -32,20 +32,24 @@ Product constraint that still applies: **no Ask while the phone is locked**
 ### Restore: remaining limits after the newer-wins update
 
 Restore now updates records the phone already has: the newest version wins,
-only when the phone's own version is in one of the verified backups just
-read (so nothing is lost); rules and tests in `services/backup/restoreMerge.ts`
+only when the phone's EXACT current version (text, and every to-do field it
+would overwrite) is in one of the verified backups just read, and is
+re-checked inside the write transaction (so nothing is lost); rules and tests in `services/backup/restoreMerge.ts`
 and `__tests__/restoreMerge.test.ts`. What it still doesn't do:
 
-- **Deletions aren't carried.** Backups keep no deletions (no tombstones),
-  so a note or to-do deleted on a phone since a backup comes back when that
-  phone restores. Existing behaviour. Fixing it needs deletion records in
-  the backup format — a format change, not done.
-- **Conflicts are kept, not shown.** A record whose newer version can't be
-  established safely — a phone change not yet backed up, equal timestamps
-  with different content, or a backup copy without a timestamp (to-dos
-  changed before 2026-10-16, older note backups) — keeps the phone's
-  version. Restore only counts them (`RestoreOutcome.conflicts`); there is
-  no screen to review them.
+- **Deletions aren't carried.** Backups keep no deletions (no tombstones).
+  Restore only ever runs when the user taps Restore (Settings or Archive) —
+  never automatically, and a backup never writes to the phone — but that
+  explicit restore brings back a note or to-do deleted on the phone since
+  the backup. Existing behaviour. Fixing it needs deletion records in the
+  backup format — a format change, not done.
+- **Conflicts are summarised, not reviewable.** A record whose newer version
+  can't be established safely keeps the phone's version: a phone change not
+  yet backed up, equal timestamps with different content, a backup copy
+  without a timestamp (to-dos changed before 2026-10-16, older note backups),
+  or two backups holding different versions at the same time. The restore
+  message then says "Some existing items were kept because their changes
+  couldn't be safely compared." There is no screen to review them.
 - **Timestamps are only partly trustworthy.** A backup copy's `updated_at`
   is when it was first copied into a backup, which can be later than the
   edit, and a phone's own `updated_at` also moves on status changes (e.g.
