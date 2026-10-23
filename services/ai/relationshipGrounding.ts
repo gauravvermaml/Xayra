@@ -319,6 +319,75 @@ function parseEvidence(sentence: EvidenceSentence, lexicon: Set<string>): Parsed
 }
 
 // ---------------------------------------------------------------------------
+// Accompaniment sentences
+// ---------------------------------------------------------------------------
+
+const NAME_LIST = String.raw`[A-Z][a-z]+(?:(?:,\s*|,?\s+and\s+)[A-Z][a-z]+)*`;
+/** A sentence that only says who came along — "Dev and Anika are coming
+ * with me.", "Went with Dev and Anika." — and nothing else. A closed
+ * grammatical pattern (come/go/join, with me/us), never a word list: any
+ * other content ("had lunch with Priya and Sam") does not match. */
+const ACCOMPANIMENT = [
+  new RegExp(
+    String.raw`^${NAME_LIST}\s+(?:(?:is|are|was|were|will\s+be)\s+)?(?:coming|going|came|went|joining|joined|will\s+join)\s+(?:along\s+)?(?:with\s+)?(?:me|us)(?:\s+too|\s+as\s+well)?[.!]?$`
+  ),
+  new RegExp(String.raw`^(?:(?:I|We)\s+(?:(?:am|was|are|were|will\s+be)\s+)?)?(?:[Gg]oing|[Ww]ent|[Cc]ame|[Cc]oming)\s+(?:along\s+)?with\s+${NAME_LIST}(?:\s+too)?[.!]?$`),
+];
+
+/**
+ * The evidence plus, for each accompaniment sentence, one sentence joining it
+ * to the sentence IMMEDIATELY before it in the same note: "Booked the
+ * Queenstown ski trip for July. Dev and Anika are coming with me." then
+ * supports "You went skiing in Queenstown with Dev and Anika" (2.0 report),
+ * which single-sentence support rejected. Provenance is the earlier
+ * sentence's. Only adjacent, only that exact sentence shape — any other
+ * combination of sentences is still validated one sentence at a time.
+ */
+export function withAccompaniment(evidence: EvidenceSentence[]): EvidenceSentence[] {
+  const joined: EvidenceSentence[] = [];
+  for (const s of evidence) {
+    if (!ACCOMPANIMENT.some((pattern) => pattern.test(s.text.trim()))) continue;
+    const before = evidence.find((e) => e.noteIndex === s.noteIndex && e.sentenceIndex === s.sentenceIndex - 1);
+    if (before) joined.push({ ...before, text: `${before.text} ${s.text}`, dates: [...before.dates, ...s.dates] });
+  }
+  return [...evidence, ...joined];
+}
+
+// ---------------------------------------------------------------------------
+// The question sent to the model
+// ---------------------------------------------------------------------------
+
+/** "What do my notes say about this: …" — the open form a general yes/no
+ * question is put to the model in (see questionForModel). */
+export const OPEN_QUESTION_PREFIX = "What do my notes say about this: ";
+
+/**
+ * The question as the model is asked it, for a question that names no date.
+ * Normally unchanged. A yes/no question whose own words ("issues",
+ * "lately") appear in NO shown sentence can never have its "Yes" verified
+ * (checkAffirmativeAnswer), yet the model opens with "Yes" and the whole
+ * answer was withheld ("Has Ronnie been having issues lately?", 2.0 report).
+ * When the person it asks about IS in the notes, the model is asked what the
+ * notes say instead — the answer is still validated against the ORIGINAL
+ * question, so a "Yes" remains guarded. Questions whose words the notes do
+ * hold ("Did Ronnie buy a road bike?" next to Ronan's bike) are unchanged.
+ */
+export function questionForModel(question: string, evidence: EvidenceSentence[], now: Date): string {
+  if (!YES_NO_QUESTION.test(question)) return question;
+  const lexicon = buildNameLexicon(question, ...evidence.map((s) => s.text));
+  const askedNames = [...new Set(namesOf(tokensOf(question, lexicon)).map((n) => n.name))];
+  if (askedNames.length === 0) return question;
+  const predicates = questionTerms(question, now).filter(
+    (t) => !FUNCTION_WORDS.has(t) && !CALENDAR_WORDS.has(t) && !askedNames.some((n) => stem(n) === t)
+  );
+  if (predicates.length === 0) return question;
+  const evidenceTerms = evidence.flatMap((s) => contentTerms(s.text));
+  if (predicates.some((p) => hasTerm(evidenceTerms, p))) return question;
+  const namedInNotes = evidence.some((s) => namesOf(tokensOf(s.text, lexicon)).some((n) => askedNames.includes(n.name)));
+  return namedInNotes ? `${OPEN_QUESTION_PREFIX}${question}` : question;
+}
+
+// ---------------------------------------------------------------------------
 // Answer statements
 // ---------------------------------------------------------------------------
 
@@ -494,7 +563,7 @@ export function validateRelationships(input: {
     const stripped = t.name.slice(0, -1);
     if (new RegExp(`\\b${stripped[0].toUpperCase()}${stripped.slice(1)}\\b`).test(answer)) lexicon.add(stripped);
   }
-  const sentences = evidence.map((s) => parseEvidence(s, lexicon));
+  const sentences = withAccompaniment(evidence).map((s) => parseEvidence(s, lexicon));
   const facts = extractAnswerFacts(answer, question, now, lexicon);
   const focus = questionTerms(question, now).filter((f) => !FUNCTION_WORDS.has(f));
   const evidenceNames = new Set(sentences.flatMap((s) => s.names));

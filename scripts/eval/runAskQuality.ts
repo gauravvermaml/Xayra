@@ -14,7 +14,8 @@
  */
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { buildNoteContext, finalizeAnswer, truncateForContext } from "../../services/ai/ragFormatting";
+import { buildNoteContext, finalizeAnswer, isRecencyQuestion, truncateForContext, withinRecentWindow } from "../../services/ai/ragFormatting";
+import { questionForModel } from "../../services/ai/relationshipGrounding";
 import { buildPrompt, CHAT_TEMPLATE_STOP_TOKENS, setRagPromptMode } from "../../services/ai/ragPrompt";
 import {
   buildGroundedQuestion,
@@ -32,6 +33,12 @@ const REPEAT_PENALTY = 1.15; // localLlama.ts
 const CONTEXT_NOTE_LIMIT = 3; // rag.ts
 const EMPTY_CONTEXT = "--- NOTE CONTEXT ---\nNo relevant voice notes were found.";
 
+/** rag.ts's "…lately?" handling: the fixed evidence stands in for the
+ * relevance candidates, then only recent notes are kept. */
+function recencyFiltered(question: string, notes: VaultNote[]): VaultNote[] {
+  return isRecencyQuestion(question) ? withinRecentWindow(notes, NOW).slice(0, CONTEXT_NOTE_LIMIT) : notes;
+}
+
 const matches = (text: string, needle: string) =>
   needle.startsWith("re:") ? new RegExp(needle.slice(3), "i").test(text) : text.toLowerCase().includes(needle.toLowerCase());
 const satisfies = (text: string, rubric?: Rubric) => (rubric ?? []).every((group) => group.some((n) => matches(text, n)));
@@ -48,7 +55,7 @@ function retrieve(c: AskQualityCase) {
         { question: questionTerms(c.question, NOW), event: eventTerms },
         CONTEXT_NOTE_LIMIT
       ).map((r) => r.note)
-    : (c.evidence ?? []).map((id) => VAULT.find((n) => n.id === id)!);
+    : recencyFiltered(c.question, (c.evidence ?? []).map((id) => VAULT.find((n) => n.id === id)!));
   const built =
     notes.length > 0 ? buildNoteContext(notes.map((n) => ({ id: n.id, content: n.content, transcript: null, createdAt: n.createdAt })), target, { eventTerms }) : null;
   const included = built ? built.includedIndices.map((i) => notes[i]) : [];
@@ -61,6 +68,7 @@ function retrieve(c: AskQualityCase) {
     context: built && included.length > 0 ? built.contextText : EMPTY_CONTEXT,
     eventEvidence: verification && target ? classifyEventEvidence(memories, target, eventTerms) : null,
     groundedQuestion: verification ? buildGroundedQuestion(c.question, NOW) : c.question,
+    modelQuestion: verification ? buildGroundedQuestion(c.question, NOW) : questionForModel(c.question, built ? built.evidence : [], NOW),
   };
 }
 
@@ -80,11 +88,11 @@ async function main() {
   const idsArg = process.argv.indexOf("--ids");
   const ids = idsArg !== -1 ? new Set(process.argv[idsArg + 1].split(",")) : null;
   setRagPromptMode("minimal");
-  type Row = { id: string; kind: string; expect: string; question: string; notes: string[]; raw: string; shown: string; outcome: string; reasons: string[] } & ReturnType<typeof scoreShown>;
+  type Row = { id: string; kind: string; expect: string; question: string; notes: string[]; raw: string; shown: string; outcome: string; reasons: string[]; durationMs: number } & ReturnType<typeof scoreShown>;
   const rows: Row[] = [];
   for (const c of ids ? CASES.filter((x) => ids.has(x.id)) : CASES) {
     const r = retrieve(c);
-    const prompt = buildPrompt(r.groundedQuestion, r.context, NOW);
+    const prompt = buildPrompt(r.modelQuestion, r.context, NOW);
     const gen = r.included.length > 0
       ? await runCompletion({ modelPath: MODEL, prompt, contextSize: 4096, maxTokens: 512, stop: CHAT_TEMPLATE_STOP_TOKENS, repeatPenalty: REPEAT_PENALTY })
       : { text: "", durationMs: 0, outputTokens: 0 };
@@ -105,7 +113,7 @@ async function main() {
       ...(result.relationships?.violations.map((v) => `${v.reason} — "${v.statement}"`) ?? []),
     ];
     const score = scoreShown(c, gen.text, result.text, result.outcome);
-    rows.push({ id: c.id, kind: c.kind, expect: c.expect, question: c.question, notes: r.included.map((n) => n.id), raw: gen.text.trim(), shown: result.text, outcome: result.outcome, reasons, ...score });
+    rows.push({ id: c.id, kind: c.kind, expect: c.expect, question: c.question, notes: r.included.map((n) => n.id), raw: gen.text.trim(), shown: result.text, outcome: result.outcome, reasons, durationMs: gen.durationMs, ...score });
     process.stdout.write(`${c.id}:${result.outcome}${score.useful ? "+" : ""}${score.fabricationShown ? "!" : ""}${score.falseReject ? "x" : ""} `);
   }
   const total = (k: "useful" | "fabricationShown" | "falseReject") => rows.filter((x) => x[k]).length;

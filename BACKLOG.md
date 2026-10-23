@@ -62,22 +62,21 @@ Product constraint that still applies: **no Ask while the phone is locked**
 - **Documented false rejections:** F17, F9, F13 and U6, plus six incomplete
   or off-topic answers (see `PROJECT_STATE_HANDOFF.md` → "RC1 — Grounding
   v1").
-- **Found in the 2.0 Ask-quality pass** (synthetic set:
-  `scripts/eval/runAskQuality.ts`), documented rather than fixed because
-  each needs coreference — knowing who "he", "we" or "with me" refers to:
-  - **Pronoun misattribution (shown):** "Ronnie's house has three bedrooms
-    and he wants to repaint the hallway green" passes when the hallway is in
-    another person's note — a pronoun statement with no name or number isn't
-    tied to any note.
-  - **Companions in another sentence (withheld):** "Booked the Queenstown
-    ski trip… Dev and Anika are coming with me" can't answer "Who did I go
-    skiing with?"; relaxing this would also accept unrelated people from the
-    same note.
-  - **"Yes" to a general question (withheld):** "Has Ronnie been having
-    issues lately?" — the notes never say "issues", so a "Yes" is never
-    shown. The wh-form ("What problems has Ronnie had recently?") works.
-  - **"Lately" / "recently" aren't dated:** these words don't narrow
-    retrieval to recent notes, so an older note can be presented as recent.
+- **Still open after the 2.0 Ask-quality pass** (synthetic set:
+  `scripts/eval/runAskQuality.ts`); each needs coreference or role checking
+  — knowing who "he" refers to, or who did what to whom:
+  - **Pronoun misattribution (can be shown):** "Ronnie's house has three
+    bedrooms and he wants to repaint the hallway green" passes when the
+    hallway is in another person's note — a pronoun statement with no name
+    or number isn't tied to any note.
+  - **Role inversion (can be shown):** "he has accepted an offer on a house"
+    for a note saying Ronnie's offer WAS accepted. Statements are checked
+    for shared values and words, not for who did what.
+  - Handled in that pass, narrowly: companions named in an accompaniment
+    sentence right after the event ("…Dev and Anika are coming with me");
+    general yes/no questions the notes can't confirm are asked in open form
+    (the answer is still checked against the original question); "lately" /
+    "recently" keep only notes from the last 30 days (`RECENT_WINDOW_DAYS`).
 - **Constraint:** Grounding v1 is frozen. Change it only for an identified
   release-blocking failure. Validators validate and never rewrite; an
   unsupported answer is withheld, never fabricated or turned into "No".

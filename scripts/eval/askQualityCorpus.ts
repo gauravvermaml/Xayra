@@ -39,6 +39,10 @@ export const VAULT: VaultNote[] = [
   { id: "moveB", createdAt: at(2026, 10, 5, 19), content: "Maya's move got pushed back, she now moves to Sydney on 28 November." },
   // Same-note combination trap: two sentences that must not be fused.
   { id: "fence", createdAt: at(2026, 10, 18, 17), content: "Kabir painted the back fence on Saturday. Later he dropped his phone in the car park at Bunnings." },
+  // Companions in a NON-adjacent sentence about a different event.
+  { id: "qtMum", createdAt: at(2026, 6, 3, 20), content: "Booked the Queenstown ski trip for July. Then visited Mum in Geelong. Priya and Sam came with me." },
+  // Pronoun trap: another person's housewarming in the same suburb.
+  { id: "priyaWarming", createdAt: at(2026, 10, 11, 21), content: "Went to Priya's housewarming in Brunswick. She wants to repaint the hallway green." },
   // Grampians — for a partial answer (who is known, the price is not).
   { id: "grampians", createdAt: at(2026, 9, 28, 20), content: "Hiked the Pinnacle in the Grampians with Leo and Sara. We stayed in a cabin near Halls Gap." },
 ];
@@ -189,6 +193,48 @@ export const CASES: AskQualityCase[] = [
     evidence: ["fence", "ronnieWarming", "grampians"],
     expect: "withhold",
     mustNotInclude: ["re:way back from painting"],
+  },
+  {
+    id: "Q1d",
+    kind: "who-when",
+    question: "Who came with me to Queenstown?",
+    evidence: ["qtBook", "qtBack", "skiGloves"],
+    expect: "answer",
+    mustInclude: [["Dev"], ["Anika"]],
+    mustNotInclude: ["Priya", "Sam", "Leo"],
+  },
+  {
+    id: "A1",
+    kind: "same-note",
+    question: "Who did I go skiing with in Queenstown?",
+    evidence: ["qtMum", "skiGloves", "ronnieOffer"],
+    expect: "withhold",
+    mustNotInclude: ["Priya", "Sam"],
+  },
+  {
+    id: "Q3c",
+    kind: "recent-person",
+    question: "Has Ronnie had car trouble lately?",
+    evidence: ["ronnieOld", "ronnieOffer", "ronnieSettle"],
+    expect: "withhold",
+    mustNotInclude: ["alternator", "freeway", "re:^\\s*yes"],
+  },
+  {
+    id: "Q3d",
+    kind: "recent-person",
+    question: "Has Ronnie moved into his new home?",
+    evidence: ["ronnieSettle", "ronnieOffer", "ronnieWarming"],
+    expect: "answer",
+    mustInclude: [["keys", "housewarming", "Brunswick"]],
+    mustNotInclude: ["Ronan"],
+  },
+  {
+    id: "R1",
+    kind: "summary",
+    question: "Summarise notes related to Ronnie's new home",
+    evidence: ["ronnieOffer", "priyaWarming", "ronnieSettle"],
+    expect: "safe",
+    mustNotInclude: ["re:(Ronnie|he)\\b[^.]*\\b(repaint|hallway|green)", "re:Ronnie's housewarming"],
   },
   {
     id: "S2",

@@ -16,7 +16,8 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { buildNoteContext, finalizeAnswer, isKnownRefusal, truncateForContext } from "../../services/ai/ragFormatting";
+import { buildNoteContext, finalizeAnswer, isKnownRefusal, isRecencyQuestion, truncateForContext, withinRecentWindow } from "../../services/ai/ragFormatting";
+import { questionForModel } from "../../services/ai/relationshipGrounding";
 import { buildPrompt, CHAT_TEMPLATE_STOP_TOKENS, setRagPromptMode, type RagPromptMode } from "../../services/ai/ragPrompt";
 import {
   buildGroundedQuestion,
@@ -114,7 +115,10 @@ function retrieve(c: RagComparisonCase) {
       CONTEXT_NOTE_LIMIT
     ).map((r) => r.note);
   } else {
+    // rag.ts's "…lately?" handling: the fixed set stands in for the
+    // relevance candidates, then only recent notes are kept.
     notes = (c.evidence ?? []).map((id) => VAULT.find((n) => n.id === id)!);
+    if (isRecencyQuestion(c.question)) notes = withinRecentWindow(notes, NOW).slice(0, CONTEXT_NOTE_LIMIT);
   }
   const built =
     notes.length > 0 ? buildNoteContext(notes.map((n) => ({ id: n.id, content: n.content, transcript: null, createdAt: n.createdAt })), target, { eventTerms }) : null;
@@ -128,6 +132,7 @@ function retrieve(c: RagComparisonCase) {
     context: built && included.length > 0 ? built.contextText : EMPTY_CONTEXT,
     eventEvidence: verification && target ? classifyEventEvidence(memories, target, eventTerms) : null,
     groundedQuestion: verification ? buildGroundedQuestion(c.question, NOW) : c.question,
+    modelQuestion: verification ? buildGroundedQuestion(c.question, NOW) : questionForModel(c.question, built ? built.evidence : [], NOW),
   };
 }
 
@@ -171,7 +176,7 @@ async function main() {
       const rows: Row[] = [];
       for (const c of cases) {
         const r = retrieve(c);
-        const prompt = buildPrompt(r.groundedQuestion, r.context, NOW) + (cfg.noThink ? "<think>\n\n</think>\n\n" : "");
+        const prompt = buildPrompt(r.modelQuestion, r.context, NOW) + (cfg.noThink ? "<think>\n\n</think>\n\n" : "");
         const gen = await runCompletion({ modelPath: cfg.model, prompt, contextSize: 4096, maxTokens: 256, stop: CHAT_TEMPLATE_STOP_TOKENS, repeatPenalty: penalty });
         const raw = gen.text.replace(/^<think>[\s\S]*?<\/think>\s*/, "").trim();
         const refused = isKnownRefusal(raw) || REFUSAL.test(raw);

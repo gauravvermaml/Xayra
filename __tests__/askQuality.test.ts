@@ -1,4 +1,5 @@
-import { buildNoteContext, finalizeAnswer } from "../services/ai/ragFormatting";
+import { buildNoteContext, finalizeAnswer, isRecencyQuestion, RECENT_WINDOW_DAYS, withinRecentWindow } from "../services/ai/ragFormatting";
+import { OPEN_QUESTION_PREFIX, questionForModel, withAccompaniment } from "../services/ai/relationshipGrounding";
 import { buildGroundedQuestion, classifyEventEvidence, detectEventVerification, resolveQueryTemporalTarget } from "../services/ai/temporalResolver";
 import { NOW, VAULT, type VaultNote } from "../scripts/eval/askQualityCorpus";
 
@@ -69,6 +70,67 @@ describe("who / when", () => {
   it("people from another sentence of the note are not taken as companions", () => {
     const trip = custom("ski2", "Booked the Queenstown ski trip for July. I also had lunch with Priya and Sam.", note("qtBook").createdAt);
     expect(outcome("Who did I go skiing with in Queenstown?", [trip], "You went skiing in Queenstown with Priya and Sam.")).toBe("relationship-rejected");
+  });
+
+  it("an accompaniment sentence right after the trip supports the companions", () => {
+    const notes = ["qtBook", "qtBack", "skiGloves"].map(note);
+    expect(outcome("Who did I go skiing with in Queenstown?", notes, "You went skiing with Dev and Anika in Queenstown.")).toBe("shown");
+    expect(outcome("Who came with me to Queenstown?", notes, "Dev and Anika came with you to Queenstown.")).toBe("shown");
+  });
+
+  it("an accompaniment sentence after a DIFFERENT sentence (visiting Mum) is not joined to the trip", () => {
+    expect(outcome("Who did I go skiing with in Queenstown?", [note("qtMum")], "You went skiing in Queenstown with Priya and Sam.")).toBe("relationship-rejected");
+  });
+
+  it.each([
+    ["Dev and Anika are coming with me.", true],
+    ["Went with Dev and Anika.", true],
+    ["Mum is coming with us too.", true],
+    ["Dev isn't coming with me.", false],
+    ["Dev and Anika are coming with me to the concert.", false],
+    ["I had lunch with Priya and Sam.", false],
+  ])("accompaniment shape: %s → joined %s", (sentence, joins) => {
+    const evidence = [
+      { noteId: "n", noteIndex: 0, sentenceIndex: 0, createdAt: 0, text: "Booked the Queenstown ski trip.", dates: [] },
+      { noteId: "n", noteIndex: 0, sentenceIndex: 1, createdAt: 0, text: sentence, dates: [] },
+    ];
+    expect(withAccompaniment(evidence).length).toBe(joins ? 3 : 2);
+  });
+});
+
+describe("general yes/no questions and 'lately'", () => {
+  const RONNIE_ISSUES = ["ronnieBack", "ronnieWork"].map(note);
+  const evidenceFor = (question: string, notes: VaultNote[]) =>
+    buildNoteContext(notes.map((n) => ({ id: n.id, content: n.content, transcript: null, createdAt: n.createdAt })), resolveQueryTemporalTarget(question, NOW)).evidence;
+
+  it("a yes/no question whose words no note holds is asked in open form", () => {
+    const q = "Has Ronnie been having issues lately?";
+    expect(questionForModel(q, evidenceFor(q, RONNIE_ISSUES), NOW)).toBe(`${OPEN_QUESTION_PREFIX}${q}`);
+  });
+
+  it.each([
+    ["Did Ronnie buy a road bike?", ["ronan", "ronnieOffer"]], // the notes hold "road bike" (Ronan's)
+    ["Has Ronnie moved into his new home?", ["ronnieSettle", "ronnieOffer"]], // the notes hold "new home"
+    ["Has Zoe been having issues lately?", ["ronnieBack", "ronnieWork"]], // Zoe is in no note
+    ["What problems has Ronnie had recently?", ["ronnieBack", "ronnieWork"]], // not yes/no
+  ])("is unchanged: %s", (q, ids) => {
+    expect(questionForModel(q, evidenceFor(q, ids.map(note)), NOW)).toBe(q);
+  });
+
+  it("the open-form answer is shown; a 'Yes' is still checked against the original question", () => {
+    const q = "Has Ronnie been having issues lately?";
+    const open = "Your notes indicate that Ronnie has been struggling with back pain since the move and is seeing a physio on Monday.";
+    expect(outcome(q, RONNIE_ISSUES, open)).toBe("shown");
+    expect(outcome(q, RONNIE_ISSUES, "Yes, Ronnie has been struggling with back pain since the move.")).toBe("verification-contradicted");
+  });
+
+  it("'lately' keeps only notes from the last RECENT_WINDOW_DAYS days", () => {
+    expect(isRecencyQuestion("Has Ronnie been having issues lately?")).toBe(true);
+    expect(isRecencyQuestion("What did I do recently?")).toBe(true);
+    expect(isRecencyQuestion("Summarise my latest notes")).toBe(false);
+    const kept = withinRecentWindow(["ronnieBack", "ronnieWork", "ronnieOld"].map(note), NOW).map((n) => n.id);
+    expect(kept).toEqual(["ronnieBack", "ronnieWork"]);
+    expect(RECENT_WINDOW_DAYS).toBe(30);
   });
 });
 

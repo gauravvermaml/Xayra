@@ -338,6 +338,22 @@ export function sanitizeLLMResponse(text: string): string {
   return stripDuplicatedTail(withoutTags);
 }
 
+/** "Has Ronnie been having issues LATELY?" — the question asks about recent
+ * notes, but relevance search ignores dates, so a months-old note was offered
+ * as recent (2.0 report). Such questions keep only notes recorded within
+ * this many days; with none, nothing is shown rather than an old note. */
+export const RECENT_WINDOW_DAYS = 30;
+const RECENCY_WORDING = /\b(?:lately|recently|these\s+days|of\s+late)\b/i;
+
+export function isRecencyQuestion(question: string): boolean {
+  return RECENCY_WORDING.test(question);
+}
+
+export function withinRecentWindow<N extends { createdAt: number }>(notes: N[], now: Date): N[] {
+  const cutoff = now.getTime() / 1000 - RECENT_WINDOW_DAYS * 86_400;
+  return notes.filter((note) => note.createdAt >= cutoff);
+}
+
 /** Shown when retrieval found no relevant notes at all. Same wording
  * `MINIMAL_RAG_SYSTEM_PROMPT` (ragPrompt.ts) trains the model to produce for
  * an empty context, so this case reads identically whether the model or the
