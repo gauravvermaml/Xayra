@@ -193,6 +193,16 @@ customers; rules in `services/billing/`). Still to do:
   the next check.
 - **Existing testers** (1.0.x / 2.0.0) keep all their data; their first new
   note or Ask after updating opens the paywall.
+- **singleTop edge case.** If Xayra is cold-started by an outside `xayra://`
+  link (nothing in the app or its integrations sends one; shortcuts,
+  reminders and the launcher are unaffected), a later launcher tap while the
+  folder picker or Google Play's purchase screen covers Xayra opens a second
+  Xayra screen on top instead of returning to it. Fixing it would mean routing
+  every `xayra://` link through the shortcut trampoline.
+- **Interactive Google sign-in under singleTop** was not re-run on the
+  emulator (the test vault is bound to its test account); backup with the
+  signed-in account was verified. Re-check the account picker on the first
+  Play testing build.
 
 ### Release gate blockers (production stays blocked)
 
