@@ -39,6 +39,9 @@ export const VAULT: VaultNote[] = [
   { id: "moveB", createdAt: at(2026, 10, 5, 19), content: "Maya's move got pushed back, she now moves to Sydney on 28 November." },
   // Same-note combination trap: two sentences that must not be fused.
   { id: "fence", createdAt: at(2026, 10, 18, 17), content: "Kabir painted the back fence on Saturday. Later he dropped his phone in the car park at Bunnings." },
+  // A COMPLETED trip with companions (past tense) and a PLANNED one (future).
+  { id: "qtDone", createdAt: at(2026, 7, 13, 19), content: "Skied Coronet Peak in Queenstown all weekend. Dev and Anika came with me." },
+  { id: "byronPlan", createdAt: at(2026, 10, 10, 12), content: "Booked the Byron Bay surf trip for the first week of December. Dev and Anika are coming with me." },
   // Companions in a NON-adjacent sentence about a different event.
   { id: "qtMum", createdAt: at(2026, 6, 3, 20), content: "Booked the Queenstown ski trip for July. Then visited Mum in Geelong. Priya and Sam came with me." },
   // Pronoun trap: another person's housewarming in the same suburb.
@@ -52,7 +55,7 @@ export type Rubric = string[][];
 
 export type AskQualityCase = {
   id: string;
-  kind: "who-when" | "summary" | "recent-person" | "partial" | "unsupported" | "conflict" | "similar-name" | "temporal" | "same-note" | "simple";
+  kind: "who-when" | "summary" | "recent-person" | "partial" | "unsupported" | "conflict" | "similar-name" | "temporal" | "same-note" | "simple" | "plan";
   question: string;
   evidence?: string[];
   /** "answer": a useful, correct answer should be shown. "withhold": showing any answer would be wrong.
@@ -69,18 +72,16 @@ export const CASES: AskQualityCase[] = [
     kind: "who-when",
     question: "Who and when did I go to Queenstown skiing with?",
     evidence: ["qtBack", "qtBook", "skiGloves"],
-    expect: "answer",
-    mustInclude: [["Dev"], ["Anika"], ["July"]],
-    mustNotInclude: ["Leo", "Sara", "Ronnie"],
+    expect: "safe",
+    mustNotInclude: ["re:(went|skied|go)\\b[^.]*\\bwith\\b[^.]*\\b(Dev|Anika)", "Leo", "Sara", "Ronnie"],
   },
   {
     id: "Q1b",
     kind: "who-when",
     question: "Who did I go skiing with in Queenstown?",
     evidence: ["qtBook", "qtBack", "skiGloves"],
-    expect: "answer",
-    mustInclude: [["Dev"], ["Anika"]],
-    mustNotInclude: ["Leo", "Sara"],
+    expect: "safe",
+    mustNotInclude: ["re:(went|skied|go)\\b[^.]*\\bwith\\b[^.]*\\b(Dev|Anika)", "Leo", "Sara"],
   },
   {
     id: "Q1c",
@@ -199,9 +200,34 @@ export const CASES: AskQualityCase[] = [
     kind: "who-when",
     question: "Who came with me to Queenstown?",
     evidence: ["qtBook", "qtBack", "skiGloves"],
+    expect: "safe",
+    mustNotInclude: ["re:(went|skied|go)\\b[^.]*\\bwith\\b[^.]*\\b(Dev|Anika)", "re:(Dev|Anika)[^.]*\\bcame\\b", "Priya", "Sam", "Leo"],
+  },
+  {
+    id: "Q1e",
+    kind: "who-when",
+    question: "Who did I go skiing with in Queenstown?",
+    evidence: ["qtDone", "skiGloves", "ronnieOffer"],
     expect: "answer",
     mustInclude: [["Dev"], ["Anika"]],
     mustNotInclude: ["Priya", "Sam", "Leo"],
+  },
+  {
+    id: "B1",
+    kind: "plan",
+    question: "Who did I go surfing with in Byron Bay?",
+    evidence: ["byronPlan", "skiGloves", "ronnieOffer"],
+    expect: "safe",
+    mustNotInclude: ["re:(went|surfed)\\b[^.]*\\b(Dev|Anika)", "re:(Dev|Anika)[^.]*\\b(went|surfed|came)\\b"],
+  },
+  {
+    id: "B2",
+    kind: "plan",
+    question: "Who is coming with me to Byron Bay?",
+    evidence: ["byronPlan", "skiGloves", "ronnieOffer"],
+    expect: "answer",
+    mustInclude: [["Dev"], ["Anika"]],
+    mustNotInclude: ["re:\\b(went|surfed)\\b"],
   },
   {
     id: "A1",

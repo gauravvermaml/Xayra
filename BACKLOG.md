@@ -62,21 +62,42 @@ Product constraint that still applies: **no Ask while the phone is locked**
 - **Documented false rejections:** F17, F9, F13 and U6, plus six incomplete
   or off-topic answers (see `PROJECT_STATE_HANDOFF.md` → "RC1 — Grounding
   v1").
-- **Still open after the 2.0 Ask-quality pass** (synthetic set:
-  `scripts/eval/runAskQuality.ts`); each needs coreference or role checking
-  — knowing who "he" refers to, or who did what to whom:
+- **Still open after the 2.0 Ask-quality pass** (synthetic set and real
+  model: `scripts/eval/runAskQuality.ts`; unit cases: `__tests__/askQuality.test.ts`):
   - **Pronoun misattribution (can be shown):** "Ronnie's house has three
     bedrooms and he wants to repaint the hallway green" passes when the
     hallway is in another person's note — a pronoun statement with no name
-    or number isn't tied to any note.
-  - **Role inversion (can be shown):** "he has accepted an offer on a house"
-    for a note saying Ronnie's offer WAS accepted. Statements are checked
-    for shared values and words, not for who did what.
-  - Handled in that pass, narrowly: companions named in an accompaniment
-    sentence right after the event ("…Dev and Anika are coming with me");
-    general yes/no questions the notes can't confirm are asked in open form
-    (the answer is still checked against the original question); "lately" /
-    "recently" keep only notes from the last 30 days (`RECENT_WINDOW_DAYS`).
+    or number isn't tied to any note. Proposed next step: resolve "he"/"she"
+    to the single person named in the previous statement of the same answer.
+  - **Role inversion (can be shown):** "he has accepted an offer" for a note
+    saying Ronnie's offer WAS accepted. The doer check takes the name before
+    the verb, which is wrong for passives: "Ronnie promoted Priya" passes
+    against "Ronnie was promoted by Priya", and the correct "Priya promoted
+    Ronnie" is rejected. Proposed next step: passive-voice awareness (closed
+    auxiliary list + "by"), then the pronoun step above.
+  - **Plan stated as done (can be shown):** with only a booking note,
+    "You went to Byron Bay in the first week of December" is accepted — a
+    future date stated in the past tense. Tense and future dates aren't
+    checked. (Companions from a plan — "…are coming with me" — are not
+    joined, so "You went with Dev and Anika" is rejected.)
+  - **General yes/no questions are model-dependent:** "Has Ronnie been
+    having issues lately?" is asked in open form ("What do my notes say
+    about whether…"), which stopped the model opening with "Yes". With three
+    notes in context the answer still often fails validation, correctly — it
+    merges facts from two notes into one clause, adds "no other issues are
+    mentioned", or moves a date to the wrong fact. The wh-form ("What
+    problems has Ronnie had recently?") is reliable.
+  - **"Lately" window is fixed at 30 days** (`RECENT_WINDOW_DAYS`); explicit
+    dates in the question take precedence. When nothing falls in the window
+    the generic no-notes or unverified message appears — a dedicated "nothing
+    in the last 30 days" message would be clearer.
+  - **Date parsing (pre-existing):** "since September" is read as September
+    only, and "the past few months" as July only (`queryDateRange.ts`).
+  - Handled in that pass: multi-note summaries; year-less dates must be
+    stated; partial answers ("…don't mention how much the cabin cost");
+    past-tense accompaniment sentences ("Dev and Anika came with me");
+    yes/no questions a "Yes" can't verify are asked in open form; "lately"
+    keeps notes from the last 30 days.
 - **Constraint:** Grounding v1 is frozen. Change it only for an identified
   release-blocking failure. Validators validate and never rewrite; an
   unsupported answer is withheld, never fabricated or turned into "No".

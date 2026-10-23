@@ -323,15 +323,18 @@ function parseEvidence(sentence: EvidenceSentence, lexicon: Set<string>): Parsed
 // ---------------------------------------------------------------------------
 
 const NAME_LIST = String.raw`[A-Z][a-z]+(?:(?:,\s*|,?\s+and\s+)[A-Z][a-z]+)*`;
-/** A sentence that only says who came along — "Dev and Anika are coming
- * with me.", "Went with Dev and Anika." — and nothing else. A closed
- * grammatical pattern (come/go/join, with me/us), never a word list: any
- * other content ("had lunch with Priya and Sam") does not match. */
+/** A sentence that only says who came along — "Dev and Anika came with
+ * me.", "Went with Dev and Anika." — and nothing else. A closed grammatical
+ * pattern (came/went/joined, with me/us), never a word list: any other
+ * content ("had lunch with Priya and Sam") does not match.
+ *
+ * Past tense only. A plan — "Dev and Anika are coming with me" in a note
+ * that booked a trip — is not evidence that they went, and joining it let
+ * "You went surfing with Dev and Anika" pass for a trip that hadn't
+ * happened yet. */
 const ACCOMPANIMENT = [
-  new RegExp(
-    String.raw`^${NAME_LIST}\s+(?:(?:is|are|was|were|will\s+be)\s+)?(?:coming|going|came|went|joining|joined|will\s+join)\s+(?:along\s+)?(?:with\s+)?(?:me|us)(?:\s+too|\s+as\s+well)?[.!]?$`
-  ),
-  new RegExp(String.raw`^(?:(?:I|We)\s+(?:(?:am|was|are|were|will\s+be)\s+)?)?(?:[Gg]oing|[Ww]ent|[Cc]ame|[Cc]oming)\s+(?:along\s+)?with\s+${NAME_LIST}(?:\s+too)?[.!]?$`),
+  new RegExp(String.raw`^${NAME_LIST}\s+(?:came|went|joined)\s+(?:along\s+)?(?:with\s+)?(?:me|us)(?:\s+too|\s+as\s+well)?[.!]?$`),
+  new RegExp(String.raw`^(?:(?:I|We)\s+)?(?:[Ww]ent|[Cc]ame)\s+(?:along\s+)?with\s+${NAME_LIST}(?:\s+too)?[.!]?$`),
 ];
 
 /**
@@ -358,19 +361,37 @@ export function withAccompaniment(evidence: EvidenceSentence[]): EvidenceSentenc
 // ---------------------------------------------------------------------------
 
 /** "What do my notes say about this: …" — the open form a general yes/no
- * question is put to the model in (see questionForModel). */
+ * question is put to the model in when it isn't shaped "Has Ronnie …?" (see
+ * questionForModel). */
 export const OPEN_QUESTION_PREFIX = "What do my notes say about this: ";
+
+/** "Has Ronnie been having issues lately?" → auxiliary, name, the rest. A
+ * one-word name only: "Did Dr Patel…" keeps the prefix form rather than
+ * becoming "whether Dr did Patel…". */
+const AUX_NAME_QUESTION = /^\s*(did|was|were|is|are|have|has|had|do|does)\s+([A-Z][a-z]+)\s+(?=[a-z])(.+?)\s*\??\s*$/;
+
+/** "What do my notes say about whether Ronnie has been having issues
+ * lately?" — measured on the production model: with three notes in context
+ * it opened with "Yes" 0 times in 5, against 3 in 5 for the prefix form. */
+function openForm(question: string): string {
+  const m = question.replace(/^\s*[A-Z]/, (c) => c.toLowerCase()).match(AUX_NAME_QUESTION);
+  return m ? `What do my notes say about whether ${m[2]} ${m[1].toLowerCase()} ${m[3]}?` : `${OPEN_QUESTION_PREFIX}${question}`;
+}
 
 /**
  * The question as the model is asked it, for a question that names no date.
- * Normally unchanged. A yes/no question whose own words ("issues",
- * "lately") appear in NO shown sentence can never have its "Yes" verified
- * (checkAffirmativeAnswer), yet the model opens with "Yes" and the whole
- * answer was withheld ("Has Ronnie been having issues lately?", 2.0 report).
- * When the person it asks about IS in the notes, the model is asked what the
- * notes say instead — the answer is still validated against the ORIGINAL
- * question, so a "Yes" remains guarded. Questions whose words the notes do
- * hold ("Did Ronnie buy a road bike?" next to Ronan's bike) are unchanged.
+ * Normally unchanged. When the existing "Yes" check (checkAffirmativeAnswer)
+ * would reject ANY "Yes" to a yes/no question — no shown sentence states
+ * what it asks ("Has Ronnie been having issues lately?" over notes about his
+ * back pain and work) — the model still opened with "Yes" and the whole
+ * answer was withheld (2.0 report). The model is then asked what the notes
+ * say instead (openForm). The answer is still validated against the
+ * ORIGINAL question, so a "Yes" remains guarded.
+ *
+ * Only when the person asked about is in the notes, and every shown sentence
+ * holding the question's own words names that person: "Did Ronnie buy a road
+ * bike?" next to RONAN's bike is unchanged — asked openly, the model
+ * speculated they were "likely the same person".
  */
 export function questionForModel(question: string, evidence: EvidenceSentence[], now: Date): string {
   if (!YES_NO_QUESTION.test(question)) return question;
@@ -381,10 +402,12 @@ export function questionForModel(question: string, evidence: EvidenceSentence[],
     (t) => !FUNCTION_WORDS.has(t) && !CALENDAR_WORDS.has(t) && !askedNames.some((n) => stem(n) === t)
   );
   if (predicates.length === 0) return question;
-  const evidenceTerms = evidence.flatMap((s) => contentTerms(s.text));
-  if (predicates.some((p) => hasTerm(evidenceTerms, p))) return question;
-  const namedInNotes = evidence.some((s) => namesOf(tokensOf(s.text, lexicon)).some((n) => askedNames.includes(n.name)));
-  return namedInNotes ? `${OPEN_QUESTION_PREFIX}${question}` : question;
+  const names = (s: EvidenceSentence) => namesOf(tokensOf(s.text, lexicon)).map((n) => n.name);
+  if (!evidence.some((s) => names(s).some((n) => askedNames.includes(n)))) return question;
+  const holdsQuestionWords = evidence.filter((s) => predicates.some((p) => hasTerm(contentTerms(s.text), p)));
+  if (!holdsQuestionWords.every((s) => askedNames.every((n) => names(s).includes(n)))) return question;
+  const yesUnverifiable = checkAffirmativeAnswer({ answer: "Yes.", question, evidence, now, comparative: false }) !== null;
+  return yesUnverifiable ? openForm(question) : question;
 }
 
 // ---------------------------------------------------------------------------

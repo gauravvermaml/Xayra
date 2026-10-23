@@ -72,10 +72,9 @@ describe("who / when", () => {
     expect(outcome("Who did I go skiing with in Queenstown?", [trip], "You went skiing in Queenstown with Priya and Sam.")).toBe("relationship-rejected");
   });
 
-  it("an accompaniment sentence right after the trip supports the companions", () => {
-    const notes = ["qtBook", "qtBack", "skiGloves"].map(note);
-    expect(outcome("Who did I go skiing with in Queenstown?", notes, "You went skiing with Dev and Anika in Queenstown.")).toBe("shown");
-    expect(outcome("Who came with me to Queenstown?", notes, "Dev and Anika came with you to Queenstown.")).toBe("shown");
+  it("a past-tense accompaniment sentence right after the trip supports the companions", () => {
+    const notes = ["qtDone", "skiGloves"].map(note);
+    expect(outcome("Who did I go skiing with in Queenstown?", notes, "You went skiing in Queenstown with Dev and Anika.")).toBe("shown");
   });
 
   it("an accompaniment sentence after a DIFFERENT sentence (visiting Mum) is not joined to the trip", () => {
@@ -83,11 +82,13 @@ describe("who / when", () => {
   });
 
   it.each([
-    ["Dev and Anika are coming with me.", true],
+    ["Dev and Anika came with me.", true],
     ["Went with Dev and Anika.", true],
-    ["Mum is coming with us too.", true],
-    ["Dev isn't coming with me.", false],
-    ["Dev and Anika are coming with me to the concert.", false],
+    ["Mum came with us too.", true],
+    ["Dev and Anika are coming with me.", false], // a plan, not evidence they went
+    ["Mum will join us.", false],
+    ["Dev didn't come with me.", false],
+    ["Dev and Anika came with me to the concert.", false],
     ["I had lunch with Priya and Sam.", false],
   ])("accompaniment shape: %s → joined %s", (sentence, joins) => {
     const evidence = [
@@ -98,19 +99,60 @@ describe("who / when", () => {
   });
 });
 
+describe("planned vs completed events (no event-status engine; regression only)", () => {
+  const PLAN = [note("byronPlan")]; // "Booked the Byron Bay surf trip for the first week of December. Dev and Anika are coming with me."
+
+  it("a plan stated as a plan is shown", () => {
+    expect(outcome("Who is coming with me to Byron Bay?", PLAN, "Dev and Anika are coming with you to Byron Bay in the first week of December.")).toBe("shown");
+  });
+
+  it("planned companions are not shown as having gone", () => {
+    expect(outcome("Who did I go surfing with in Byron Bay?", PLAN, "You went surfing in Byron Bay with Dev and Anika.")).toBe("relationship-rejected");
+  });
+
+  it("a booking note's recording day is not the trip date", () => {
+    expect(outcome("When did I go to Byron Bay?", PLAN, "You went to Byron Bay on Saturday, October 10, 2026.")).toBe("relationship-rejected");
+    const both = ["qtBook", "qtBack"].map(note);
+    expect(outcome("When did I go to Queenstown?", both, "You went to Queenstown on Tuesday, June 2, 2026.")).toBe("relationship-rejected");
+  });
+
+  it("with the completion note too, the planned period and the return day are shown", () => {
+    const both = ["qtBook", "qtBack"].map(note);
+    expect(outcome("When did I go to Queenstown?", both, "You went to Queenstown in the second week of July.")).toBe("shown");
+    expect(outcome("When did I go to Queenstown?", both, "You got back from Queenstown on Tuesday, July 14, 2026.")).toBe("shown");
+  });
+
+  // Known limitation (BACKLOG): with ONLY a plan, "You went to Byron Bay in the
+  // first week of December" is still accepted — tense and future dates aren't
+  // checked. Not pinned here, so a future fix doesn't have to break a test.
+});
+
 describe("general yes/no questions and 'lately'", () => {
   const RONNIE_ISSUES = ["ronnieBack", "ronnieWork"].map(note);
   const evidenceFor = (question: string, notes: VaultNote[]) =>
     buildNoteContext(notes.map((n) => ({ id: n.id, content: n.content, transcript: null, createdAt: n.createdAt })), resolveQueryTemporalTarget(question, NOW)).evidence;
 
-  it("a yes/no question whose words no note holds is asked in open form", () => {
+  it("a yes/no question no shown sentence can confirm is asked in open form", () => {
     const q = "Has Ronnie been having issues lately?";
+    const open = "What do my notes say about whether Ronnie has been having issues lately?";
+    expect(questionForModel(q, evidenceFor(q, RONNIE_ISSUES), NOW)).toBe(open);
+    // Also with a third same-day note in context, and when a note does use the word "issue".
+    expect(questionForModel(q, evidenceFor(q, [...RONNIE_ISSUES, note("ronnieWarming")]), NOW)).toBe(open);
+    const landlord = custom("landlord", "Ronnie mentioned an issue with his landlord about the bond.", note("ronnieBack").createdAt);
+    expect(questionForModel(q, evidenceFor(q, [landlord, ...RONNIE_ISSUES]), NOW)).toBe(open);
+  });
+
+  it("a question not shaped 'Has <Name> …' keeps the prefix form", () => {
+    const q = "Is Ronnie's back getting better lately?";
     expect(questionForModel(q, evidenceFor(q, RONNIE_ISSUES), NOW)).toBe(`${OPEN_QUESTION_PREFIX}${q}`);
+    const patel = custom("patel", "Dr Patel said my knee is just a mild sprain.", note("ronnieBack").createdAt);
+    const p = "Did Dr Patel prescribe painkillers?";
+    expect(questionForModel(p, evidenceFor(p, [patel]), NOW)).toBe(`${OPEN_QUESTION_PREFIX}${p}`);
   });
 
   it.each([
     ["Did Ronnie buy a road bike?", ["ronan", "ronnieOffer"]], // the notes hold "road bike" (Ronan's)
-    ["Has Ronnie moved into his new home?", ["ronnieSettle", "ronnieOffer"]], // the notes hold "new home"
+    ["Did Ronnie get the keys to his new home?", ["ronnieSettle", "ronnieOffer"]], // a "Yes" can be verified
     ["Has Zoe been having issues lately?", ["ronnieBack", "ronnieWork"]], // Zoe is in no note
     ["What problems has Ronnie had recently?", ["ronnieBack", "ronnieWork"]], // not yes/no
   ])("is unchanged: %s", (q, ids) => {
