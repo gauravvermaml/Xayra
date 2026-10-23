@@ -435,10 +435,32 @@ describe("native shortcuts config (plugins/withAppShortcuts.js)", () => {
     expect(xml).not.toContain('android:targetClass="com.anonymous.silentconfidant.MainActivity"');
     const kt = withAppShortcuts.buildTrampolineKotlin("com.anonymous.silentconfidant.dev");
     expect(kt).toContain("package com.anonymous.silentconfidant.dev");
-    expect(kt).toContain("Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)");
+    // singleTop MainActivity: CLEAR_TOP | SINGLE_TOP reuse the running
+    // instance (onNewIntent, no remount) exactly as singleTask did; CLEAR_TASK
+    // — which re-created MainActivity — is never used.
+    expect(kt).toContain("Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP");
     expect(kt).toContain('data.host == "shortcut"');
-    expect(kt).not.toMatch(/FLAG_ACTIVITY_CLEAR_(TASK|TOP)/); // never re-clears Xayra's own task
+    expect(kt).not.toMatch(/FLAG_ACTIVITY_CLEAR_TASK/);
     expect(kt).toContain("finish()");
+  });
+
+  it("MainActivity is singleTop, so returning from the launcher never clears Google Play's purchase screen", () => {
+    const manifest = {
+      manifest: {
+        application: [{ $: { "android:name": ".MainApplication" }, activity: [{ $: { "android:name": ".MainActivity", "android:launchMode": "singleTask" }, "intent-filter": [{ action: [{ $: { "android:name": "android.intent.action.MAIN" } }], category: [{ $: { "android:name": "android.intent.category.LAUNCHER" } }] }] }] }],
+      },
+    };
+    const { withAndroidManifest } = require("@expo/config-plugins");
+    let captured: unknown = null;
+    const config = withAppShortcuts({ name: "Xayra", slug: "x", scheme: "xayra", android: { package: "com.anonymous.silentconfidant" } });
+    // Run only the manifest mod against a minimal manifest.
+    const mod = config.mods?.android?.manifest;
+    expect(typeof mod).toBe("function");
+    return mod({ ...config, modResults: manifest, modRequest: { platform: "android" } }).then((result: { modResults: typeof manifest }) => {
+      captured = result.modResults.manifest.application[0].activity.find((a: { $: Record<string, string> }) => a.$["android:name"] === ".MainActivity");
+      expect((captured as { $: Record<string, string> }).$["android:launchMode"]).toBe("singleTop");
+      expect(withAndroidManifest).toBeDefined();
+    });
   });
 
   it("production and Xayra Dev shortcuts each target only their own package and scheme", () => {
