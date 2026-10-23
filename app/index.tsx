@@ -46,6 +46,7 @@ import { useToDos } from "../hooks/useToDos";
 import { asrRouter } from "../services/ai/asrRouter";
 import { cancelActiveLlamaCompletion } from "../services/ai/localLlama";
 import { devTiming } from "../services/ai/perf";
+import { ensurePremium } from "../services/billing/premium";
 import { checkVoiceReady } from "../services/ai/voiceReadiness";
 import { discardVoiceAskReservation, reserveVoiceAsk, type VoiceAskReservation } from "../services/ai/voiceAsk";
 import { ProcessingJob } from "../services/ai/processingJob";
@@ -1520,6 +1521,9 @@ export default function HomeScreen() {
   const startManualUtterance = useCallback(
     async (mode: UtteranceMode) => {
       setError(null);
+      // Xayra Premium: new notes and Ask. Without it the paywall opens and
+      // nothing starts (central tap and launcher shortcuts both land here).
+      if (!(await ensurePremium(mode === "ask" ? "ask" : "record"))) return;
       // No speech model yet → no recording at all (it could only fail to
       // transcribe, losing the spoken note); typing works meanwhile.
       const voice = await checkVoiceReady();
@@ -1744,6 +1748,8 @@ export default function HomeScreen() {
     }
     endComposingForCapture();
     void (async () => {
+      // Xayra Premium: turning Handsfree on. Turning it off is always allowed.
+      if (!(await ensurePremium("handsfree"))) return;
       const voice = await checkVoiceReady();
       if (!voice.ready) {
         setError(voice.message);
@@ -2005,7 +2011,10 @@ export default function HomeScreen() {
   }, []);
 
   const handleSubmitText = useCallback(
-    (text: string) => {
+    async (text: string) => {
+      // Xayra Premium: typed notes and typed Ask. The typed text stays in the
+      // field when the paywall opens instead.
+      if (!(await ensurePremium(inputMode === "ask" ? "ask" : "record"))) return;
       setInputText("");
       setIsComposing(false);
       const job = beginJob();

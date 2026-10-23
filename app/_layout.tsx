@@ -6,12 +6,14 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import * as SplashScreen from "expo-splash-screen";
 
 import { AppSplashScreen, releaseNativeSplash } from "../components/AppSplashScreen";
+import { PaywallHost } from "../components/billing/Paywall";
 import { DisposableVaultBanner } from "../components/DisposableVaultBanner";
 import { RecoverNotesFlow } from "../components/RecoverNotesFlow";
 import { resolveVaultMode, type VaultMode } from "../services/dev/disposableVault";
 import { clearRecoveryRecord, readRecoveryPhase } from "../services/recovery/originalVaultRecovery";
 import { cancelStaleDisposableReminders, reconcileToDoNotifications } from "../services/notifications/todoNotifications";
 import { listAllToDos } from "../services/todos/todoManager";
+import { initPremium } from "../services/billing/premium";
 import { OnboardingSetupScreen } from "../components/OnboardingSetupScreen";
 import { showToast, ToastHost } from "../components/Toast";
 import { releaseLocalLlamaOnBackground } from "../services/ai/localLlama";
@@ -251,6 +253,9 @@ export default function RootLayout() {
       // Only now may the download notification ask for permission: earlier,
       // its dialog would cancel the vault's fingerprint prompt.
       allowDownloadNotificationPermissionPrompt();
+      // Xayra Premium status (anonymous RevenueCat customer). Only after
+      // unlock; free features never wait for it.
+      void initPremium().catch(() => {});
     }
   }, [vaultOpen]);
 
@@ -302,6 +307,8 @@ export default function RootLayout() {
           feedback (see utils/clipboard.ts) renders on the same overlay,
           above whichever screen or modal is currently on top. */}
       <ToastHost />
+      {/* The one Premium paywall, above every screen of the main app. */}
+      {setupComplete === true ? <PaywallHost /> : null}
       {vaultMode === "disposable" ? <DisposableVaultBanner /> : null}
     </GestureHandlerRootView>
   );

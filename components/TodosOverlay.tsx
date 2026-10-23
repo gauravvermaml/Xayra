@@ -19,6 +19,7 @@ import { useToDos } from "../hooks/useToDos";
 import { matchesKeywordSearch } from "../services/search/keywordMatch";
 import type { ToDo } from "../services/todos/todoManager";
 import { userFacingMessage } from "../services/errors/userMessage";
+import { ensurePremium } from "../services/billing/premium";
 
 /** How long the checked-off row stays gone-but-not-yet-really-completed
  * before its "Undo" window expires and the DB write actually happens. */
@@ -198,8 +199,10 @@ export function TodosOverlay({ onClose, backRef }: TodosOverlayProps) {
   // worked at all without leaving the app to check Google Calendar
   // directly.
   const handleSendToCalendar = useCallback(
-    (item: ToDo) => {
+    async (item: ToDo) => {
       const wasLinked = Boolean(item.googleCalendarEventId);
+      // Xayra Premium: sending to Calendar. Removing an existing link stays free.
+      if (!wasLinked && !(await ensurePremium("calendar"))) return;
       const runAction = () => {
         const action = wasLinked ? removeToDoFromCalendar(item.id) : sendToDoToCalendar(item.id);
         action
@@ -358,7 +361,9 @@ export function TodosOverlay({ onClose, backRef }: TodosOverlayProps) {
           </View>
 
           <TouchableOpacity
-            onPress={() => setIsAddVisible(true)}
+            // Xayra Premium: new to-dos. Editing, completing and deleting
+            // existing ones stay free.
+            onPress={() => void ensurePremium("todo").then((ok) => ok && setIsAddVisible(true))}
             hitSlop={12}
             activeOpacity={0.6}
             style={styles.headerButton}
