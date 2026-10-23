@@ -141,3 +141,70 @@ describe("several phones' backups (heads), newest first", () => {
     expect(planNoteRestore([phone], [newest], backups([newest], [phone])).updates).toEqual([newest]);
   });
 });
+
+describe("exact-version protection: a phone record is replaced only when its exact current version is in a verified backup", () => {
+  it("same id, different text that is in no backup → kept (matching id is not enough)", () => {
+    const phone = note("n1", "phone text, never backed up", 150);
+    const plan = planNoteRestore([phone], [note("n1", "cloud text", 300)], backups([note("n1", "an older backed-up text", 100), note("n1", "cloud text", 300)]));
+    expect(plan).toEqual({ updates: [], conflicts: [{ id: "n1", reason: "phone-change-not-backed-up" }] });
+  });
+
+  it("same to-do text but a different reminder time on the phone, not backed up → kept", () => {
+    const phone = todo("t1", "Call Mum", 1_500, { notificationTime: "18:00" });
+    const backedUpVersion = todo("t1", "Call Mum", 1_000, { notificationTime: "09:00" });
+    const cloud = todo("t1", "Call Mum about Sunday", 2_000);
+    const plan = planToDoRestore([phone], [cloud], backups([backedUpVersion], [cloud]));
+    expect(plan.conflicts).toEqual([{ id: "t1", reason: "phone-change-not-backed-up" }]);
+  });
+
+  it.each([
+    ["isCompleted", { isCompleted: true }],
+    ["recurrence", { recurrence: "weekly" }],
+    ["actionDate", { actionDate: "2026-12-01" }],
+    ["noteId", { noteId: "n9" }],
+  ] as [string, Partial<ToDoVersion>][])("a phone-only change to %s alone is protected", (_field, change) => {
+    const phone = todo("t1", "Same text", 1_500, change);
+    const cloud = todo("t1", "Same text, edited elsewhere", 2_000);
+    expect(planToDoRestore([phone], [cloud], backups([todo("t1", "Same text", 1_000)], [cloud])).updates).toEqual([]);
+  });
+
+  it("a phone edit made after the last backup → kept", () => {
+    const lastBackedUp = note("n1", "as backed up", 100);
+    const phone = note("n1", "edited since the last backup", 250);
+    const cloud = note("n1", "edited on another phone", 300);
+    expect(planNoteRestore([phone], [cloud], backups([lastBackedUp], [cloud])).conflicts).toEqual([{ id: "n1", reason: "phone-change-not-backed-up" }]);
+  });
+
+  it("indexing moved the phone's timestamp but not its text: a newer backup version still replaces it; an older one doesn't", () => {
+    const backedUpText = note("n1", "unchanged text", 100);
+    const phoneAfterIndexing = note("n1", "unchanged text", 500); // updated_at moved by a status change
+    const newer = note("n1", "newer edit", 600);
+    expect(planNoteRestore([phoneAfterIndexing], [newer], backups([backedUpText], [newer])).updates).toEqual([newer]);
+    // An edit made elsewhere at 300 looks older than the indexing time: kept
+    // (fail closed — nothing is lost, it stays in the backup).
+    const older = note("n1", "edit at 300", 300);
+    expect(planNoteRestore([phoneAfterIndexing], [older], backups([backedUpText], [older]))).toEqual({ updates: [], conflicts: [] });
+  });
+
+  describe("several verified backups with different versions", () => {
+    const v1 = note("n1", "version 1", 100);
+    const v2 = note("n1", "version 2", 200);
+    const v3 = note("n1", "version 3", 300);
+
+    it("the phone holds an older backed-up version → replaced by the newest", () => {
+      expect(planNoteRestore([v1], [v3], backups([v3], [v2], [v1])).updates).toEqual([v3]);
+    });
+
+    it("the phone holds a version in none of them → kept", () => {
+      expect(planNoteRestore([note("n1", "phone only", 150)], [v3], backups([v3], [v2], [v1])).conflicts).toEqual([
+        { id: "n1", reason: "phone-change-not-backed-up" },
+      ]);
+    });
+
+    it("two backups disagree at the same time → nothing replaced (which is newer can't be known)", () => {
+      const a = note("n1", "phone A's text", 300);
+      const b = note("n1", "phone B's text", 300);
+      expect(planNoteRestore([v1], [a], backups([a], [b], [v1]))).toEqual({ updates: [], conflicts: [{ id: "n1", reason: "backups-disagree" }] });
+    });
+  });
+});

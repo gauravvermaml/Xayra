@@ -15,11 +15,11 @@ let mockBeforeReread: ((id: unknown) => void) | null = null;
 const mockTodoDb: FakeDb = {
   execute: async (query: string, params: unknown[] = []) => {
     const q = query.replace(/\s+/g, " ").trim();
-    if (q.startsWith("SELECT id, text, action_date")) return { rows: mockTodoRows.map((r) => ({ ...r })) };
-    if (q === "SELECT updated_at FROM todos WHERE id = ?") {
+    if (q.startsWith("SELECT id, text, action_date") && q.endsWith("FROM todos")) return { rows: mockTodoRows.map((r) => ({ ...r })) };
+    if (q.startsWith("SELECT id, text, action_date") && q.endsWith("WHERE id = ?")) {
       mockBeforeReread?.(params[0]);
       const row = mockTodoRows.find((r) => r.id === params[0]);
-      return { rows: row ? [{ updated_at: row.updated_at }] : [] };
+      return { rows: row ? [{ ...row }] : [] };
     }
     if (q.startsWith("UPDATE todos SET text = ?")) {
       const row = mockTodoRows.find((r) => r.id === params[9]);
@@ -53,7 +53,7 @@ const mockTodoDb: FakeDb = {
 
 const mockNotesDbWithHook: FakeDb = {
   execute: async (query: string, params: unknown[] = []) => {
-    if (/^SELECT rowid, updated_at FROM notes WHERE id = \?/.test(query.trim())) mockBeforeReread?.(params[0]);
+    if (/^SELECT rowid, content, transcript, updated_at FROM notes WHERE id = \?/.test(query.trim())) mockBeforeReread?.(params[0]);
     return mockNotes.db.execute(query, params);
   },
   transaction: (fn) => mockNotes.db.transaction(() => fn({ execute: (q, p) => mockNotesDbWithHook.execute(q, p) })),
@@ -164,6 +164,18 @@ describe("notes", () => {
     expect(mockNotes.getRows().map((r) => r.id)).toEqual(["kept"]);
   });
 
+  it("an edit in the SAME SECOND as the restore (timestamp unchanged) is still left alone — the text is compared, not just the time", async () => {
+    const { applyNewerNotesFromBackup } = require("../services/notes/noteManager");
+    seedNote("n1", "old", 100, 1);
+    mockBeforeReread = (id) => {
+      Object.assign(mockNotes.getRows().find((r) => r.id === id)!, { content: "edited this second" }); // updated_at stays 100
+    };
+    const cloud = v("n1", "cloud", 200);
+    expect((await applyNewerNotesFromBackup([cloud], versionsById([[v("n1", "old", 100)], [cloud]]))).updated).toBe(0);
+    expect(mockNotes.getRows()[0].content).toBe("edited this second");
+    expect(mockNotes.getEmbeddings()).toHaveLength(1);
+  });
+
   it("a note edited on the phone while the restore runs is left alone", async () => {
     const { applyNewerNotesFromBackup } = require("../services/notes/noteManager");
     seedNote("n1", "old", 100, 1);
@@ -249,6 +261,16 @@ describe("to-dos", () => {
     expect(result.updated).toBe(0);
     expect(result.conflicts.map((c: { reason: string }) => c.reason).sort()).toEqual(["backup-has-no-time", "same-time-different-content"]);
     expect(mockTodoRows.map((r) => r.text)).toEqual(["phone", "phone", "phone"]);
+    expect(mockSchedule).not.toHaveBeenCalled();
+  });
+
+  it("a to-do field changed without a timestamp change while the restore runs is left alone", async () => {
+    const { applyNewerToDosFromBackup } = require("../services/todos/todoManager");
+    mockTodoRows = [row("t1", "Call Mum", 1_000)];
+    mockBeforeReread = (id) => Object.assign(mockTodoRows.find((r) => r.id === id)!, { notification_time: "18:00" }); // updated_at stays 1000
+    const cloud = t("t1", "Call Mum about Sunday", 2_000);
+    expect((await applyNewerToDosFromBackup([cloud], versionsById([[t("t1", "Call Mum", 1_000)], [cloud]]))).updated).toBe(0);
+    expect(mockTodoRows[0]).toMatchObject({ text: "Call Mum", notification_time: "18:00" });
     expect(mockSchedule).not.toHaveBeenCalled();
   });
 

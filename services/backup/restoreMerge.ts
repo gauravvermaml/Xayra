@@ -12,6 +12,8 @@
  *  - The phone's copy is newer → keep it.
  *  - Same timestamp, different content → keep the phone's; reported as a
  *    conflict, never silently overwritten.
+ *  - Two verified backups hold different versions at the same time → keep
+ *    the phone's (which is newer can't be known).
  *  - The backup's copy is newer (or the phone's has no timestamp — it hasn't
  *    changed since timestamps existed) → replace, BUT only when the phone's
  *    current version is itself in one of the verified backups just read.
@@ -44,7 +46,7 @@ export type ToDoVersion = {
   updatedAt?: number | null;
 };
 
-export type RestoreConflictReason = "same-time-different-content" | "backup-has-no-time" | "phone-change-not-backed-up";
+export type RestoreConflictReason = "same-time-different-content" | "backup-has-no-time" | "phone-change-not-backed-up" | "backups-disagree";
 export type RestoreConflict = { id: string; reason: RestoreConflictReason };
 
 export type RestorePlan<R> = { updates: R[]; conflicts: RestoreConflict[] };
@@ -127,7 +129,14 @@ function plan<R extends { id: string; updatedAt?: number | null }>(
       conflicts.push({ id: theirs.id, reason: "same-time-different-content" });
       continue;
     }
-    if ((backedUp.get(theirs.id) ?? []).some((version) => same(version, ours))) {
+    // Two verified backups with DIFFERENT versions at the same time: which
+    // is newer isn't known, so nothing is replaced.
+    const versions = backedUp.get(theirs.id) ?? [];
+    if (versions.some((version) => time(version.updatedAt) === t && !same(version, theirs))) {
+      conflicts.push({ id: theirs.id, reason: "backups-disagree" });
+      continue;
+    }
+    if (versions.some((version) => same(version, ours))) {
       updates.push(theirs);
     } else {
       conflicts.push({ id: theirs.id, reason: "phone-change-not-backed-up" });

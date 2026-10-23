@@ -3,7 +3,7 @@ import * as Crypto from "expo-crypto";
 import { getRawDatabase } from "../../db/client";
 import { DEFAULT_NOTIFICATION_TIME, type Recurrence } from "../../db/schema";
 import { cancelToDoNotification, scheduleToDoNotification } from "../notifications/todoNotifications";
-import { planToDoRestore, type RestoreConflict, type ToDoVersion } from "../backup/restoreMerge";
+import { planToDoRestore, sameToDo, type RestoreConflict, type ToDoVersion } from "../backup/restoreMerge";
 import { createCalendarEvent, deleteCalendarEvent, updateCalendarEvent } from "../sync/calendarSync";
 
 export type ToDo = {
@@ -504,7 +504,7 @@ export async function applyNewerToDosFromBackup(
       "SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, note_id, updated_at, created_at FROM todos"
     )
   ).rows;
-  const local: ToDoVersion[] = rows.map((row) => ({
+  const toVersion = (row: Record<string, unknown>): ToDoVersion => ({
     id: String(row.id),
     text: String(row.text),
     actionDate: String(row.action_date),
@@ -515,16 +515,27 @@ export async function applyNewerToDosFromBackup(
     recurrenceInterval: Number(row.recurrence_interval),
     noteId: (row.note_id as string | null) ?? null,
     updatedAt: row.updated_at == null ? null : Number(row.updated_at),
-  }));
+  });
+  const local = rows.map((row) => toVersion(row as Record<string, unknown>));
   const { updates, conflicts } = planToDoRestore(local, remote, backedUp);
   if (updates.length === 0) return { updated: 0, conflicts };
-  const planned = new Map(local.map((t) => [t.id, t.updatedAt ?? null]));
+  const planned = new Map(local.map((t) => [t.id, t]));
   const createdAt = new Map(rows.map((row) => [String(row.id), String(row.created_at ?? "")]));
   const replaced: ToDoVersion[] = [];
   await db.transaction(async (tx) => {
     for (const todo of updates) {
-      const row = (await tx.execute("SELECT updated_at FROM todos WHERE id = ?", [todo.id])).rows[0];
-      if (!row || (row.updated_at == null ? null : Number(row.updated_at)) !== planned.get(todo.id)) continue;
+      // Exact-version check at write time: every field this update would
+      // overwrite, plus updated_at, must still be what was found in a
+      // verified backup — otherwise the to-do changed here and is kept.
+      const row = (
+        await tx.execute(
+          "SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, note_id, updated_at FROM todos WHERE id = ?",
+          [todo.id]
+        )
+      ).rows[0];
+      const was = planned.get(todo.id);
+      const current = row ? toVersion(row as Record<string, unknown>) : null;
+      if (!was || !current || !sameToDo(current, was) || (current.updatedAt ?? null) !== (was.updatedAt ?? null)) continue;
       await tx.execute(
         `UPDATE todos SET text = ?, action_date = ?, to_date = ?, notification_time = ?, is_completed = ?, recurrence = ?,
            recurrence_interval = ?, note_id = ?, updated_at = ? WHERE id = ?`,

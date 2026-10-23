@@ -12,7 +12,7 @@ import { setPipelineStage } from "../ai/pipelineStage";
 import { extractToDosFromText } from "../ai/transformationEngine";
 import { addToDo } from "../todos/todoManager";
 import { redactForLog } from "../logging/redact";
-import { planNoteRestore, type NoteVersion, type RestoreConflict } from "../backup/restoreMerge";
+import { planNoteRestore, sameNote, type NoteVersion, type RestoreConflict } from "../backup/restoreMerge";
 
 export type Note = {
   id: string;
@@ -556,13 +556,21 @@ export async function applyNewerNotesFromBackup(
   const local = await listNoteRevisions();
   const { updates, conflicts } = planNoteRestore(local, remote, backedUp);
   if (updates.length === 0) return { updated: 0, conflicts };
-  const planned = new Map(local.map((n) => [n.id, n.updatedAt]));
+  const planned = new Map(local.map((n) => [n.id, n]));
   const replaced: NoteVersion[] = [];
   const db = await getRawDatabase();
   await db.transaction(async (tx) => {
     for (const note of updates) {
-      const row = (await tx.execute("SELECT rowid, updated_at FROM notes WHERE id = ?", [note.id])).rows[0];
-      if (!row || Number(row.updated_at) !== planned.get(note.id)) continue;
+      // Exact-version check at write time: the note must still be exactly
+      // the version that was found in a verified backup. Timestamps alone
+      // aren't enough — they are whole seconds, so an edit in the same
+      // second as the plan would keep the same updated_at.
+      const row = (await tx.execute("SELECT rowid, content, transcript, updated_at FROM notes WHERE id = ?", [note.id])).rows[0];
+      const was = planned.get(note.id);
+      const current: NoteVersion | null = row
+        ? { id: note.id, content: String(row.content ?? ""), transcript: row.transcript == null ? null : String(row.transcript), updatedAt: Number(row.updated_at) }
+        : null;
+      if (!was || !current || !sameNote(current, was) || current.updatedAt !== was.updatedAt) continue;
       await tx.execute("UPDATE notes SET content = ?, transcript = ?, status = ?, updated_at = ? WHERE id = ?", [
         note.content,
         note.transcript,
