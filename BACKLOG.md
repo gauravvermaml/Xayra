@@ -165,6 +165,35 @@ and `__tests__/restoreMerge.test.ts`. What it still doesn't do:
 
 ## Security, privacy and compliance
 
+### Xayra Premium (subscriptions) — follow-ups
+
+Implemented on `feat/premium-subscriptions` (RevenueCat, anonymous
+customers; rules in `services/billing/`). Still to do:
+
+- **Real Google Play purchases are untested.** Trial start, renewals,
+  cancellation, grace period, account hold, refunds and restore need the
+  production package from a Play testing track with licence testers — that
+  requires a release-gate exception and an EAS build (not yet authorised).
+- **RevenueCat public SDK key** goes in `app.json`
+  `extra.revenueCat.androidApiKey` once the RevenueCat project exists. With
+  it empty, premium actions open the paywall, which says plans aren't
+  available; nothing else is affected.
+- **Google Block Store is still included.** Excluding it is crash-safe only
+  from purchases-android 10.29.0 (RevenueCat PR #4459); react-native-purchases
+  10.15.1 bundles 10.28.1. Revisit when the React Native SDK moves on.
+- **Terms of use.** The paywall links the privacy policy only; there is no
+  Xayra terms-of-use page yet.
+- **Privacy policy and Data safety** drafts are in `docs/premium-privacy-drafts.md`
+  (untracked) awaiting approval; nothing is published.
+- **Offline limits (by design):** Premium continues offline for at most
+  seven days after the last check and never past the known expiry, so a
+  weekly or monthly subscriber offline across a renewal date loses Premium
+  until the next check; a device clock set more than seven days ahead
+  blocks Premium until corrected; a refund made while offline applies at
+  the next check.
+- **Existing testers** (1.0.x / 2.0.0) keep all their data; their first new
+  note or Ask after updating opens the paywall.
+
 ### Release gate blockers (production stays blocked)
 
 1. **Physical-device confirmation** of the release-batch-1 fixes verified on
