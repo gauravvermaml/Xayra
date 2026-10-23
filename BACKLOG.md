@@ -29,28 +29,34 @@ Product constraint that still applies: **no Ask while the phone is locked**
 
 ## Open — bugs, correctness and data integrity
 
-### Restore doesn't update an older local copy
+### Restore: remaining limits after the newer-wins update
 
-- **What:** restoring from Drive only inserts notes and to-dos that are
-  missing on the phone (`mergeMissingNotes`, `mergeMissingToDos`). A phone
-  that already holds an older copy of an edited note or changed to-do keeps
-  the older copy.
-- **Why it matters:** after a restore, edits made on another phone can
-  silently fail to appear.
-- **Evidence:** backups merge newer-edit-wins (`backupDb.ts`), but the local
-  restore path is insert-only.
-- **Done when:** restore applies a strictly newer `updated_at` to existing
-  local rows (notes re-embedded), never deletes, and is covered by tests.
+Restore now updates records the phone already has: the newest version wins,
+only when the phone's own version is in one of the verified backups just
+read (so nothing is lost); rules and tests in `services/backup/restoreMerge.ts`
+and `__tests__/restoreMerge.test.ts`. What it still doesn't do:
 
-### To-dos changed before `updated_at` existed
-
-- **What:** to-dos changed before release stabilisation (2026-10-16) have no
-  timestamp. When two phones' copies differ, the merge can't tell which is
-  newer: a backup keeps the backing-up phone's copy; merging or restoring
-  concurrent backups keeps the newest backup's copy.
-- **Why it matters:** a stale copy can win for those rows only.
-- **Status:** known limitation. Any later change stamps the row and resolves
-  it. No fix planned.
+- **Deletions aren't carried.** Backups keep no deletions (no tombstones),
+  so a note or to-do deleted on a phone since a backup comes back when that
+  phone restores. Existing behaviour. Fixing it needs deletion records in
+  the backup format — a format change, not done.
+- **Conflicts are kept, not shown.** A record whose newer version can't be
+  established safely — a phone change not yet backed up, equal timestamps
+  with different content, or a backup copy without a timestamp (to-dos
+  changed before 2026-10-16, older note backups) — keeps the phone's
+  version. Restore only counts them (`RestoreOutcome.conflicts`); there is
+  no screen to review them.
+- **Timestamps are only partly trustworthy.** A backup copy's `updated_at`
+  is when it was first copied into a backup, which can be later than the
+  edit, and a phone's own `updated_at` also moves on status changes (e.g.
+  when indexing finishes). The "phone version must already be backed up"
+  rule is what keeps this from ever overwriting an un-backed-up edit. The
+  backup-side merge of concurrent heads (`mergeOtherHeadInto`) still uses
+  plain newer-wins.
+- **Calendar events aren't updated.** A to-do replaced by restore keeps its
+  Calendar link, but the Calendar event isn't changed until the to-do is
+  sent again.
+- **Legacy plaintext backups** (`remi_backup.db`) stay insert-only.
 
 ### Grounding limitations (RAG Grounding v1, frozen)
 
