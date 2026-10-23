@@ -222,7 +222,16 @@ export async function readBackupRecords(
 ): Promise<{ notes: CloudNoteRecord[]; todos: CloudToDoRecord[] }> {
   const db = openFile(dir, name, key, true);
   try {
-    const noteRows = (await db.execute("SELECT id, content, transcript, transcription_model, created_at FROM notes")).rows ?? [];
+    // A note's updated_at (when the backup has the column) is what restore's
+    // newer-wins update compares; older backups without it are never used to
+    // replace a note (restoreMerge.ts).
+    const noteRows =
+      (
+        await db.execute(
+          `SELECT id, content, transcript, transcription_model, created_at,
+                  ${(await hasColumn(db, "main", "notes", "updated_at")) ? "updated_at" : "NULL AS updated_at"} FROM notes`
+        )
+      ).rows ?? [];
     const todoRows =
       (
         await db.execute(
@@ -237,6 +246,7 @@ export async function readBackupRecords(
         transcript: (row.transcript as string | null) ?? null,
         transcriptionModel: (row.transcription_model as string | null) ?? null,
         createdAt: Number(row.created_at),
+        updatedAt: row.updated_at == null ? null : Number(row.updated_at),
       })),
       todos: todoRows.map((row) => ({
         id: String(row.id),

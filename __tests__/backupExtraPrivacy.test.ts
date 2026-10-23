@@ -145,6 +145,7 @@ jest.mock("../services/notes/noteManager", () => ({
     mockState.localNotes.push(...missing.map((n) => n.id));
     return missing.length;
   }),
+  applyNewerNotesFromBackup: jest.fn(async () => ({ updated: 0, conflicts: [] })),
 }));
 jest.mock("../services/todos/todoManager", () => ({
   mergeMissingToDos: jest.fn(async (todos: { id: string }[]) => {
@@ -152,6 +153,7 @@ jest.mock("../services/todos/todoManager", () => ({
     mockState.localTodos.push(...missing.map((t) => t.id));
     return missing.length;
   }),
+  applyNewerToDosFromBackup: jest.fn(async () => ({ updated: 0, conflicts: [] })),
 }));
 jest.mock("../services/vault/vaultIdentity", () => ({
   getOrCreateVaultId: async () => mockState.vaultId ?? "22222222-2222-2222-2222-222222222222",
@@ -354,12 +356,16 @@ describe("restoring Extra Privacy backups", () => {
   });
 
   it("a phone with its own notes: a wrong code or a refused restore leaves them exactly as they were; the right code only adds", async () => {
+    const applyNotes = require("../services/notes/noteManager").applyNewerNotesFromBackup;
+    applyNotes.mockClear();
     await standardThenExtra();
     newPhone("44444444-4444-4444-4444-444444444444", "d".repeat(64));
     mockState.localNotes = ["mine-1", "mine-2"];
     await expect(restoreLatestBackup(CTX)).rejects.toMatchObject({ name: "RecoveryCodeRequiredError" });
     await expect(restoreLatestBackup(CTX, { recoveryCode: NEW_CODE })).rejects.toMatchObject({ name: "RecoveryCodeIncorrectError" });
     expect(mockState.localNotes).toEqual(["mine-1", "mine-2"]);
+    // Refused restores never reach the update of existing notes either.
+    expect(applyNotes).not.toHaveBeenCalled();
     await restoreLatestBackup(CTX, { recoveryCode: CODE });
     expect(mockState.localNotes).toEqual(expect.arrayContaining(["mine-1", "mine-2"]));
     expect(mockState.localNotes.length).toBeGreaterThan(2);
@@ -369,6 +375,14 @@ describe("restoring Extra Privacy backups", () => {
     await standardThenExtra();
     mockState.localNotes = [];
     await expect(restoreLatestBackup(CTX)).resolves.toMatchObject({ mode: "extra", restoredNotes: 3 });
+  });
+
+  it("an Extra Privacy restore updates existing records through the same newer-wins step", async () => {
+    const applyNotes = require("../services/notes/noteManager").applyNewerNotesFromBackup;
+    applyNotes.mockClear();
+    await standardThenExtra();
+    await restoreLatestBackup(CTX, { recoveryCode: CODE });
+    expect(applyNotes).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -130,6 +130,7 @@ jest.mock("../services/notes/noteManager", () => ({
     mockState.localNotes.push(...missing.map((n) => n.id));
     return missing.length;
   }),
+  applyNewerNotesFromBackup: jest.fn(async () => ({ updated: 0, conflicts: [] })),
 }));
 jest.mock("../services/todos/todoManager", () => ({
   mergeMissingToDos: jest.fn(async (todos: { id: string }[]) => {
@@ -137,6 +138,7 @@ jest.mock("../services/todos/todoManager", () => ({
     mockState.localTodos.push(...missing.map((t) => t.id));
     return missing.length;
   }),
+  applyNewerToDosFromBackup: jest.fn(async () => ({ updated: 0, conflicts: [] })),
 }));
 jest.mock("../services/vault/vaultIdentity", () => ({
   getOrCreateVaultId: async () => mockState.vaultId ?? "22222222-2222-2222-2222-222222222222",
@@ -433,6 +435,68 @@ describe("restore", () => {
 
   it("no backup at all → NoBackupFoundError", async () => {
     await expect(restoreLatestBackup(CTX)).rejects.toMatchObject({ name: "NoBackupFoundError" });
+  });
+
+  describe("records the phone already has (newer-wins update)", () => {
+    const notesMgr = () => require("../services/notes/noteManager");
+    const todosMgr = () => require("../services/todos/todoManager");
+    beforeEach(() => {
+      notesMgr().applyNewerNotesFromBackup.mockClear();
+      todosMgr().applyNewerToDosFromBackup.mockClear();
+    });
+
+    it("runs after every head is verified, with each record's newest version and every head's versions, and reports the counts", async () => {
+      const base = await runEncryptedBackup(CTX);
+      mockState.localNotes = ["n1", "n2", "b1"];
+      const fromB = await runEncryptedBackup(CTX);
+      mockState.localNotes = ["n1", "n2", "a1"];
+      const bManifest = files("xayra2-gen-").find((f) => f.name.includes(fromB.genId) && f.name.endsWith(".json"))!;
+      const verifiedAt = bManifest.appProperties.verifiedAt;
+      delete bManifest.appProperties.verifiedAt;
+      await runEncryptedBackup(CTX);
+      bManifest.appProperties.verifiedAt = verifiedAt;
+      expect(base).toBeDefined();
+      notesMgr().applyNewerNotesFromBackup.mockResolvedValueOnce({ updated: 2, conflicts: [{ id: "n1", reason: "phone-change-not-backed-up" }] });
+      todosMgr().applyNewerToDosFromBackup.mockResolvedValueOnce({ updated: 1, conflicts: [] });
+
+      const outcome = await restoreLatestBackup(CTX);
+
+      const [remoteNotes, noteVersions] = notesMgr().applyNewerNotesFromBackup.mock.calls[0];
+      expect(remoteNotes.map((n: { id: string }) => n.id).sort()).toEqual(["a1", "b1", "n1", "n2"]);
+      expect(noteVersions.get("n1")).toHaveLength(2); // n1 is in both phones' heads
+      expect(todosMgr().applyNewerToDosFromBackup).toHaveBeenCalledTimes(1);
+      expect(outcome).toMatchObject({ source: "encrypted", updatedNotes: 2, updatedTodos: 1, conflicts: 1 });
+    });
+
+    it("an unverifiable backup updates nothing", async () => {
+      await runEncryptedBackup(CTX);
+      mockState.wrongKeyAt = "verifyRemote";
+      await expect(restoreLatestBackup(CTX)).rejects.toThrow("couldn't be opened and checked");
+      expect(notesMgr().applyNewerNotesFromBackup).not.toHaveBeenCalled();
+      expect(todosMgr().applyNewerToDosFromBackup).not.toHaveBeenCalled();
+    });
+
+    it("an interrupted update fails the restore without reporting success; running it again completes", async () => {
+      await runEncryptedBackup(CTX);
+      mockState.failAt = "restoreUpdate";
+      await expect(restoreLatestBackup(CTX)).rejects.toThrow("Injected failure at restoreUpdate");
+      expect(notesMgr().applyNewerNotesFromBackup).not.toHaveBeenCalled();
+      mockState.failAt = null;
+      await expect(restoreLatestBackup(CTX)).resolves.toMatchObject({ source: "encrypted" });
+      expect(notesMgr().applyNewerNotesFromBackup).toHaveBeenCalledTimes(1);
+    });
+
+    it("the legacy plaintext backup never updates existing records (no reliable timestamps)", async () => {
+      mockDrive.set("legacy", {
+        id: "legacy",
+        name: "remi_backup.db",
+        content: JSON.stringify({ kind: "db", key: null, notes: ["old1"], todos: [] }),
+        createdTime: "2026-10-14T00:00:00.000Z",
+        appProperties: {},
+      });
+      await restoreLatestBackup(CTX);
+      expect(notesMgr().applyNewerNotesFromBackup).not.toHaveBeenCalled();
+    });
   });
 });
 

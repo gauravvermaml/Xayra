@@ -107,6 +107,15 @@ export function createFakeNotesDb() {
       return { rows: [] };
     }
 
+    // Restore's newer-wins update (applyNewerNotesFromBackup).
+    if (/^SELECT id, content, transcript, updated_at FROM notes$/i.test(q)) {
+      return { rows: rows.map((r) => ({ id: r.id, content: r.content, transcript: r.transcript, updated_at: r.updated_at })) };
+    }
+    if (/^SELECT rowid, updated_at FROM notes WHERE id = \?/i.test(q)) {
+      const row = findById(params[0]);
+      return { rows: row ? [{ rowid: row.rowid, updated_at: row.updated_at }] : [] };
+    }
+
     if (/^SELECT rowid FROM notes WHERE id = \?/i.test(q)) {
       const [id] = params;
       const row = findById(id);

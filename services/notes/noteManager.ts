@@ -12,6 +12,7 @@ import { setPipelineStage } from "../ai/pipelineStage";
 import { extractToDosFromText } from "../ai/transformationEngine";
 import { addToDo } from "../todos/todoManager";
 import { redactForLog } from "../logging/redact";
+import { planNoteRestore, type NoteVersion, type RestoreConflict } from "../backup/restoreMerge";
 
 export type Note = {
   id: string;
@@ -533,7 +534,54 @@ export type CloudNoteRecord = {
   transcript: string | null;
   transcriptionModel: string | null;
   createdAt: number;
+  /** The backup copy's `updated_at` (seconds), when the backup has one —
+   * read only by restore's newer-wins update (restoreMerge.ts). */
+  updatedAt?: number | null;
 };
+
+/**
+ * Restore's newer-wins update for notes this phone already has (the rules:
+ * services/backup/restoreMerge.ts). Each replaced note is updated in place —
+ * same id and created_at, the backup's text and `updated_at` — and its old
+ * vector is dropped in the same transaction, so Ask (which searches only
+ * `embedded` notes) never reads the old text's vector; re-embedding then runs
+ * the same way as for restored notes. A note that changed on this phone after
+ * the plan was made (its `updated_at` moved) is left alone. Returns how many
+ * notes were replaced and the conflicts that were kept as they are.
+ */
+export async function applyNewerNotesFromBackup(
+  remote: NoteVersion[],
+  backedUp: Map<string, NoteVersion[]>
+): Promise<{ updated: number; conflicts: RestoreConflict[] }> {
+  const local = await listNoteRevisions();
+  const { updates, conflicts } = planNoteRestore(local, remote, backedUp);
+  if (updates.length === 0) return { updated: 0, conflicts };
+  const planned = new Map(local.map((n) => [n.id, n.updatedAt]));
+  const replaced: NoteVersion[] = [];
+  const db = await getRawDatabase();
+  await db.transaction(async (tx) => {
+    for (const note of updates) {
+      const row = (await tx.execute("SELECT rowid, updated_at FROM notes WHERE id = ?", [note.id])).rows[0];
+      if (!row || Number(row.updated_at) !== planned.get(note.id)) continue;
+      await tx.execute("UPDATE notes SET content = ?, transcript = ?, status = ?, updated_at = ? WHERE id = ?", [
+        note.content,
+        note.transcript,
+        "transcribed",
+        note.updatedAt ?? nowUnix(),
+        note.id,
+      ]);
+      await tx.execute("DELETE FROM note_embeddings WHERE rowid = ?", [row.rowid]);
+      replaced.push(note);
+    }
+  });
+  void (async () => {
+    for (const note of replaced) {
+      const text = (note.content || note.transcript || "").trim();
+      if (text) await tryEmbedNote(note.id, text);
+    }
+  })();
+  return { updated: replaced.length, conflicts };
+}
 
 /**
  * Delta/merge restore: inserts only the cloud notes this device doesn't
