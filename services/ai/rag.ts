@@ -5,11 +5,13 @@ import type { CancelSignal } from "./processingJob";
 import {
   buildNoteContext,
   finalizeAnswer,
+  isRecencyQuestion,
   resolveNoteText,
   UNVERIFIED_ANSWER_MESSAGE,
   UNVERIFIED_NO_RELATED_MESSAGE,
+  withinRecentWindow,
 } from "./ragFormatting";
-import { relatedEvidenceNotes } from "./relationshipGrounding";
+import { questionForModel, relatedEvidenceNotes } from "./relationshipGrounding";
 import { getNotesForTarget, getRecentNotes, hybridSearchNotes, type HybridSearchResult } from "../notes/noteManager";
 import {
   buildGroundedQuestion,
@@ -65,6 +67,10 @@ export { sanitizeLLMResponse } from "./ragFormatting";
  * actually attend to distinctly.
  */
 const CONTEXT_NOTE_LIMIT = 3;
+
+/** Candidates searched for a "…lately?" question before the recency filter
+ * keeps the recent ones (then CONTEXT_NOTE_LIMIT of them). */
+const RECENCY_CANDIDATE_LIMIT = 10;
 
 /**
  * "Summarise my latest notes" asks for RECENCY, not relevance — but
@@ -171,12 +177,17 @@ async function answerQuery(
   const retrievalPath = target ? "temporal" : isRecentNotesQuery(userQuery) ? "recent" : "hybrid";
   trace("resolved target", { target, retrievalPath, verification });
   mark("retrieval start", { path: retrievalPath });
+  // "…lately?" / "…recently?": relevance search over more candidates, then
+  // only those recorded within RECENT_WINDOW_DAYS (see isRecencyQuestion).
+  const recency = retrievalPath === "hybrid" && isRecencyQuestion(userQuery);
   const retrieved =
     retrievalPath === "temporal" && target
       ? await getNotesForTarget(target, { question: questionTerms(userQuery, now), event: eventTerms }, CONTEXT_NOTE_LIMIT)
       : retrievalPath === "recent"
         ? await getRecentNotes(CONTEXT_NOTE_LIMIT)
-        : await hybridSearchNotes(userQuery, CONTEXT_NOTE_LIMIT);
+        : recency
+          ? withinRecentWindow(await hybridSearchNotes(userQuery, RECENCY_CANDIDATE_LIMIT), now).slice(0, CONTEXT_NOTE_LIMIT)
+          : await hybridSearchNotes(userQuery, CONTEXT_NOTE_LIMIT);
 
   // Every relative-time expression in each note is resolved against that
   // note's own createdAt, and each clause is related to the question's
@@ -201,7 +212,11 @@ async function answerQuery(
   // The question as the model sees it. `userQuery` itself stays untouched for
   // retrieval, chat history and diagnostics.
   const groundedQuestion = verification ? buildGroundedQuestion(userQuery, now) : userQuery;
-  trace("event evidence", { eventEvidence, groundedQuestion });
+  // What the model is asked: normally the same; a general yes/no question
+  // the notes can't confirm is asked in open form (questionForModel). The
+  // answer is still validated against `groundedQuestion`.
+  const modelQuestion = verification ? groundedQuestion : questionForModel(userQuery, built ? built.evidence : [], now);
+  trace("event evidence", { eventEvidence, groundedQuestion, modelQuestion });
 
   const citations: RagCitation[] = notes.map((note, i) => ({
     index: i + 1,
@@ -254,7 +269,7 @@ async function answerQuery(
   mark("inference start");
   let firstTokenMarked = false;
   const rawText = await generateLocalRAGAnswer(
-    groundedQuestion,
+    modelQuestion,
     noteContext,
     // Raw tokens are never forwarded anywhere (see above) — only the time
     // of the first one is noted, for dev timing.
