@@ -67,6 +67,14 @@ beforeEach(() => {
   mockScheduled.length = 0;
   mockGranted.value = true;
   mockRequested.mockReset();
+  // scheduleToDoNotification skips a trigger already past by the real clock,
+  // so the clock must be the fixture's NOW too — otherwise this test fails
+  // once the calendar passes "future" (it did, on 22 October 2026).
+  jest.spyOn(Date, "now").mockReturnValue(NOW);
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
 });
 
 describe("remindersToReconcile", () => {
