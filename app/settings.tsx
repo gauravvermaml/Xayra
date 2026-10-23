@@ -174,7 +174,8 @@ export default function SettingsScreen() {
   const handleBackupNowRef = useRef<(() => Promise<void>) | null>(null);
   handleBackupNowRef.current = handleBackupNow;
 
-  // Merge restore: only adds what this phone doesn't have; reports success
+  // Merge restore: adds what this phone doesn't have and updates records to a
+  // newer backed-up version (never an un-backed-up change); reports success
   // only after every backed-up note is confirmed present.
   const handleRestoreNotes = useCallback(async () => {
     setBusyAction("restore");

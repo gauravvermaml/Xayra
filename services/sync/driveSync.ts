@@ -28,6 +28,7 @@ import {
 } from "../backup/backupService";
 import { readLocalProtection, type ProtectionState } from "../backup/protection";
 import { setAccessTokenRefresher } from "../backup/driveAppData";
+import { restoreSummary } from "./restoreSummary";
 
 // Long backup and protection operations can outlive an access token; the
 // encrypted backup asks for a fresh one on a 401 (driveAppData.ts).
@@ -573,6 +574,10 @@ export async function backupToDrive(): Promise<BackupResult> {
 export type RestoreResult = {
   restoredCount: number;
   restoredToDoCount: number;
+  /** Existing notes and to-dos replaced by a newer backed-up version. */
+  updatedCount?: number;
+  /** Existing records kept as they were (restoreMerge.ts conflicts). */
+  keptCount?: number;
   /** Ready-to-display summary — see app/settings.tsx. */
   message: string;
 };
@@ -584,7 +589,8 @@ function formatDate(iso: string): string {
 
 /**
  * Restores the newest verified encrypted backup into this phone's vault —
- * a merge that only adds what's missing. Falls back to the legacy backup
+ * a merge that adds what's missing and updates records to a newer backed-up
+ * version (restoreMerge.ts). Falls back to the legacy backup
  * (read-only) when the account has no encrypted one. Throws unless every
  * backed-up note is confirmed present afterwards.
  */
@@ -593,14 +599,19 @@ export async function restoreFromDrive(options: { recoveryCode?: string } = {}):
   const token = await requireAccessToken();
   const outcome = await restoreLatestBackup({ token, accountId: currentAccountId() }, options);
   const from = outcome.source === "legacy" ? "your older backup" : `your backup of ${formatDate(outcome.backupDate)}`;
-  const parts = [
-    outcome.restoredNotes ? plural(outcome.restoredNotes, "note") : "",
-    outcome.restoredTodos ? plural(outcome.restoredTodos, "to-do") : "",
-  ].filter(Boolean);
   return {
     restoredCount: outcome.restoredNotes,
     restoredToDoCount: outcome.restoredTodos,
-    message: parts.length ? `Restored ${parts.join(" and ")} from ${from}.` : `Your notes already include everything in ${from}.`,
+    updatedCount: (outcome.updatedNotes ?? 0) + (outcome.updatedTodos ?? 0),
+    keptCount: outcome.conflicts ?? 0,
+    message: restoreSummary({
+      from,
+      addedNotes: outcome.restoredNotes,
+      addedTodos: outcome.restoredTodos,
+      updatedNotes: outcome.updatedNotes,
+      updatedTodos: outcome.updatedTodos,
+      conflicts: outcome.conflicts,
+    }),
   };
 }
 

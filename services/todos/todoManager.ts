@@ -3,6 +3,7 @@ import * as Crypto from "expo-crypto";
 import { getRawDatabase } from "../../db/client";
 import { DEFAULT_NOTIFICATION_TIME, type Recurrence } from "../../db/schema";
 import { cancelToDoNotification, scheduleToDoNotification } from "../notifications/todoNotifications";
+import { planToDoRestore, sameToDo, type RestoreConflict, type ToDoVersion } from "../backup/restoreMerge";
 import { createCalendarEvent, deleteCalendarEvent, updateCalendarEvent } from "../sync/calendarSync";
 
 export type ToDo = {
@@ -481,6 +482,101 @@ export async function mergeMissingToDos(cloudToDos: CloudToDoRecord[]): Promise<
   }
 
   return missingToDos.length;
+}
+
+/**
+ * Restore's newer-wins update for to-dos this phone already has (the rules:
+ * services/backup/restoreMerge.ts). A replaced to-do takes the backup's
+ * version whole — text, dates, reminder time, completion, recurrence and
+ * note link together, never a mix — and keeps its own Calendar link (never
+ * carried by backups). A to-do that changed on this phone after the plan was
+ * made is left alone. Its reminder is then re-set or cancelled the same way
+ * as for every other write here. Returns how many were replaced and the
+ * conflicts that were kept as they are.
+ */
+export async function applyNewerToDosFromBackup(
+  remote: ToDoVersion[],
+  backedUp: Map<string, ToDoVersion[]>
+): Promise<{ updated: number; conflicts: RestoreConflict[] }> {
+  const db = await getRawDatabase();
+  const rows = (
+    await db.execute(
+      "SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, note_id, updated_at, created_at FROM todos"
+    )
+  ).rows;
+  const toVersion = (row: Record<string, unknown>): ToDoVersion => ({
+    id: String(row.id),
+    text: String(row.text),
+    actionDate: String(row.action_date),
+    toDate: (row.to_date as string | null) ?? null,
+    notificationTime: String(row.notification_time),
+    isCompleted: Boolean(row.is_completed),
+    recurrence: String(row.recurrence),
+    recurrenceInterval: Number(row.recurrence_interval),
+    noteId: (row.note_id as string | null) ?? null,
+    updatedAt: row.updated_at == null ? null : Number(row.updated_at),
+  });
+  const local = rows.map((row) => toVersion(row as Record<string, unknown>));
+  const { updates, conflicts } = planToDoRestore(local, remote, backedUp);
+  if (updates.length === 0) return { updated: 0, conflicts };
+  const planned = new Map(local.map((t) => [t.id, t]));
+  const createdAt = new Map(rows.map((row) => [String(row.id), String(row.created_at ?? "")]));
+  const replaced: ToDoVersion[] = [];
+  await db.transaction(async (tx) => {
+    for (const todo of updates) {
+      // Exact-version check at write time: every field this update would
+      // overwrite, plus updated_at, must still be what was found in a
+      // verified backup — otherwise the to-do changed here and is kept.
+      const row = (
+        await tx.execute(
+          "SELECT id, text, action_date, to_date, notification_time, is_completed, recurrence, recurrence_interval, note_id, updated_at FROM todos WHERE id = ?",
+          [todo.id]
+        )
+      ).rows[0];
+      const was = planned.get(todo.id);
+      const current = row ? toVersion(row as Record<string, unknown>) : null;
+      if (!was || !current || !sameToDo(current, was) || (current.updatedAt ?? null) !== (was.updatedAt ?? null)) continue;
+      await tx.execute(
+        `UPDATE todos SET text = ?, action_date = ?, to_date = ?, notification_time = ?, is_completed = ?, recurrence = ?,
+           recurrence_interval = ?, note_id = ?, updated_at = ? WHERE id = ?`,
+        [
+          todo.text,
+          todo.actionDate,
+          todo.toDate,
+          todo.notificationTime,
+          todo.isCompleted ? 1 : 0,
+          todo.recurrence,
+          todo.recurrenceInterval,
+          todo.noteId,
+          todo.updatedAt ?? null,
+          todo.id,
+        ]
+      );
+      replaced.push(todo);
+    }
+  });
+  if (replaced.length === 0) return { updated: 0, conflicts };
+  notifyToDosChanged();
+  for (const todo of replaced) {
+    if (todo.isCompleted) {
+      void cancelToDoNotification(todo.id);
+      continue;
+    }
+    void scheduleToDoNotification({
+      id: todo.id,
+      text: todo.text,
+      actionDate: todo.actionDate,
+      toDate: todo.toDate,
+      notificationTime: todo.notificationTime,
+      isCompleted: false,
+      recurrence: todo.recurrence as Recurrence,
+      recurrenceInterval: todo.recurrenceInterval,
+      createdAt: createdAt.get(todo.id) ?? "",
+      noteId: todo.noteId,
+      googleCalendarEventId: null,
+    });
+  }
+  return { updated: replaced.length, conflicts };
 }
 
 function formatIsoDate(date: Date): string {
