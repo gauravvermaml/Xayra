@@ -10,19 +10,5 @@
       "blocker": "Keyboard/input: input tray hidden behind the keyboard after a send (fixed on the emulator) and consecutive typed notes — checked on a physical device",
       "evidence": "Redmi Note 8 Pro, Xayra Dev built from a3de837: three consecutive typed notes including a deliberate double tap on Send - user PASS 2026-10-21; emulator verification; __tests__/composeDoubleTap.test.tsx."
     }
-  ],
-  "internalTestingBuild": {
-    "version": "2.1.0",
-    "versionCode": 53,
-    "openedAt": "2026-10-24T04:08:00Z",
-    "expiresAt": "2026-10-24T16:08:00Z",
-    "purpose": "One EAS production-profile AAB of Xayra 2.1.0 / 53 (Xayra Premium, RevenueCat, from feat/premium-subscriptions / PR #7, unmerged) for manual upload by the owner to Google Play Internal Testing (owner approval 2026-10-24). Build only.",
-    "prohibited": [
-      "eas submit or any automatic Play submission",
-      "eas update",
-      "local production prebuild/run",
-      "any other version or versionCode",
-      "production, open or closed-track distribution"
-    ]
-  }
+  ]
 }
