@@ -435,10 +435,38 @@ describe("native shortcuts config (plugins/withAppShortcuts.js)", () => {
     expect(xml).not.toContain('android:targetClass="com.anonymous.silentconfidant.MainActivity"');
     const kt = withAppShortcuts.buildTrampolineKotlin("com.anonymous.silentconfidant.dev");
     expect(kt).toContain("package com.anonymous.silentconfidant.dev");
-    expect(kt).toContain("Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)");
+    // singleTop MainActivity: CLEAR_TOP | SINGLE_TOP reuse the running
+    // instance (onNewIntent, no remount) exactly as singleTask did; CLEAR_TASK
+    // — which re-created MainActivity — is never used.
+    expect(kt).toContain("Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP");
     expect(kt).toContain('data.host == "shortcut"');
-    expect(kt).not.toMatch(/FLAG_ACTIVITY_CLEAR_(TASK|TOP)/); // never re-clears Xayra's own task
+    expect(kt).not.toMatch(/FLAG_ACTIVITY_CLEAR_TASK/);
     expect(kt).toContain("finish()");
+    // Forwarded as a launcher intent with the link as an extra, so the task's
+    // root intent matches the launcher icon's (no second MainActivity later).
+    expect(kt).toContain("Intent(Intent.ACTION_MAIN)");
+    expect(kt).toContain(".addCategory(Intent.CATEGORY_LAUNCHER)");
+    expect(kt).toContain('forward.putExtra("xayra.shortcut.link", data.toString())');
+    expect(kt).not.toContain("forward.data");
+  });
+
+  it("MainActivity is singleTop, so returning from the launcher never clears Google Play's purchase screen", () => {
+    const manifest = {
+      manifest: {
+        application: [{ $: { "android:name": ".MainApplication" }, activity: [{ $: { "android:name": ".MainActivity", "android:launchMode": "singleTask" }, "intent-filter": [{ action: [{ $: { "android:name": "android.intent.action.MAIN" } }], category: [{ $: { "android:name": "android.intent.category.LAUNCHER" } }] }] }] }],
+      },
+    };
+    const { withAndroidManifest } = require("@expo/config-plugins");
+    let captured: unknown = null;
+    const config = withAppShortcuts({ name: "Xayra", slug: "x", scheme: "xayra", android: { package: "com.anonymous.silentconfidant" } });
+    // Run only the manifest mod against a minimal manifest.
+    const mod = config.mods?.android?.manifest;
+    expect(typeof mod).toBe("function");
+    return mod({ ...config, modResults: manifest, modRequest: { platform: "android" } }).then((result: { modResults: typeof manifest }) => {
+      captured = result.modResults.manifest.application[0].activity.find((a: { $: Record<string, string> }) => a.$["android:name"] === ".MainActivity");
+      expect((captured as { $: Record<string, string> }).$["android:launchMode"]).toBe("singleTop");
+      expect(withAndroidManifest).toBeDefined();
+    });
   });
 
   it("production and Xayra Dev shortcuts each target only their own package and scheme", () => {
@@ -482,8 +510,26 @@ describe("native shortcuts config (plugins/withAppShortcuts.js)", () => {
     const src = "class MainActivity {\n  override fun onCreate(savedInstanceState: Bundle?) {\n    super.onCreate(null)\n  }\n}\n";
     const once = withAppShortcuts.addActivityGuard(src);
     expect(once).toContain("FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY");
+    // A kept activity record restarted after process death has saved state
+    // but no history flag — both mean "replay, not a new tap".
+    expect(once).toContain("savedInstanceState != null ||");
     expect(once).toContain('intent.data?.host == "shortcut"');
     expect(once.indexOf("FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY")).toBeLessThan(once.indexOf("super.onCreate"));
     expect(withAppShortcuts.addActivityGuard(once)).toBe(once);
+  });
+
+  it("MainActivity restores a forwarded shortcut's link on create and on new intent, inside the class", () => {
+    const src = "class MainActivity {\n  override fun onCreate(savedInstanceState: Bundle?) {\n    super.onCreate(null)\n  }\n}\n";
+    const out = withAppShortcuts.addActivityGuard(src);
+    // Adopted before the Recents check, so a replayed shortcut is still dropped.
+    expect(out.indexOf("xayraAdoptShortcutLink(intent)")).toBeLessThan(out.indexOf("FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY"));
+    expect(out).toMatch(/override fun onNewIntent\(intent: android\.content\.Intent\) \{\n\s*xayraAdoptShortcutLink\(intent\)\n\s*super\.onNewIntent\(intent\)/);
+    expect(out).toContain('intent.getStringExtra("xayra.shortcut.link")');
+    expect(out).toContain('intent.removeExtra("xayra.shortcut.link")');
+    expect(out).toContain('if (uri.host != "shortcut") return');
+    // The methods land inside the class: the file still ends with its brace.
+    expect(out.trimEnd().endsWith("}")).toBe(true);
+    expect(out.indexOf("fun xayraAdoptShortcutLink")).toBeGreaterThan(out.indexOf("super.onCreate(null)"));
+    expect((out.match(/\{/g) ?? []).length).toBe((out.match(/\}/g) ?? []).length);
   });
 });

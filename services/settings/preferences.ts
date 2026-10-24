@@ -68,6 +68,14 @@ export type Preferences = {
    * resetting its own clock every time the process happens to restart.
    */
   onboardingStartedAt: number | null;
+  /**
+   * Xayra Premium's offline allowance clock (services/billing/): the newest
+   * moment this install has observed — device time, or a subscription
+   * check's server time — and the server time of the newest check. Lets the
+   * seven-day allowance survive a device clock moved backwards. Holds no
+   * subscription details and nothing personal.
+   */
+  billingClock: { lastObservedAt: number | null; lastVerifiedAt: number | null };
 };
 
 const DEFAULT_PREFERENCES: Preferences = {
@@ -78,6 +86,7 @@ const DEFAULT_PREFERENCES: Preferences = {
   threadEscalationStatus: "not_attempted",
   onboardingCalibrationAttemptInFlight: false,
   onboardingStartedAt: null,
+  billingClock: { lastObservedAt: null, lastVerifiedAt: null },
 };
 
 function preferencesPath(): string {

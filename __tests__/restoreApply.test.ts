@@ -86,6 +86,11 @@ jest.mock("../services/notifications/todoNotifications", () => ({
 jest.mock("../services/sync/calendarSync", () => ({ createCalendarEvent: jest.fn(), deleteCalendarEvent: jest.fn(), updateCalendarEvent: jest.fn() }));
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+/** Waits for background re-indexing by condition, not a fixed number of ticks
+ * (a fixed count was flaky under a fully loaded parallel test run). */
+async function until(condition: () => boolean): Promise<void> {
+  for (let i = 0; i < 500 && !condition(); i++) await flush();
+}
 
 function seedNote(id: string, content: string, updatedAt: number, rowid: number) {
   mockNotes.getRows().push({ id, content, transcript: null, status: "embedded", created_at: 50, updated_at: updatedAt, rowid });
@@ -118,8 +123,7 @@ describe("notes", () => {
     expect(mockNotes.getEmbeddings()).toEqual([]);
 
     release();
-    await flush();
-    await flush();
+    await until(() => mockNotes.getRows()[0].status === "embedded");
     expect(mockNotes.getRows()[0].status).toBe("embedded");
     expect(JSON.parse(mockNotes.getEmbeddings()[0].embedding as string)[0]).toBe("corrected wording".length);
   });
@@ -151,7 +155,7 @@ describe("notes", () => {
     expect(mockNotes.getEmbeddings()).toHaveLength(2);
 
     expect((await applyNewerNotesFromBackup(cloud, backedUp)).updated).toBe(2);
-    await flush();
+    await until(() => mockNotes.getRows().every((r) => r.status === "embedded"));
     expect(mockNotes.getRows().map((r) => r.content)).toEqual(["a new", "b new"]);
     expect((await applyNewerNotesFromBackup(cloud, backedUp)).updated).toBe(0);
   });

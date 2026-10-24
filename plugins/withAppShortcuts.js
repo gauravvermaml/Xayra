@@ -18,7 +18,7 @@
  * OUTGOING activity's intent — i.e. the previous launch's shortcut. So the
  * shortcut targets ShortcutLaunchActivity instead: invisible, in its own
  * task (so CLEAR_TASK only clears that), it forwards the link to the
- * singleTask MainActivity and finishes. Warm: MainActivity gets onNewIntent
+ * singleTop MainActivity (CLEAR_TOP | SINGLE_TOP) and finishes. Warm: MainActivity gets onNewIntent
  * (a normal deep-link "url" event, no remount). Cold: MainActivity starts
  * with the link as its own initial intent.
  *
@@ -108,15 +108,47 @@ function buildIconXml(glyph) {
 `;
 }
 
+// The trampoline forwards a shortcut as a launcher intent carrying the link in
+// this extra, so the task's root intent always matches the launcher icon's:
+// with singleTop, a root intent that differs (a VIEW link) makes a later
+// launcher tap start a second MainActivity on top of whatever covers it (the
+// folder picker, Google Play's purchase screen). MainActivity turns the extra
+// back into the link before React reads it.
+const SHORTCUT_LINK_EXTRA = "xayra.shortcut.link";
+
 const ACTIVITY_GUARD = `    // @generated begin ${MARKER}
+    xayraAdoptShortcutLink(intent)
     // Restored from Recents after the process died: Android replays the
     // original launch intent. Drop a launcher-shortcut one so reopening
-    // Xayra never starts recording by itself.
-    if ((intent.flags and android.content.Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0 &&
+    // Xayra never starts recording by itself. A kept activity record comes
+    // back with its saved state (and no history flag); a removed one is
+    // rebuilt from the task's base intent with the history flag.
+    if ((savedInstanceState != null ||
+        (intent.flags and android.content.Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0) &&
         intent.data?.host == "shortcut") {
       intent.data = null
     }
     // @generated end ${MARKER}
+`;
+
+const ACTIVITY_METHODS = `
+  // @generated begin ${MARKER}-methods
+  override fun onNewIntent(intent: android.content.Intent) {
+    xayraAdoptShortcutLink(intent)
+    super.onNewIntent(intent)
+  }
+
+  // A shortcut forwarded by ShortcutLaunchActivity: restore its link as the
+  // intent's data, the same VIEW link the app has always received.
+  private fun xayraAdoptShortcutLink(intent: android.content.Intent) {
+    val link = runCatching { intent.getStringExtra("${SHORTCUT_LINK_EXTRA}") }.getOrNull() ?: return
+    intent.removeExtra("${SHORTCUT_LINK_EXTRA}")
+    val uri = android.net.Uri.parse(link)
+    if (uri.host != "shortcut") return
+    intent.action = android.content.Intent.ACTION_VIEW
+    intent.data = uri
+  }
+  // @generated end ${MARKER}-methods
 `;
 
 function buildTrampolineKotlin(packageName) {
@@ -130,17 +162,22 @@ import android.os.Bundle
 /**
  * Receives a launcher shortcut in its own task (absorbing the NEW_TASK |
  * CLEAR_TASK Android adds to shortcut intents) and forwards the link to the
- * singleTask MainActivity: onNewIntent when Xayra is running, a normal
- * launch when it isn't. Only shortcut links are forwarded.
+ * singleTop MainActivity: onNewIntent when Xayra is running (CLEAR_TOP |
+ * SINGLE_TOP reuse the running instance, as singleTask did), a normal
+ * launch when it isn't. Only shortcut links are forwarded, as an extra on a
+ * launcher intent, so the task's root intent matches the launcher icon's and
+ * a later launcher tap never starts a second MainActivity.
  */
 class ${TRAMPOLINE} : Activity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
     val data = intent?.data
-    val forward = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    val forward = Intent(Intent.ACTION_MAIN)
+      .addCategory(Intent.CATEGORY_LAUNCHER)
+      .setClass(this, MainActivity::class.java)
+      .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
     if (data != null && data.host == "shortcut") {
-      forward.action = Intent.ACTION_VIEW
-      forward.data = data
+      forward.putExtra("${SHORTCUT_LINK_EXTRA}", data.toString())
     }
     startActivity(forward)
     finish()
@@ -156,7 +193,13 @@ function addActivityGuard(source) {
   if (!anchor.test(source)) {
     throw new Error(`[${MARKER}] Couldn't find super.onCreate( in MainActivity to add the Recents guard.`);
   }
-  return source.replace(anchor, (match) => `${ACTIVITY_GUARD}${match}`);
+  if (!source.includes("savedInstanceState: Bundle?")) {
+    throw new Error(`[${MARKER}] Expected MainActivity.onCreate(savedInstanceState: Bundle?) for the Recents guard.`);
+  }
+  const guarded = source.replace(anchor, (match) => `${ACTIVITY_GUARD}${match}`);
+  // The methods go just before the class's closing brace (the file's last).
+  const end = guarded.lastIndexOf("}");
+  return `${guarded.slice(0, end)}${ACTIVITY_METHODS}${guarded.slice(end)}`;
 }
 
 function withAppShortcuts(config) {
@@ -183,6 +226,12 @@ function withAppShortcuts(config) {
 
   config = withAndroidManifest(config, (cfg) => {
     const activity = AndroidConfig.Manifest.getMainActivityOrThrow(cfg.modResults);
+    // singleTop, not Expo's default singleTask: returning to Xayra from the
+    // launcher icon while Google Play's purchase screen is open (e.g. after
+    // checking a bank app) must not clear that screen and cancel the purchase
+    // (RevenueCat's Android guidance). Shortcuts keep reusing the running
+    // activity through the trampoline's CLEAR_TOP | SINGLE_TOP.
+    activity.$["android:launchMode"] = "singleTop";
     const metaData = (activity["meta-data"] = activity["meta-data"] || []);
     if (!metaData.some((m) => m.$["android:name"] === "android.app.shortcuts")) {
       metaData.push({ $: { "android:name": "android.app.shortcuts", "android:resource": "@xml/shortcuts" } });

@@ -1,7 +1,8 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -41,6 +42,9 @@ import { ExtraPrivacySetup, RecoveryCodePrompt, showRestoreResult } from "../com
 import { restoreWithRecoveryCode } from "../services/sync/codeRestore";
 import { checkVaultAgainstLegacy, getLegacyCopyStatus, removeLegacyCopy } from "../services/vault/legacyCopy";
 import { userFacingMessage } from "../services/errors/userMessage";
+import { getPremiumStatus, refreshPremium, restorePurchases, showPaywall, subscribePremium, type PremiumStatus } from "../services/billing/premium";
+import { premiumStatusText } from "../services/billing/statusText";
+import { exportToChosenFolder } from "../services/export/exportData";
 
 /**
  * Speech-to-text engine and AI chat model management used to live here too
@@ -51,7 +55,7 @@ import { userFacingMessage } from "../services/errors/userMessage";
  * download step, so there's nothing left here for either of them to manage.
  */
 
-type BusyAction = "connect" | "backup" | "disconnect" | "restore" | "wipe" | "privacy" | "legacy" | null;
+type BusyAction = "connect" | "backup" | "disconnect" | "restore" | "wipe" | "privacy" | "legacy" | "premium" | "export" | null;
 type CodePrompt = { purpose: "restore" | "join"; busy: boolean; error: string | null } | null;
 
 function formatBytes(bytes: number): string {
@@ -84,6 +88,58 @@ export default function SettingsScreen() {
   const [protection, setProtection] = useState<BackupProtectionStatus>({ account: null, local: { mode: "standard" }, googleOnlyBackups: null });
   const [setupMode, setSetupMode] = useState<"activate" | "replace" | null>(null);
   const [codePrompt, setCodePrompt] = useState<CodePrompt>(null);
+  const [premium, setPremium] = useState<PremiumStatus>(getPremiumStatus());
+  useEffect(() => {
+    const unsubscribe = subscribePremium(setPremium);
+    void refreshPremium().then(setPremium).catch(() => {});
+    return unsubscribe;
+  }, []);
+
+  const handleRestorePurchases = useCallback(async () => {
+    setBusyAction("premium");
+    try {
+      const result = await restorePurchases();
+      Alert.alert(
+        "Restore purchases",
+        result.kind === "restored"
+          ? "Xayra Premium is active on this phone."
+          : result.kind === "nothing"
+            ? "No active Premium subscription was found for this Google account."
+            : result.kind === "offline"
+              ? "You're offline. Connect to the internet and try again."
+              : "Purchases couldn't be restored right now. Please try again later."
+      );
+    } finally {
+      setBusyAction(null);
+    }
+  }, []);
+
+  // "Export my notes": user-initiated only, written straight to a folder the
+  // user picks, never uploaded — and the file isn't encrypted, said up front.
+  const handleExport = useCallback(() => {
+    Alert.alert(
+      "Export your notes?",
+      "This saves all your notes and to-dos as a plain-text file in a folder you choose. The file isn't encrypted — anyone who can open it can read your notes.",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Choose folder",
+          onPress: () => {
+            setBusyAction("export");
+            void exportToChosenFolder()
+              .then((result) => {
+                if (result.kind === "saved") {
+                  Alert.alert("Export saved", `Saved ${result.notes} notes and ${result.todos} to-dos. Keep the file somewhere safe.`);
+                } else if (result.kind === "failed") {
+                  Alert.alert("Export didn't finish", "Nothing was saved. Please try again.");
+                }
+              })
+              .finally(() => setBusyAction(null));
+          },
+        },
+      ]
+    );
+  }, []);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -451,7 +507,41 @@ export default function SettingsScreen() {
           <Text style={styles.title}>Settings</Text>
         </View>
 
-        <Text style={styles.groupLabel}>Cloud backup</Text>
+        <Text style={styles.groupLabel}>Xayra Premium</Text>
+        <View style={styles.card}>
+          <Text style={styles.metaText}>{premiumStatusText(premium)}</Text>
+          {!premium.unavailable && !premium.premium ? (
+            <Pressable
+              onPress={() => showPaywall(null)}
+              style={({ pressed }) => [styles.primaryButton, styles.privacyButtonGap, pressed && styles.buttonPressed]}
+            >
+              <Text style={styles.primaryButtonText}>See plans</Text>
+            </Pressable>
+          ) : null}
+          {!premium.unavailable && !premium.devOverride ? (
+            <Pressable
+              onPress={() => void handleRestorePurchases()}
+              disabled={busyAction !== null}
+              style={({ pressed }) => [styles.secondaryButton, styles.privacyButtonGap, pressed && styles.buttonPressed]}
+            >
+              {busyAction === "premium" ? (
+                <ActivityIndicator color={colors.accent} size="small" />
+              ) : (
+                <Text style={styles.secondaryButtonText}>Restore purchases</Text>
+              )}
+            </Pressable>
+          ) : null}
+          {!premium.unavailable && !premium.devOverride && premium.state !== "none" && premium.managementUrl ? (
+            <Pressable
+              onPress={() => void Linking.openURL(premium.managementUrl!)}
+              style={({ pressed }) => [styles.secondaryButton, styles.privacyButtonGap, pressed && styles.buttonPressed]}
+            >
+              <Text style={styles.secondaryButtonText}>Manage subscription</Text>
+            </Pressable>
+          ) : null}
+        </View>
+
+        <Text style={[styles.groupLabel, styles.sectionSpacing]}>Cloud backup</Text>
         <View style={styles.card}>
           <View style={styles.cardHeaderRow}>
             <View style={styles.statusDotWrap}>
@@ -713,6 +803,17 @@ export default function SettingsScreen() {
               </Pressable>
             </>
           ) : null}
+          <Pressable
+            onPress={handleExport}
+            disabled={busyAction !== null || notesStoredLocally === 0}
+            style={({ pressed }) => [styles.secondaryButton, styles.privacyButtonGap, pressed && styles.buttonPressed]}
+          >
+            {busyAction === "export" ? (
+              <ActivityIndicator color={colors.accent} size="small" />
+            ) : (
+              <Text style={styles.secondaryButtonText}>Export my notes</Text>
+            )}
+          </Pressable>
           <Pressable
             onPress={handleWipeAllNotes}
             disabled={busyAction !== null || (notesStoredLocally === 0 && !legacyCopyPresent)}
