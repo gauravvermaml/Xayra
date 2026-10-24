@@ -88,6 +88,10 @@ describe("privacy: what RevenueCat can receive", () => {
     const app = read("app.json");
     expect(JSON.parse(app).expo.extra.revenueCat).toEqual({ androidApiKey: expect.any(String) });
     expect(app).not.toMatch(/private_key|client_email|service_account/);
+    // Only RevenueCat's Google Play public key (or none). A Test Store key
+    // (test_) crashes release builds on purpose; a secret key (sk_) must never
+    // ship.
+    expect(JSON.parse(app).expo.extra.revenueCat.androidApiKey).toMatch(/^(goog_[A-Za-z0-9]+)?$/);
   });
 });
 

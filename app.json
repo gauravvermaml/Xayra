@@ -2,7 +2,7 @@
   "expo": {
     "name": "Xayra",
     "slug": "silent-confidant",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
@@ -21,7 +21,7 @@
         "backgroundColor": "#0E0F12"
       },
       "predictiveBackGestureEnabled": false,
-      "versionCode": 52,
+      "versionCode": 53,
       "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.USE_BIOMETRIC",
@@ -117,7 +117,7 @@
     ],
     "extra": {
       "revenueCat": {
-        "androidApiKey": ""
+        "androidApiKey": "goog_fgSwmANaJAGmjVHRpyHwzefMRvO"
       },
       "router": {},
       "eas": {
